@@ -21,12 +21,12 @@ with st.sidebar:
         value=os.getenv("AIAPI_URL", "https://api.bltcy.ai/v1/chat/completions"),
     )
     base_url = st.text_input(
-        "OpenAI base_url (可选)",
+        "OpenAI base_url (填根路径, 不要带 /chat/completions)",
         value=os.getenv("OPENAI_BASE_URL", ""),
         placeholder="https://api.openai.com/v1",
     )
     api_key = st.text_input("API Key (留空则用环境变量)", type="password")
-    st.caption("优先使用中转 API URL；为空则走 base_url；都空则默认官方。API Key 优先使用输入，其次环境变量 OPENAI_API_KEY。")
+    st.caption("优先使用中转 API URL；为空则走 base_url；都空则默认官方。base_url 只填根路径，如 https://api.bltcy.ai/v1。API Key 优先使用输入，其次环境变量 OPENAI_API_KEY。")
 
 run = st.button("生成转译稿", type="primary")
 
@@ -56,4 +56,5 @@ st.markdown("---")
 st.markdown(
     "**使用说明**：填写中转 API URL 时优先走中转（已默认填入示例 https://api.bltcy.ai/v1/chat/completions）；未填则使用 base_url/官方。可通过环境变量设置 AIAPI_URL、OPENAI_BASE_URL、OPENAI_API_KEY。"
 )
+
 

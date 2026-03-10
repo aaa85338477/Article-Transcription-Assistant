@@ -150,6 +150,10 @@ def generate_localized_text(
     client_params = {"api_key": api_key}
     base_url = base_url or os.getenv("OPENAI_BASE_URL")
     if base_url:
+        base_url = base_url.rstrip("/")
+        # 防止用户填入完整端点导致重复 /chat/completions/chat/completions
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url.rsplit("/chat/completions", 1)[0]
         client_params["base_url"] = base_url
     client = OpenAI(**client_params)
 
@@ -166,7 +170,7 @@ def generate_localized_text(
 def main():
     parser = argparse.ArgumentParser(description="Fetch article URL and localize to CN game ops style")
     parser.add_argument("url", help="文章 URL")
-    parser.add_argument("--model", default="gemini-3.1-flash-lite-preview", help="OpenAI 模型名，默认 gpt-4o")
+    parser.add_argument("--model", default="gemini-3.1-flash-lite-preview", help="OpenAI 模型名，默认 gemini-3.1-flash-lite-preview")
     parser.add_argument("--max-tokens", type=int, default=1800, help="输出最大 tokens，默认 1800")
     parser.add_argument("--lang", default="zh", help="输出语言，占位参数")
     parser.add_argument("--api-url", default=os.getenv("AIAPI_URL"), help="自定义中转 API URL (优先级最高)")
