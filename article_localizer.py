@@ -68,16 +68,51 @@ def build_user_prompt(article_text: str, source_url: str, title: Optional[str]) 
     ).strip()
 
 
+def _call_via_requests(
+    api_url: str,
+    api_key: str,
+    model: str,
+    messages: list,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "DMXAPI/1.0.0",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    resp = requests.post(api_url, headers=headers, json=payload, timeout=60)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"中转 API 请求失败: {resp.status_code} {resp.text}")
+    data = resp.json()
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception:
+        raise RuntimeError(f"解析中转 API 响应失败: {data}")
+
+
 def generate_localized_text(
     url: str,
-    model: str = "gpt-4o",
+    model: str = "gemini-3.1-flash-lite-preview",
     max_tokens: int = 1800,
     temperature: float = 0.6,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
+    api_url: Optional[str] = None,
 ) -> str:
     """
-    Fetch article, build prompt, and call OpenAI to generate localized output.
+    Fetch article, build prompt, and call OpenAI-compatible API to generate localized output.
+
+    优先级：
+    1) api_url 提供时走中转站示例的 HTTP 调用。
+    2) 否则使用 OpenAI SDK，可通过 base_url/OPENAI_BASE_URL 指向中转。
     """
     api_key = api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -92,7 +127,28 @@ def generate_localized_text(
 
     user_prompt = build_user_prompt(article_text, url, title)
 
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一名在中国工作的海外手游发行运营从业者，精通买量、长线运营、商业化、产品设计与用户增长，善于把海外文章转译成中国手游行业从业者习惯的公众号口吻。",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # Path 1: direct requests to relay API
+    if api_url:
+        return _call_via_requests(
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    # Path 2: OpenAI SDK (supports base_url for relay)
     client_params = {"api_key": api_key}
+    base_url = base_url or os.getenv("OPENAI_BASE_URL")
     if base_url:
         client_params["base_url"] = base_url
     client = OpenAI(**client_params)
@@ -101,13 +157,7 @@ def generate_localized_text(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
-        messages=[
-            {
-                "role": "system",
-                "content": "你是一名在中国工作的海外手游发行运营从业者，精通买量、长线运营、商业化、产品设计与用户增长，善于把海外文章转译成中国手游行业从业者习惯的公众号口吻。",
-            },
-            {"role": "user", "content": user_prompt},
-        ],
+        messages=messages,
     )
 
     return completion.choices[0].message.content.strip()
@@ -116,9 +166,11 @@ def generate_localized_text(
 def main():
     parser = argparse.ArgumentParser(description="Fetch article URL and localize to CN game ops style")
     parser.add_argument("url", help="文章 URL")
-    parser.add_argument("--model", default="gpt-4o", help="OpenAI 模型名，默认 gpt-4o")
+    parser.add_argument("--model", default="gemini-3.1-flash-lite-preview", help="OpenAI 模型名，默认 gpt-4o")
     parser.add_argument("--max-tokens", type=int, default=1800, help="输出最大 tokens，默认 1800")
     parser.add_argument("--lang", default="zh", help="输出语言，占位参数")
+    parser.add_argument("--api-url", default=os.getenv("AIAPI_URL"), help="自定义中转 API URL (优先级最高)")
+    parser.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL"), help="OpenAI SDK base_url，自建/中转时使用")
     args = parser.parse_args()
 
     try:
@@ -126,6 +178,8 @@ def main():
             url=args.url,
             model=args.model,
             max_tokens=args.max_tokens,
+            base_url=args.base_url,
+            api_url=args.api_url,
         )
     except Exception as e:
         sys.stderr.write(f"处理失败: {e}\n")
@@ -136,3 +190,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

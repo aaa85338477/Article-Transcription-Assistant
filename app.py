@@ -12,13 +12,21 @@ url = st.text_input("文章 URL", placeholder="https://example.com/article")
 
 with st.sidebar:
     st.header("生成设置")
-    default_model = os.getenv("OPENAI_MODEL", "gpt-4o")
+    default_model = os.getenv("OPENAI_MODEL", "gemini-3.1-flash-lite-preview")
     model = st.text_input("模型名", value=default_model)
     temperature = st.slider("Temperature", 0.0, 1.0, 0.6, 0.05)
     max_tokens = st.slider("Max tokens", 600, 2400, 1800, 100)
-    base_url = st.text_input("自定义 Base URL (可选)", placeholder="https://api.openai.com/v1")
+    api_url = st.text_input(
+        "中转 API URL (优先级最高)",
+        value=os.getenv("AIAPI_URL", "https://api.bltcy.ai/v1/chat/completions"),
+    )
+    base_url = st.text_input(
+        "OpenAI base_url (可选)",
+        value=os.getenv("OPENAI_BASE_URL", ""),
+        placeholder="https://api.openai.com/v1",
+    )
     api_key = st.text_input("API Key (留空则用环境变量)", type="password")
-    st.caption("提示：可在部署平台上通过环境变量设置 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL。")
+    st.caption("优先使用中转 API URL；为空则走 base_url；都空则默认官方。API Key 优先使用输入，其次环境变量 OPENAI_API_KEY。")
 
 run = st.button("生成转译稿", type="primary")
 
@@ -28,13 +36,16 @@ if run:
     else:
         with st.spinner("AI 正在生成公众号稿件，请稍候..."):
             try:
+                api_url_final = api_url.strip() or None
+                base_url_final = base_url.strip() or None
                 output = generate_localized_text(
                     url=url.strip(),
-                    model=model.strip() or "gpt-4o",
+                    model=model.strip() or "gemini-3.1-flash-lite-preview",
                     max_tokens=max_tokens,
                     temperature=temperature,
                     api_key=api_key or None,
-                    base_url=base_url.strip() or None,
+                    base_url=base_url_final,
+                    api_url=api_url_final,
                 )
                 st.success("生成完成，可直接复制到公众号后台。")
                 st.markdown(output)
@@ -42,4 +53,7 @@ if run:
                 st.error(f"生成失败：{e}")
 
 st.markdown("---")
-st.markdown("**使用说明**：左侧可调整模型、temperature 和 tokens；如需自建网关请填写 Base URL；未填 API Key 时优先读取环境变量 OPENAI_API_KEY。")
+st.markdown(
+    "**使用说明**：填写中转 API URL 时优先走中转（已默认填入示例 https://api.bltcy.ai/v1/chat/completions）；未填则使用 base_url/官方。可通过环境变量设置 AIAPI_URL、OPENAI_BASE_URL、OPENAI_API_KEY。"
+)
+
