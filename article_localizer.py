@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import requests
 from bs4 import BeautifulSoup
 import trafilatura
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
 from openai import OpenAI
 
 
@@ -42,8 +43,30 @@ def extract_article(html: str, url: str) -> Tuple[str, Optional[str]]:
     return text, title
 
 
-def build_user_prompt(article_text: str, source_url: str, title: Optional[str]) -> str:
+def extract_youtube_id(url: str) -> Optional[str]:
+    if "v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[1].split("?")[0]
+    return None
+
+
+def fetch_yt_transcript(yt_url: str) -> Optional[str]:
+    video_id = extract_youtube_id(yt_url)
+    if not video_id:
+        return None
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
+        return " ".join(item.get("text", "") for item in transcript if item.get("text"))
+    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable):
+        return None
+    except Exception:
+        return None
+
+
+def build_user_prompt(article_text: str, source_url: str, title: Optional[str], yt_summary: Optional[str]) -> str:
     article_preview = article_text.strip()
+    video_block = f"\n视频参考章节总结：\n{yt_summary}\n" if yt_summary else ""
     return textwrap.dedent(
         f"""
         Prompt：
@@ -114,18 +137,12 @@ def build_user_prompt(article_text: str, source_url: str, title: Optional[str]) 
         原文标题: {title or '未知'}
         原文内容如下（按需取用，可重组）：
         {article_preview}
+        {video_block}
         """
     ).strip()
 
 
-def _call_via_requests(
-    api_url: str,
-    api_key: str,
-    model: str,
-    messages: list,
-    temperature: float,
-    max_tokens: int,
-) -> str:
+def _call_via_requests(api_url: str, api_key: str, model: str, messages: list, temperature: float, max_tokens: int) -> str:
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -148,6 +165,43 @@ def _call_via_requests(
         raise RuntimeError(f"解析中转 API 响应失败: {data}")
 
 
+def summarize_video(transcript_text: str, model: str, temperature: float, max_tokens: int, api_key: str, base_url: Optional[str], api_url: Optional[str]) -> Optional[str]:
+    if not transcript_text:
+        return None
+    summary_prompt = textwrap.dedent(
+        f"""
+        请将下面的英文视频转录内容做成结构化的分章节总结，输出格式：
+        1. [时间戳] 章节标题 - 核心要点（中文）
+        2. ...
+        时间戳按分秒标记到分钟级即可，例如 [03:15]。
+        语言使用中文行业口吻，聚焦游戏发行/运营相关信息。
+
+        视频转录：
+        {transcript_text}
+        """
+    ).strip()
+    messages = [
+        {"role": "system", "content": "你是资深游戏发行运营，擅长将英文视频要点总结成中文章节。"},
+        {"role": "user", "content": summary_prompt},
+    ]
+    if api_url:
+        return _call_via_requests(api_url, api_key, model, messages, temperature, max_tokens)
+    client_params = {"api_key": api_key}
+    if base_url:
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url.rsplit("/chat/completions", 1)[0]
+        client_params["base_url"] = base_url
+    client = OpenAI(**client_params)
+    completion = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        messages=messages,
+    )
+    return completion.choices[0].message.content.strip()
+
+
 def generate_localized_text(
     url: str,
     model: str = "gemini-3.1-flash-lite-preview",
@@ -156,13 +210,8 @@ def generate_localized_text(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     api_url: Optional[str] = None,
+    yt_url: Optional[str] = None,
 ) -> str:
-    """
-    Fetch article, build prompt, and call OpenAI-compatible API to generate localized output.
-    优先级：
-    1) api_url 提供时走中转站示例的 HTTP 调用。
-    2) 否则使用 OpenAI SDK，可通过 base_url/OPENAI_BASE_URL 指向中转。
-    """
     api_key = api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("请先设置 OPENAI_API_KEY")
@@ -174,7 +223,25 @@ def generate_localized_text(
     if len(article_text) > max_chars:
         article_text = article_text[:max_chars] + "\n...[内容截断]"
 
-    user_prompt = build_user_prompt(article_text, url, title)
+    yt_summary = None
+    if yt_url:
+        transcript = fetch_yt_transcript(yt_url)
+        if transcript:
+            transcript = transcript[:12000]
+            try:
+                yt_summary = summarize_video(
+                    transcript_text=transcript,
+                    model=model,
+                    temperature=0.5,
+                    max_tokens=600,
+                    api_key=api_key,
+                    base_url=base_url,
+                    api_url=api_url,
+                )
+            except Exception:
+                yt_summary = None
+
+    user_prompt = build_user_prompt(article_text, url, title, yt_summary)
 
     messages = [
         {
@@ -184,18 +251,9 @@ def generate_localized_text(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Path 1: direct requests to relay API
     if api_url:
-        return _call_via_requests(
-            api_url=api_url,
-            api_key=api_key,
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        return _call_via_requests(api_url, api_key, model, messages, temperature, max_tokens)
 
-    # Path 2: OpenAI SDK (supports base_url for relay)
     client_params = {"api_key": api_key}
     base_url = base_url or os.getenv("OPENAI_BASE_URL")
     if base_url:
@@ -223,6 +281,7 @@ def main():
     parser.add_argument("--lang", default="zh", help="输出语言，占位参数")
     parser.add_argument("--api-url", default=os.getenv("AIAPI_URL"), help="自定义中转 API URL (优先级最高)")
     parser.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL"), help="OpenAI SDK base_url，自建/中转时使用")
+    parser.add_argument("--yt-url", default=None, help="可选 YouTube 视频链接，用于生成章节参考")
     args = parser.parse_args()
 
     try:
@@ -232,6 +291,7 @@ def main():
             max_tokens=args.max_tokens,
             base_url=args.base_url,
             api_url=args.api_url,
+            yt_url=args.yt_url,
         )
     except Exception as e:
         sys.stderr.write(f"处理失败: {e}\n")

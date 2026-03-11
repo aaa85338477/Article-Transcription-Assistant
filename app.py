@@ -6,9 +6,10 @@ from article_localizer import generate_localized_text
 st.set_page_config(page_title="Game Ops Article Localizer", page_icon="🎮", layout="wide")
 
 st.title("海外游戏文章 · 本地化转译助手")
-st.write("输入英文文章链接，一键生成中国手游行业口吻的公众号稿件。")
+st.write("输入英文文章链接，一键生成中国手游行业口吻的公众号稿件。可选：附带 YouTube 视频自动章节总结作为参考。")
 
 url = st.text_input("文章 URL", placeholder="https://example.com/article")
+yt_url = st.text_input("YouTube 视频 URL (可选)", placeholder="https://www.youtube.com/watch?v=...")
 
 with st.sidebar:
     st.header("生成设置")
@@ -38,6 +39,7 @@ if run:
             try:
                 api_url_final = api_url.strip() or None
                 base_url_final = base_url.strip() or None
+                yt_url_final = yt_url.strip() or None
                 output = generate_localized_text(
                     url=url.strip(),
                     model=model.strip() or "gemini-3.1-flash-lite-preview",
@@ -46,6 +48,7 @@ if run:
                     api_key=api_key or None,
                     base_url=base_url_final,
                     api_url=api_url_final,
+                    yt_url=yt_url_final,
                 )
                 st.success("生成完成，可直接复制到公众号后台。")
                 st.markdown(output)
@@ -54,7 +57,5 @@ if run:
 
 st.markdown("---")
 st.markdown(
-    "**使用说明**：填写中转 API URL 时优先走中转（已默认填入示例 https://api.bltcy.ai/v1/chat/completions）；未填则使用 base_url/官方。可通过环境变量设置 AIAPI_URL、OPENAI_BASE_URL、OPENAI_API_KEY。"
+    "**使用说明**：填写中转 API URL 时优先走中转（已默认填入示例 https://api.bltcy.ai/v1/chat/completions）；未填则使用 base_url/官方。可通过环境变量设置 AIAPI_URL、OPENAI_BASE_URL、OPENAI_API_KEY。YouTube URL 可选，会先生成视频章节总结作为文章参考。"
 )
-
-
