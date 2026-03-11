@@ -16,7 +16,7 @@ with st.sidebar:
     default_model = os.getenv("OPENAI_MODEL", "gemini-3.1-flash-lite-preview")
     model = st.text_input("模型名", value=default_model)
     temperature = st.slider("Temperature", 0.0, 1.0, 0.6, 0.05)
-    max_tokens = st.slider("Max tokens", 600, 2400, 1800, 100)
+    max_tokens = st.slider("Max tokens", 600, 5000, 1800, 100)
     api_url = st.text_input(
         "中转 API URL (优先级最高)",
         value=os.getenv("AIAPI_URL", "https://api.bltcy.ai/v1/chat/completions"),
@@ -59,3 +59,4 @@ st.markdown("---")
 st.markdown(
     "**使用说明**：填写中转 API URL 时优先走中转（已默认填入示例 https://api.bltcy.ai/v1/chat/completions）；未填则使用 base_url/官方。可通过环境变量设置 AIAPI_URL、OPENAI_BASE_URL、OPENAI_API_KEY。YouTube URL 可选，会先生成视频章节总结作为文章参考。"
 )
+
