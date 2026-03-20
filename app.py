@@ -112,7 +112,7 @@ def extract_article_content(url):
             return None, "网页可能由动态 JS 渲染或存在强力验证码拦截，无法提取纯文本。"
 
     except Exception as e:
-        return None, f"文章抓取失败: {str(e)}")
+        return None, f"文章抓取失败: {str(e)}"
 
 # ==========================================
 # 2. 初始化 Session State (状态管理)
