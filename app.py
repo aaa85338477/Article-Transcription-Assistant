@@ -7,12 +7,12 @@ from docx import Document
 from openai import OpenAI
 import requests
 import json
+from bs4 import BeautifulSoup  # <--- 就是之前漏掉的这位救兵
 
 # ==========================================
 # 0. API 与外部推送函数
 # ==========================================
 def call_llm(api_key, model_name, system_prompt, user_content):
-    """通用的 LLM 调用函数，适配 DeerAPI (OpenAI 格式)"""
     if not api_key:
         st.error("⚠️ 请先在左侧边栏输入 DeerAPI Key！")
         st.stop()
@@ -36,7 +36,6 @@ def call_llm(api_key, model_name, system_prompt, user_content):
         st.stop()
 
 def push_to_feishu(text_content):
-    """推送到飞书机器人"""
     webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -112,7 +111,14 @@ def extract_article_content(url):
             return None, "网页可能由动态 JS 渲染或存在强力验证码拦截，无法提取纯文本。"
 
     except Exception as e:
+        # 这里已经修复了多余的括号
         return None, f"文章抓取失败: {str(e)}"
+
+def get_content_from_url(url):
+    if "youtube.com" in url or "youtu.be" in url:
+        return extract_youtube_transcript(url)
+    else:
+        return extract_article_content(url)
 
 # ==========================================
 # 2. 初始化 Session State (状态管理)
@@ -120,13 +126,10 @@ def extract_article_content(url):
 def init_state():
     if 'current_step' not in st.session_state:
         st.session_state.current_step = 1
-    
-    # 将单一的 source_url 拆分为文章和视频两个独立状态
     if 'article_url' not in st.session_state:
         st.session_state.article_url = ""
     if 'video_url' not in st.session_state:
         st.session_state.video_url = ""
-        
     if 'source_content' not in st.session_state:
         st.session_state.source_content = ""
     if 'extraction_success' not in st.session_state:
@@ -167,12 +170,11 @@ with st.sidebar:
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 
-# --- Step 1: 录入素材 (已修改为支持多链接) ---
+# --- Step 1: 录入素材 ---
 if st.session_state.current_step == 1:
     st.header("第一步：输入素材源")
     st.markdown("💡 **提示**：你可以同时填入文章链接和视频链接，或者只填其中一项，AI 会自动合并素材进行创作。")
     
-    # 采用左右两列布局，让界面更紧凑
     col1, col2 = st.columns(2)
     with col1:
         article_url_input = st.text_input("📝 输入文章链接 (可选)", value=st.session_state.article_url)
@@ -187,7 +189,6 @@ if st.session_state.current_step == 1:
                 combined_content = ""
                 errors = []
                 
-                # 分别处理文章链接
                 if article_url_input:
                     art_content, art_err = get_content_from_url(article_url_input)
                     if art_content:
@@ -196,7 +197,6 @@ if st.session_state.current_step == 1:
                     else:
                         errors.append(f"文章提取失败: {art_err}")
                         
-                # 分别处理视频链接
                 if video_url_input:
                     vid_content, vid_err = get_content_from_url(video_url_input)
                     if vid_content:
@@ -205,7 +205,6 @@ if st.session_state.current_step == 1:
                     else:
                         errors.append(f"视频提取失败: {vid_err}")
                 
-                # 判断最终结果
                 if combined_content:
                     st.session_state.source_content = combined_content
                     st.session_state.extraction_success = True
@@ -262,7 +261,7 @@ elif st.session_state.current_step == 3:
     st.divider()
     
     reviewer_prompt = st.text_area("🧐 审稿员 Prompt (可自由修改)", 
-                                   value="你是一个严苛的公众号主编。请对比【原始素材】和【初稿】，指出初稿中：\n1. 丢失的核心信息（特别注意是否漏掉了某个素材源的关键观点）\n2. 逻辑不顺畅或缺乏深度的部分\n3. 语气不够专业、像初级策划的地方\n请直接列出明确的修改建议，不要输出废话。", 
+                                   value="你是一个严苛的公众号主编。请对比【原始素材】和【初稿】，指出初稿中：\n1. 丢失的核心信息（特别注意是否漏掉了某个素材源的关键观点）\n2. 逻辑不顺畅或缺乏深度的部分\n3. 语气不够专业的地方\n请直接列出明确的修改建议，不要输出废话。", 
                                    height=150)
     
     col1, col2, col3 = st.columns(3)
@@ -306,56 +305,3 @@ elif st.session_state.current_step == 4:
             st.rerun()
     with col3:
         if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
-            with st.spinner("编辑正在根据主编意见进行修改..."):
-                modification_prompt = "你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。"
-                content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
-                
-                st.session_state.final_article = call_llm(
-                    api_key=api_key, 
-                    model_name=selected_model, 
-                    system_prompt=modification_prompt, 
-                    user_content=content_to_modify
-                )
-                go_to_step(5)
-                st.rerun()
-
-# --- Step 5: 最终输出与导出 ---
-elif st.session_state.current_step == 5:
-    st.header("第五步：文章定稿与导出")
-    
-    st.markdown("### 最终成稿 🏆")
-    st.write(st.session_state.final_article)
-    
-    st.divider()
-    
-    def create_docx(text):
-        doc = Document()
-        doc.add_paragraph(text)
-        bio = io.BytesIO()
-        doc.save(bio)
-        return bio.getvalue()
-        
-    docx_data = create_docx(st.session_state.final_article)
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-         st.download_button(
-            label="📄 导出 Word 文档",
-            data=docx_data,
-            file_name="公众号文章_定稿.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-    with col2:
-        if st.button("✈️ 一键推送飞书群"):
-            with st.spinner("正在推送到飞书..."):
-                success, msg = push_to_feishu(st.session_state.final_article)
-                if success:
-                    st.success("🎉 已成功推送到飞书群！")
-                    st.balloons()
-                else:
-                    st.error(f"❌ 推送失败：{msg}")
-    with col3:
-        if st.button("🔄 开启新一篇"):
-            for key in st.session_state.keys():
-                del st.session_state[key]
-            st.rerun()
