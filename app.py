@@ -5,35 +5,59 @@ from urllib.parse import urlparse, parse_qs
 import io
 from docx import Document
 from openai import OpenAI
+import requests
+import json
 
 # ==========================================
-# 0. 大模型 API 调用函数
+# 0. API 与外部推送函数
 # ==========================================
 def call_llm(api_key, model_name, system_prompt, user_content):
-    """通用的 LLM 调用函数，适配 DeerAPI 等 OpenAI 格式中转站"""
+    """通用的 LLM 调用函数，适配 DeerAPI (OpenAI 格式)"""
     if not api_key:
-        st.error("⚠️ 请先在左侧边栏输入 API Key！")
+        st.error("⚠️ 请先在左侧边栏输入 DeerAPI Key！")
         st.stop()
         
     try:
-        # 配置中转站的 Base URL
         client = OpenAI(
             api_key=api_key,
             base_url="https://api.deerapi.com/v1" 
         )
-        
         response = client.chat.completions.create(
             model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            temperature=0.7 # 给予模型一定的发散创造空间
+            temperature=0.7 
         )
         return response.choices[0].message.content
     except Exception as e:
         st.error(f"API 调用失败: {str(e)}")
         st.stop()
+
+def push_to_feishu(text_content):
+    """推送到飞书机器人"""
+    webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "msg_type": "text",
+        "content": {
+            "text": f"📣 【公众号文章定稿通知】\n\n{text_content}"
+        }
+    }
+    
+    try:
+        response = requests.post(webhook_url, headers=headers, data=json.dumps(payload))
+        if response.status_code == 200:
+            resp_json = response.json()
+            if resp_json.get("code") == 0:
+                return True, "推送成功"
+            else:
+                return False, f"飞书返回错误: {resp_json.get('msg')}"
+        else:
+            return False, f"HTTP 请求失败，状态码: {response.status_code}"
+    except Exception as e:
+        return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
 # 1. 核心抓取函数
@@ -117,7 +141,7 @@ with st.sidebar:
         "qwen3.5-flash"
     ])
     st.markdown("---")
-    st.markdown("💡 **Tip**: 遇到长文章或需要深度逻辑梳理时，建议切换到带 `thinking` 或参数量更大的模型。")
+    st.markdown("💡 **Tip**: 遇到长文拆解或需要拔高立意时，建议切换到带 `thinking` 的模型。")
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 
@@ -156,7 +180,7 @@ elif st.session_state.current_step == 2:
     
     editor_role = st.selectbox("选择【编辑】视角", ["资深游戏制作人", "海外发行总监", "核心主策划"])
     
-    default_prompt = f"你现在是一位{editor_role}。请以你的视角对以下原始素材进行深度转录。要求：\n1. 有前后铺垫，娓娓道来；\n2. 展现行业格局与深度认知；\n3. 不要受限于死板的格式，行文要流畅自然。"
+    default_prompt = f"你现在是一位{editor_role}。请以你的视角对以下原始素材进行深度转录。要求：\n1. 有前后铺垫，娓娓道来；\n2. 拔高格局，展现深刻的行业认知与产品思考；\n3. 结构要自然流畅，不要写成干瘪死板的汇报文档。"
     editor_prompt = st.text_area("✍️ 编辑 Prompt (可自由修改)", value=default_prompt, height=150)
     
     col1, col2 = st.columns([1, 4])
@@ -167,12 +191,11 @@ elif st.session_state.current_step == 2:
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在奋笔疾书，请耐心等待..."):
-                # 调用 LLM API
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
                     model_name=selected_model, 
                     system_prompt=editor_prompt, 
-                    user_content=st.session_state.source_content
+                    user_content=f"【原始素材】：\n{st.session_state.source_content}"
                 )
                 go_to_step(3)
                 st.rerun()
@@ -187,7 +210,7 @@ elif st.session_state.current_step == 3:
     st.divider()
     
     reviewer_prompt = st.text_area("🧐 审稿员 Prompt (可自由修改)", 
-                                   value="你是一个严苛的公众号主编。请对比【原始素材】和【初稿】，指出初稿中：\n1. 丢失的核心信息\n2. 逻辑不顺畅或缺乏深度的部分\n3. 语气不够专业的地方\n请直接列出明确的修改建议，不要输出废话。", 
+                                   value="你是一个严苛的公众号主编。请对比【原始素材】和【初稿】，指出初稿中：\n1. 丢失的核心信息\n2. 逻辑不顺畅或缺乏深度的部分\n3. 语气不够专业、像初级策划的地方\n请直接列出明确的修改建议，不要输出废话。", 
                                    height=150)
     
     col1, col2, col3 = st.columns(3)
@@ -203,7 +226,6 @@ elif st.session_state.current_step == 3:
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
             with st.spinner("主编正在审阅..."):
-                # 组合原文和初稿发送给审稿员
                 combined_content = f"【原始素材】：\n{st.session_state.source_content}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
                 st.session_state.review_feedback = call_llm(
                     api_key=api_key, 
@@ -273,8 +295,13 @@ elif st.session_state.current_step == 5:
         )
     with col2:
         if st.button("✈️ 一键推送飞书群"):
-            # TODO: 编写 requests 逻辑推送到飞书 Webhook
-            st.success("已成功推送到飞书！")
+            with st.spinner("正在推送到飞书..."):
+                success, msg = push_to_feishu(st.session_state.final_article)
+                if success:
+                    st.success("🎉 已成功推送到飞书群！")
+                    st.balloons()
+                else:
+                    st.error(f"❌ 推送失败：{msg}")
     with col3:
         if st.button("🔄 开启新一篇"):
             for key in st.session_state.keys():
