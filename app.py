@@ -274,17 +274,19 @@ elif st.session_state.current_step == 3:
             st.session_state.final_article = st.session_state.draft_article
             go_to_step(5)
             st.rerun()
-    with col3:
-        if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
-            with st.spinner("主编正在审阅..."):
-                combined_content = f"【原始素材】：\n{st.session_state.source_content}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
-                st.session_state.review_feedback = call_llm(
+with col3:
+        if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
+            with st.spinner("编辑正在根据主编意见进行修改..."):
+                modification_prompt = "你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。"
+                content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
+                
+                st.session_state.final_article = call_llm(
                     api_key=api_key, 
                     model_name=selected_model, 
-                    system_prompt=reviewer_prompt, 
-                    user_content=combined_content
+                    system_prompt=modification_prompt, 
+                    user_content=content_to_modify
                 )
-                go_to_step(4)
+                go_to_step(5)
                 st.rerun()
 
 # --- Step 4: 处理审查意见 ---
