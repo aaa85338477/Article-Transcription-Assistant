@@ -82,20 +82,37 @@ def extract_youtube_transcript(url):
         return None, f"YouTube 字幕抓取失败: {str(e)}"
 
 def extract_article_content(url):
+    """提取网页正文（带反爬伪装和备用解析方案）"""
     try:
+        # 尝试 1：用原生 trafilatura 抓取
         downloaded = trafilatura.fetch_url(url)
-        if downloaded is None:
-            return None, "网页下载失败，可能遭遇反爬或链接无效"
-        text = trafilatura.extract(downloaded)
-        return text, None if text else ("未能从网页中提取到有效正文", None)
-    except Exception as e:
-        return None, f"文章抓取失败: {str(e)}"
+        if downloaded:
+            text = trafilatura.extract(downloaded)
+            if text: return text, None
 
-def get_content_from_url(url):
-    if "youtube.com" in url or "youtu.be" in url:
-        return extract_youtube_transcript(url)
-    else:
-        return extract_article_content(url)
+        # 尝试 2：伪装成 Chrome 浏览器发起请求
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        # 将拿到的 HTML 交给 trafilatura 解析
+        text = trafilatura.extract(response.text)
+        if text: return text, None
+
+        # 尝试 3 (Fallback)：如果 trafilatura 还是提不出正文，用 BeautifulSoup 暴力提取所有段落
+        soup = BeautifulSoup(response.text, 'html.parser')
+        paragraphs = soup.find_all('p')
+        text = '\n'.join([p.get_text() for p in paragraphs])
+        
+        if text.strip():
+            return text, None
+        else:
+            return None, "网页可能由动态 JS 渲染或存在强力验证码拦截，无法提取纯文本。"
+
+    except Exception as e:
+        return None, f"文章抓取失败: {str(e)}")
 
 # ==========================================
 # 2. 初始化 Session State (状态管理)
