@@ -103,8 +103,13 @@ def get_content_from_url(url):
 def init_state():
     if 'current_step' not in st.session_state:
         st.session_state.current_step = 1
-    if 'source_url' not in st.session_state:
-        st.session_state.source_url = ""
+    
+    # 将单一的 source_url 拆分为文章和视频两个独立状态
+    if 'article_url' not in st.session_state:
+        st.session_state.article_url = ""
+    if 'video_url' not in st.session_state:
+        st.session_state.video_url = ""
+        
     if 'source_content' not in st.session_state:
         st.session_state.source_content = ""
     if 'extraction_success' not in st.session_state:
@@ -145,29 +150,59 @@ with st.sidebar:
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 
-# --- Step 1: 录入素材 ---
+# --- Step 1: 录入素材 (已修改为支持多链接) ---
 if st.session_state.current_step == 1:
     st.header("第一步：输入素材源")
-    url_input = st.text_input("🔗 输入文章或 YouTube 视频链接", value=st.session_state.source_url)
+    st.markdown("💡 **提示**：你可以同时填入文章链接和视频链接，或者只填其中一项，AI 会自动合并素材进行创作。")
+    
+    # 采用左右两列布局，让界面更紧凑
+    col1, col2 = st.columns(2)
+    with col1:
+        article_url_input = st.text_input("📝 输入文章链接 (可选)", value=st.session_state.article_url)
+    with col2:
+        video_url_input = st.text_input("📺 输入 YouTube 视频链接 (可选)", value=st.session_state.video_url)
     
     if st.button("开始提取内容"):
-        if url_input:
-            with st.spinner("正在抓取并解析内容..."):
-                content, error_msg = get_content_from_url(url_input)
-                if content:
-                    st.session_state.source_url = url_input
-                    st.session_state.source_content = content
+        if not article_url_input and not video_url_input:
+            st.warning("请至少输入一个链接！")
+        else:
+            with st.spinner("正在努力抓取并解析内容..."):
+                combined_content = ""
+                errors = []
+                
+                # 分别处理文章链接
+                if article_url_input:
+                    art_content, art_err = get_content_from_url(article_url_input)
+                    if art_content:
+                        combined_content += f"【文章素材】\n{art_content}\n\n================\n\n"
+                        st.session_state.article_url = article_url_input
+                    else:
+                        errors.append(f"文章提取失败: {art_err}")
+                        
+                # 分别处理视频链接
+                if video_url_input:
+                    vid_content, vid_err = get_content_from_url(video_url_input)
+                    if vid_content:
+                        combined_content += f"【视频播客素材】\n{vid_content}\n\n================\n\n"
+                        st.session_state.video_url = video_url_input
+                    else:
+                        errors.append(f"视频提取失败: {vid_err}")
+                
+                # 判断最终结果
+                if combined_content:
+                    st.session_state.source_content = combined_content
                     st.session_state.extraction_success = True
-                    st.success("🎉 内容提取成功！")
+                    if errors:
+                        st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
+                    else:
+                        st.success("🎉 所有素材提取成功！")
                 else:
                     st.session_state.extraction_success = False
-                    st.error(f"❌ 提取失败：{error_msg}")
-        else:
-            st.warning("请先输入链接！")
+                    st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
             
     if st.session_state.extraction_success:
         with st.expander("预览抓取到的原文", expanded=False):
-            preview_text = st.session_state.source_content[:1000] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1000 else st.session_state.source_content
+            preview_text = st.session_state.source_content[:1500] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1500 else st.session_state.source_content
             st.text(preview_text)
             
         if st.button("确认无误，继续下一步 👉"):
@@ -180,7 +215,7 @@ elif st.session_state.current_step == 2:
     
     editor_role = st.selectbox("选择【编辑】视角", ["资深游戏制作人", "海外发行总监", "核心主策划"])
     
-    default_prompt = f"你现在是一位{editor_role}。请以你的视角对以下原始素材进行深度转录。要求：\n1. 有前后铺垫，娓娓道来；\n2. 拔高格局，展现深刻的行业认知与产品思考；\n3. 结构要自然流畅，不要写成干瘪死板的汇报文档。"
+    default_prompt = f"你现在是一位{editor_role}。请以你的视角对以下原始素材进行深度融合与转录。要求：\n1. 有前后铺垫，娓娓道来；\n2. 拔高格局，展现深刻的行业认知与产品思考；\n3. 结构要自然流畅，不要写成干瘪死板的汇报文档。\n4. 如果提供了多个素材来源，请将它们的核心观点自然地结合起来。"
     editor_prompt = st.text_area("✍️ 编辑 Prompt (可自由修改)", value=default_prompt, height=150)
     
     col1, col2 = st.columns([1, 4])
@@ -195,7 +230,7 @@ elif st.session_state.current_step == 2:
                     api_key=api_key, 
                     model_name=selected_model, 
                     system_prompt=editor_prompt, 
-                    user_content=f"【原始素材】：\n{st.session_state.source_content}"
+                    user_content=f"以下是提供的素材内容：\n\n{st.session_state.source_content}"
                 )
                 go_to_step(3)
                 st.rerun()
@@ -210,7 +245,7 @@ elif st.session_state.current_step == 3:
     st.divider()
     
     reviewer_prompt = st.text_area("🧐 审稿员 Prompt (可自由修改)", 
-                                   value="你是一个严苛的公众号主编。请对比【原始素材】和【初稿】，指出初稿中：\n1. 丢失的核心信息\n2. 逻辑不顺畅或缺乏深度的部分\n3. 语气不够专业、像初级策划的地方\n请直接列出明确的修改建议，不要输出废话。", 
+                                   value="你是一个严苛的公众号主编。请对比【原始素材】和【初稿】，指出初稿中：\n1. 丢失的核心信息（特别注意是否漏掉了某个素材源的关键观点）\n2. 逻辑不顺畅或缺乏深度的部分\n3. 语气不够专业、像初级策划的地方\n请直接列出明确的修改建议，不要输出废话。", 
                                    height=150)
     
     col1, col2, col3 = st.columns(3)
