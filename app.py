@@ -77,6 +77,7 @@ def push_to_feishu(text_content):
 # 1. 核心抓取函数 (视觉增强 + 反懒加载版 + 新版字幕API支持)
 # ==========================================
 def extract_youtube_transcript(url):
+    """YouTube 字幕抓取（包含云端 IP 被封锁时的智能兜底穿透机制）"""
     try:
         parsed_url = urlparse(url)
         if 'youtube.com' in parsed_url.netloc:
@@ -89,42 +90,61 @@ def extract_youtube_transcript(url):
         if not video_id:
             return None, [], "无法解析 YouTube 链接"
 
-        # --- 核心升级：兼容 youtube-transcript-api 旧版 (0.x) 和新版 (1.x) ---
+        # --- 尝试 1：使用原生 API 抓取（如果没被封 IP 的话） ---
         target_langs = ['zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW', 'zh', 'en']
-        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
-            # 兼容旧版环境
-            transcript_fetched = YouTubeTranscriptApi.get_transcript(video_id, languages=target_langs)
-        else:
-            # 适配云端新版 1.x 环境
-            ytt_api = YouTubeTranscriptApi()
-            if hasattr(ytt_api, 'list'):
-                transcript_list = ytt_api.list(video_id)
-            elif hasattr(ytt_api, 'list_transcripts'):
-                transcript_list = ytt_api.list_transcripts(video_id)
+        try:
+            if hasattr(YouTubeTranscriptApi, 'get_transcript'):
+                transcript_fetched = YouTubeTranscriptApi.get_transcript(video_id, languages=target_langs)
             else:
-                transcript_fetched = ytt_api.fetch(video_id)
-                transcript_list = None
-                
-            if transcript_list is not None:
-                try:
-                    transcript = transcript_list.find_transcript(target_langs)
-                except Exception:
-                    # 找不到中英文字幕时，强行抓取列表中的第一个可用字幕进行兜底
-                    transcript = list(transcript_list)[0]
-                transcript_fetched = transcript.fetch()
+                ytt_api = YouTubeTranscriptApi()
+                if hasattr(ytt_api, 'list'):
+                    transcript_list = ytt_api.list(video_id)
+                elif hasattr(ytt_api, 'list_transcripts'):
+                    transcript_list = ytt_api.list_transcripts(video_id)
+                else:
+                    transcript_fetched = ytt_api.fetch(video_id)
+                    transcript_list = None
+                    
+                if transcript_list is not None:
+                    try:
+                        transcript = transcript_list.find_transcript(target_langs)
+                    except Exception:
+                        transcript = list(transcript_list)[0]
+                    transcript_fetched = transcript.fetch()
 
-        # 统一处理返回的文本（兼容不同版本返回字典或对象的差异）
-        texts = []
-        for item in transcript_fetched:
-            if isinstance(item, dict) and 'text' in item:
-                texts.append(item['text'])
-            elif hasattr(item, 'text'):
-                texts.append(item.text)
+            texts = []
+            for item in transcript_fetched:
+                if isinstance(item, dict) and 'text' in item:
+                    texts.append(item['text'])
+                elif hasattr(item, 'text'):
+                    texts.append(item.text)
+                else:
+                    texts.append(str(item))
+                    
+            text = "\n".join(texts)
+            return text, [], None
+            
+        except Exception as inner_e:
+            error_str = str(inner_e).lower()
+            # --- 尝试 2：检测到 IP 被封锁，自动启用 Jina Reader 穿透兜底 ---
+            if "block" in error_str or "proxy" in error_str or "could not retrieve a transcript" in error_str:
+                try:
+                    # 使用 Jina 的大模型解析中转站，它可以强行绕过 YouTube 的 IP 封锁获取文本
+                    jina_url = f"https://r.jina.ai/{url}"
+                    headers = {"Accept": "text/plain"}
+                    response = requests.get(jina_url, headers=headers, timeout=20)
+                    response.raise_for_status()
+                    
+                    text = response.text
+                    if text and len(text) > 50:
+                        return text, [], None
+                    else:
+                        return None, [], "原生API被封锁，且备用穿透解析器未返回有效文本。"
+                except Exception as jina_e:
+                    return None, [], f"YouTube 提取失败 (双重解析均被拦截): 原生报错({str(inner_e)[:30]}...) | 备用报错({str(jina_e)[:30]}...)"
             else:
-                texts.append(str(item))
-                
-        text = "\n".join(texts)
-        return text, [], None
+                raise inner_e # 如果不是因为封锁导致的报错，正常抛出
+
     except Exception as e:
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
 
