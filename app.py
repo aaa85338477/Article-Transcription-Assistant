@@ -98,7 +98,7 @@ def extract_youtube_transcript(url):
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
 
 def extract_article_content(url):
-    """图文双抓取逻辑"""
+    """图文双抓取逻辑（攻克懒加载与相对路径伪装）"""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -111,28 +111,43 @@ def extract_article_content(url):
         
         # 2. 提取并清洗图片
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 尽量锁定正文区域，避免抓到网页头部/尾部/侧边栏的无用小图标
+        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in c.lower()) or soup
+        
         images = []
-        for img in soup.find_all('img'):
-            src = img.get('src') or img.get('data-src')
+        for img in main_content.find_all('img'):
+            # 按优先级尝试获取真实图片 URL（专门对付现代网页的懒加载机制）
+            possible_attrs = ['data-original', 'data-lazy-src', 'data-src', 'src']
+            src = None
+            for attr in possible_attrs:
+                val = img.get(attr)
+                # 排除 base64 的透明占位图
+                if val and not val.startswith('data:image'):
+                    src = val
+                    break
+                    
             if not src:
                 continue
                 
-            # 处理相对路径
-            if src.startswith('/'):
+            # 处理各类奇怪的相对路径或协议省略 (如 //cdn.domain.com/img.jpg)
+            if src.startswith('//'):
+                src = 'https:' + src
+            elif src.startswith('/'):
                 parsed_url = urlparse(url)
                 src = f"{parsed_url.scheme}://{parsed_url.netloc}{src}"
             elif not src.startswith('http'):
                 continue
                 
-            # 过滤常见的干扰图片 (icon, logo, gif 等)
+            # 过滤常见的干扰图片 (去掉了 logo 以免误杀公司财报图)
             src_lower = src.lower()
-            junk_keywords = ['icon', 'logo', 'avatar', 'spinner', 'svg', 'gif', 'banner', 'button', 'tracker']
+            junk_keywords = ['icon', 'avatar', 'spinner', 'svg', 'gif', 'button', 'tracker', 'footer', 'sidebar']
             if any(junk in src_lower for junk in junk_keywords):
                 continue
                 
             if src not in images:
                 images.append(src)
-                # 为防止大模型 Token 爆炸，每篇文章最多抓取前 5 张核心配图
+                # 为防止大模型 Token 爆炸，最多抓取前 5 张核心配图
                 if len(images) >= 5:
                     break
         
@@ -147,12 +162,6 @@ def extract_article_content(url):
             return None, [], "未能提取到有效纯文本。"
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
-
-def get_content_from_url(url):
-    if "youtube.com" in url or "youtu.be" in url:
-        return extract_youtube_transcript(url)
-    else:
-        return extract_article_content(url)
 
 # ==========================================
 # 2. 状态管理与 Prompt 预设
