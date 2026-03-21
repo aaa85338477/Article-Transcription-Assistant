@@ -74,10 +74,9 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数 (视觉增强 + 反懒加载版 + 新版字幕API支持)
+# 1. 核心抓取函数
 # ==========================================
 def extract_youtube_transcript(url):
-    """YouTube 字幕抓取（包含云端 IP 被封锁时的智能兜底穿透机制）"""
     try:
         parsed_url = urlparse(url)
         if 'youtube.com' in parsed_url.netloc:
@@ -90,7 +89,6 @@ def extract_youtube_transcript(url):
         if not video_id:
             return None, [], "无法解析 YouTube 链接"
 
-        # --- 尝试 1：使用原生 API 抓取（如果没被封 IP 的话） ---
         target_langs = ['zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW', 'zh', 'en']
         try:
             if hasattr(YouTubeTranscriptApi, 'get_transcript'):
@@ -126,10 +124,8 @@ def extract_youtube_transcript(url):
             
         except Exception as inner_e:
             error_str = str(inner_e).lower()
-            # --- 尝试 2：检测到 IP 被封锁，自动启用 Jina Reader 穿透兜底 ---
             if "block" in error_str or "proxy" in error_str or "could not retrieve a transcript" in error_str:
                 try:
-                    # 使用 Jina 的大模型解析中转站，它可以强行绕过 YouTube 的 IP 封锁获取文本
                     jina_url = f"https://r.jina.ai/{url}"
                     headers = {"Accept": "text/plain"}
                     response = requests.get(jina_url, headers=headers, timeout=20)
@@ -143,7 +139,7 @@ def extract_youtube_transcript(url):
                 except Exception as jina_e:
                     return None, [], f"YouTube 提取失败 (双重解析均被拦截): 原生报错({str(inner_e)[:30]}...) | 备用报错({str(jina_e)[:30]}...)"
             else:
-                raise inner_e # 如果不是因为封锁导致的报错，正常抛出
+                raise inner_e
 
     except Exception as e:
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
@@ -171,75 +167,63 @@ def extract_article_content(url):
             
         main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
 
-        text_nodes = [n for n in main_content.find_all(['p', 'h2', 'h3', 'li']) if len(n.get_text(strip=True)) > 20]
-        valid_ancestors = set()
-        for node in text_nodes:
-            curr = node.parent
-            depth = 0
-            while curr and curr.name not in ['body', 'html'] and depth < 8:
-                valid_ancestors.add(curr)
-                curr = curr.parent
-                depth += 1
-                
-        candidates = []
+        images = []
         for img in main_content.find_all('img'):
-            possible_attrs = ['data-original', 'data-lazy-src', 'data-src', 'src']
+            try:
+                html_w = int(img.get('width', 0))
+                html_h = int(img.get('height', 0))
+            except:
+                html_w, html_h = 0, 0
+                
             src = None
-            for attr in possible_attrs:
-                val = img.get(attr)
-                if val:
-                    if isinstance(val, list): val = val[0]
-                    val = str(val).strip()
-                    if not val.startswith('data:image'):
-                        src = val
-                        break
-                        
+            srcset = img.get('data-srcset') or img.get('srcset')
+            if srcset:
+                sources = []
+                for s in srcset.split(','):
+                    parts = s.strip().split()
+                    if len(parts) == 2 and parts[1].endswith('w') and parts[1][:-1].isdigit():
+                        sources.append((parts[0], int(parts[1][:-1])))
+                if sources:
+                    sources.sort(key=lambda x: x[1], reverse=True)
+                    src = sources[0][0]
+                    
+            if not src:
+                for attr in ['data-original', 'data-lazy-src', 'data-src', 'src']:
+                    val = img.get(attr)
+                    if val:
+                        if isinstance(val, list): val = val[0]
+                        val = str(val).strip()
+                        if not val.startswith('data:image'):
+                            src = val
+                            break
+                            
             if not src: continue
                 
-            if src.startswith('//'):
-                src = 'https:' + src
+            if src.startswith('//'): src = 'https:' + src
             elif src.startswith('/'):
                 parsed_url = urlparse(url)
                 src = f"{parsed_url.scheme}://{parsed_url.netloc}{src}"
-            elif not src.startswith('http'):
-                continue
+            elif not src.startswith('http'): continue
                 
             src_lower = src.lower()
             junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'avatar']
             if any(junk in src_lower for junk in junk_keywords):
                 continue
                 
-            match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
-            if match:
-                w, h = int(match.group(1)), int(match.group(2))
-                if w <= 300 or h <= 300:
-                    continue
-
-            if src not in [c['src'] for c in candidates]:
-                candidates.append({'src': src, 'node': img})
-
-        strict_images = []
-        for item in candidates:
-            curr = item['node'].parent
-            is_in_text_flow = False
-            depth = 0
-            while curr and curr.name not in ['body', 'html'] and depth < 8:
-                if curr in valid_ancestors:
-                    is_in_text_flow = True
-                    break
-                curr = curr.parent
-                depth += 1
-                
-            if is_in_text_flow:
-                strict_images.append(item['src'])
-                if len(strict_images) >= 8:
+            if html_w >= 300 or html_h >= 300:
+                pass 
+            else:
+                match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
+                if match:
+                    mw, mh = int(match.group(1)), int(match.group(2))
+                    if mw <= 300 or mh <= 300:
+                        continue
+                        
+            if src not in images:
+                images.append(src)
+                if len(images) >= 8:
                     break
         
-        if not strict_images and candidates:
-            images = [item['src'] for item in candidates][:8]
-        else:
-            images = strict_images
-
         if not text:
             paragraphs = soup.find_all('p')
             text = '\n'.join([p.get_text() for p in paragraphs])
@@ -260,7 +244,6 @@ def get_content_from_url(url):
 # ==========================================
 # 2. 状态管理与 Prompt 预设
 # ==========================================
-# ⚠️ 注意：请把你 Excel 里的内容直接覆盖掉下面五段文字
 DEFAULT_PROMPTS = {
     "发行主编": """我是发行主编的默认Prompt，请将 sheet1 的内容完整粘贴覆盖这段文字。""",
     
@@ -357,7 +340,7 @@ if st.session_state.current_step == 1:
         if not article_url_input and not video_url_input:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("启动全息视网膜与字幕联合解析引擎..."):
+            with st.spinner("启动全息解析引擎，智能获取素材..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
@@ -389,7 +372,7 @@ if st.session_state.current_step == 1:
                         if len(extracted_imgs) > 0:
                             st.success(f"🎉 成功提取素材内容！共为您提取到 {len(extracted_imgs)} 张核心配图。")
                         else:
-                            st.success("🎉 成功提取素材内容！")
+                            st.success("🎉 成功提取素材内容！(该文章无有效配图，将走纯文本模式)")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
@@ -427,12 +410,18 @@ elif st.session_state.current_step == 2:
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
+                # --- 动态组装 user_content，防止 Claude 报错 ---
+                if st.session_state.source_images:
+                    editor_user_content = f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}"
+                else:
+                    editor_user_content = f"以下是提供的素材内容，请根据纯文本进行深度分析：\n\n{st.session_state.source_content}"
+                
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
                     base_url=current_base_url,
                     model_name=selected_model, 
                     system_prompt=editor_prompt, 
-                    user_content=f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}",
+                    user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
                 go_to_step(3)
@@ -461,17 +450,28 @@ elif st.session_state.current_step == 3:
             st.rerun()
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
-            with st.spinner("主编正在核对图表和原文..."):
-                anti_hallucination_instruction = """
-                \n\n【⚠️ 强制系统级指令：严禁幻觉】：
-                你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！
-                绝对不允许使用你自身的内部知识库进行事实核对。
-                如果【初稿】中写了某个数据或结论，只要它在【原始素材文本】或【参考配图】中存在依据，你就必须判定它是正确的。
-                绝对不允许以“我不知道”或“原文未提及”为由去否认实际存在的内容！如果确实无中生有，请明确指出。
-                """
+            with st.spinner("主编正在核对原文..."):
+                # --- 动态下发防幻觉指令 ---
+                if st.session_state.source_images:
+                    anti_hallucination_instruction = """
+                    \n\n【⚠️ 强制系统级指令：严禁幻觉】：
+                    你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！
+                    绝对不允许使用你自身的内部知识库进行事实核对。
+                    如果【初稿】中写了某个数据或结论，只要它在【原始素材文本】或【参考配图】中存在依据，你就必须判定它是正确的。
+                    绝对不允许以“我不知道”或“原文未提及”为由去否认实际存在的内容！如果确实无中生有，请明确指出。
+                    """
+                    combined_content = f"下面是【原始素材文本】（这是你唯一的真相来源，请结合图片一起审查）：\n{st.session_state.source_content}\n\n================\n\n下面是【初稿】（你需要找茬的内容）：\n{st.session_state.draft_article}"
+                else:
+                    anti_hallucination_instruction = """
+                    \n\n【⚠️ 强制系统级指令：严禁幻觉】：
+                    你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！
+                    绝对不允许使用你自身的内部知识库进行事实核对。
+                    如果【初稿】中写了某个数据或结论，只要它在【原始素材文本】中存在依据，你就必须判定它是正确的。
+                    绝对不允许以“我不知道”或“原文未提及”为由去否认实际存在的内容！如果确实无中生有，请明确指出。
+                    """
+                    combined_content = f"下面是【原始素材文本】（这是你唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n\n下面是【初稿】（你需要找茬的内容）：\n{st.session_state.draft_article}"
                 
                 final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
-                combined_content = f"下面是【原始素材文本】（这是你唯一的真相来源，请结合图片一起审查）：\n{st.session_state.source_content}\n\n================\n\n下面是【初稿】（你需要找茬的内容）：\n{st.session_state.draft_article}"
                 
                 st.session_state.review_feedback = call_llm(
                     api_key=api_key, 
