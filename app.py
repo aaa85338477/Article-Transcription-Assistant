@@ -74,7 +74,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数 (引入“正文领地”探测算法)
+# 1. 核心抓取函数 (弹性 DOM 深度 + 兜底回退)
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -117,37 +117,23 @@ def extract_article_content(url):
         for noise in soup.find_all(attrs={'id': lambda i: i and any(k in str(i).lower() for k in noise_keywords)}):
             noise.decompose()
             
-        # 2. 划定“正文领地 (Text Territory)”
-        # 找到所有包含实际文字内容的段落和标题
-        text_nodes = [n for n in soup.find_all(['p', 'h2', 'h3', 'li']) if len(n.get_text(strip=True)) > 20]
+        # 锁定最大的内容框
+        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
+
+        # 2. 划定“正文领地”基站 (深度扩大至 8 层)
+        text_nodes = [n for n in main_content.find_all(['p', 'h2', 'h3', 'li']) if len(n.get_text(strip=True)) > 20]
         valid_ancestors = set()
         for node in text_nodes:
             curr = node.parent
             depth = 0
-            # 向上追溯 4 层容器，这些容器被认定为“合法的正文区域”
-            while curr and curr.name not in ['body', 'html'] and depth < 4:
+            while curr and curr.name not in ['body', 'html'] and depth < 8:
                 valid_ancestors.add(curr)
                 curr = curr.parent
                 depth += 1
                 
-        images = []
-        for img in soup.find_all('img'):
-            # 3. 核心判定：图片是否“夹杂在正文中间”？
-            curr = img.parent
-            is_in_text_flow = False
-            depth = 0
-            while curr and curr.name not in ['body', 'html'] and depth < 4:
-                if curr in valid_ancestors:
-                    is_in_text_flow = True
-                    break
-                curr = curr.parent
-                depth += 1
-                
-            # 如果图片不在文字领地内，直接扔掉！
-            if not is_in_text_flow:
-                continue
-
-            # 4. 提取懒加载的真实链接
+        # 3. 收集所有潜力图片（先不过滤领地）
+        candidates = []
+        for img in main_content.find_all('img'):
             possible_attrs = ['data-original', 'data-lazy-src', 'data-src', 'src']
             src = None
             for attr in possible_attrs:
@@ -161,7 +147,6 @@ def extract_article_content(url):
                         
             if not src: continue
                 
-            # 处理相对路径
             if src.startswith('//'):
                 src = 'https:' + src
             elif src.startswith('/'):
@@ -170,25 +155,46 @@ def extract_article_content(url):
             elif not src.startswith('http'):
                 continue
                 
-            # 过滤干扰特征词
             src_lower = src.lower()
-            junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'logo', 'avatar']
+            # 移除了 logo，防止误杀大厂的数据图
+            junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'avatar']
             if any(junk in src_lower for junk in junk_keywords):
                 continue
                 
-            # 过滤低像素缩略图 (如 -150x150.jpg)
             match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
             if match:
                 w, h = int(match.group(1)), int(match.group(2))
                 if w <= 300 or h <= 300:
                     continue
 
-            if src not in images:
-                images.append(src)
-                # 为防止大图过多，最多提取正文里的前 8 张核心图表
-                if len(images) >= 8:
+            if src not in [c['src'] for c in candidates]:
+                candidates.append({'src': src, 'node': img})
+
+        # 4. 严格模式：判定是否在“正文领地”中
+        strict_images = []
+        for item in candidates:
+            curr = item['node'].parent
+            is_in_text_flow = False
+            depth = 0
+            while curr and curr.name not in ['body', 'html'] and depth < 8:
+                if curr in valid_ancestors:
+                    is_in_text_flow = True
+                    break
+                curr = curr.parent
+                depth += 1
+                
+            if is_in_text_flow:
+                strict_images.append(item['src'])
+                if len(strict_images) >= 8:
                     break
         
+        # 5. 双保险兜底机制：如果太严格导致 0 提取，直接退而求其次，返回所有清洗过的高清大图
+        if not strict_images and candidates:
+            images = [item['src'] for item in candidates][:8]
+        else:
+            images = strict_images
+
+        # 提取文字兜底
         if not text:
             paragraphs = soup.find_all('p')
             text = '\n'.join([p.get_text() for p in paragraphs])
@@ -200,7 +206,6 @@ def extract_article_content(url):
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
 
-# 确保路由函数存在
 def get_content_from_url(url):
     if "youtube.com" in url or "youtu.be" in url:
         return extract_youtube_transcript(url)
@@ -303,7 +308,7 @@ if st.session_state.current_step == 1:
         if not article_url_input and not video_url_input:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("正在利用DOM密度算法，精准狙击正文核心图表..."):
+            with st.spinner("启动弹性视觉引擎，深度定位正文图表..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
@@ -332,7 +337,10 @@ if st.session_state.current_step == 1:
                     if errors:
                         st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
                     else:
-                        st.success(f"🎉 成功锁定正文领地！共提取到 {len(extracted_imgs)} 张核心配图。")
+                        if len(extracted_imgs) > 0:
+                            st.success(f"🎉 弹性引擎触发成功！共为您提取到 {len(extracted_imgs)} 张核心配图。")
+                        else:
+                            st.success("🎉 素材提取成功！(该文章无有效正文图片)")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
