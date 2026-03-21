@@ -74,7 +74,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数 (弹性 DOM 深度 + 兜底回退)
+# 1. 核心抓取函数 (尺寸雷达 + srcset 视网膜解析)
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -106,95 +106,82 @@ def extract_article_content(url):
         text = trafilatura.extract(response.text)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. 物理大扫除（炸毁明显的无关区域）
-        noise_tags = ['aside', 'nav', 'footer', 'header']
-        for noise in soup.find_all(noise_tags):
+        # 1. 仅进行最基础的安全清理，绝不乱杀包裹层
+        for noise in soup.find_all(['aside', 'nav', 'footer']):
             noise.decompose()
-            
-        noise_keywords = ['author', 'related', 'comment', 'share', 'widget', 'sidebar', 'ad-container', 'popup', 'newsletter']
+        noise_keywords = ['comment', 'sidebar', 'widget', 'share', 'popup']
         for noise in soup.find_all(attrs={'class': lambda c: c and any(k in str(c).lower() for k in noise_keywords)}):
             noise.decompose()
-        for noise in soup.find_all(attrs={'id': lambda i: i and any(k in str(i).lower() for k in noise_keywords)}):
-            noise.decompose()
             
-        # 锁定最大的内容框
-        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
-
-        # 2. 划定“正文领地”基站 (深度扩大至 8 层)
-        text_nodes = [n for n in main_content.find_all(['p', 'h2', 'h3', 'li']) if len(n.get_text(strip=True)) > 20]
-        valid_ancestors = set()
-        for node in text_nodes:
-            curr = node.parent
-            depth = 0
-            while curr and curr.name not in ['body', 'html'] and depth < 8:
-                valid_ancestors.add(curr)
-                curr = curr.parent
-                depth += 1
+        images = []
+        for img in soup.find_all('img'):
+            # 2. 直接读取 HTML 里宣告的宽高属性
+            try:
+                html_w = int(img.get('width', 0))
+                html_h = int(img.get('height', 0))
+            except:
+                html_w, html_h = 0, 0
                 
-        # 3. 收集所有潜力图片（先不过滤领地）
-        candidates = []
-        for img in main_content.find_all('img'):
-            possible_attrs = ['data-original', 'data-lazy-src', 'data-src', 'src']
             src = None
-            for attr in possible_attrs:
-                val = img.get(attr)
-                if val:
-                    if isinstance(val, list): val = val[0]
-                    val = str(val).strip()
-                    if not val.startswith('data:image'):
-                        src = val
-                        break
-                        
+            
+            # 3. 优先解析 srcset 获取最高清的原图
+            srcset = img.get('data-srcset') or img.get('srcset')
+            if srcset:
+                sources = []
+                for s in srcset.split(','):
+                    parts = s.strip().split()
+                    # 匹配像 "url 1191w" 这样的格式
+                    if len(parts) == 2 and parts[1].endswith('w') and parts[1][:-1].isdigit():
+                        sources.append((parts[0], int(parts[1][:-1])))
+                if sources:
+                    # 按照宽度降序排列，取最大的那张
+                    sources.sort(key=lambda x: x[1], reverse=True)
+                    src = sources[0][0]
+                    
+            # 4. 如果没有 srcset，按顺序寻找兜底的高清路径
+            if not src:
+                for attr in ['data-original', 'data-lazy-src', 'data-src', 'src']:
+                    val = img.get(attr)
+                    if val:
+                        if isinstance(val, list): val = val[0]
+                        val = str(val).strip()
+                        if not val.startswith('data:image'):
+                            src = val
+                            break
+                            
             if not src: continue
                 
-            if src.startswith('//'):
-                src = 'https:' + src
+            # 处理相对路径
+            if src.startswith('//'): src = 'https:' + src
             elif src.startswith('/'):
                 parsed_url = urlparse(url)
                 src = f"{parsed_url.scheme}://{parsed_url.netloc}{src}"
-            elif not src.startswith('http'):
-                continue
+            elif not src.startswith('http'): continue
                 
             src_lower = src.lower()
-            # 移除了 logo，防止误杀大厂的数据图
+            
+            # 过滤干扰特征词
             junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'avatar']
             if any(junk in src_lower for junk in junk_keywords):
                 continue
                 
-            match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
-            if match:
-                w, h = int(match.group(1)), int(match.group(2))
-                if w <= 300 or h <= 300:
-                    continue
-
-            if src not in [c['src'] for c in candidates]:
-                candidates.append({'src': src, 'node': img})
-
-        # 4. 严格模式：判定是否在“正文领地”中
-        strict_images = []
-        for item in candidates:
-            curr = item['node'].parent
-            is_in_text_flow = False
-            depth = 0
-            while curr and curr.name not in ['body', 'html'] and depth < 8:
-                if curr in valid_ancestors:
-                    is_in_text_flow = True
-                    break
-                curr = curr.parent
-                depth += 1
-                
-            if is_in_text_flow:
-                strict_images.append(item['src'])
-                if len(strict_images) >= 8:
+            # 5. 核心判定：只用尺寸说话！
+            # 如果 HTML 属性明确它的宽高都很大，直接录用
+            if html_w >= 300 or html_h >= 300:
+                pass 
+            else:
+                # 如果没写属性，则看 URL 里面是否带有低像素伪装后缀
+                match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
+                if match:
+                    mw, mh = int(match.group(1)), int(match.group(2))
+                    if mw <= 300 or mh <= 300:
+                        continue
+                        
+            if src not in images:
+                images.append(src)
+                if len(images) >= 8:
                     break
         
-        # 5. 双保险兜底机制：如果太严格导致 0 提取，直接退而求其次，返回所有清洗过的高清大图
-        if not strict_images and candidates:
-            images = [item['src'] for item in candidates][:8]
-        else:
-            images = strict_images
-
-        # 提取文字兜底
         if not text:
             paragraphs = soup.find_all('p')
             text = '\n'.join([p.get_text() for p in paragraphs])
@@ -308,7 +295,7 @@ if st.session_state.current_step == 1:
         if not article_url_input and not video_url_input:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("启动弹性视觉引擎，深度定位正文图表..."):
+            with st.spinner("启动全息视网膜解析引擎，锁定高清大图..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
@@ -338,9 +325,9 @@ if st.session_state.current_step == 1:
                         st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
                     else:
                         if len(extracted_imgs) > 0:
-                            st.success(f"🎉 弹性引擎触发成功！共为您提取到 {len(extracted_imgs)} 张核心配图。")
+                            st.success(f"🎉 高清解析成功！共为您提取到 {len(extracted_imgs)} 张核心原图。")
                         else:
-                            st.success("🎉 素材提取成功！(该文章无有效正文图片)")
+                            st.success("🎉 素材提取成功！(该文章无有效正文大图)")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
