@@ -74,7 +74,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数 (弹性 DOM 深度 + 兜底回退)
+# 1. 核心抓取函数 (视觉增强 + 反懒加载版 + 新版字幕API支持)
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -89,8 +89,41 @@ def extract_youtube_transcript(url):
         if not video_id:
             return None, [], "无法解析 YouTube 链接"
 
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['zh-Hans', 'zh-Hant', 'en'])
-        text = "\n".join([item['text'] for item in transcript_list])
+        # --- 核心升级：兼容 youtube-transcript-api 旧版 (0.x) 和新版 (1.x) ---
+        target_langs = ['zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW', 'zh', 'en']
+        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
+            # 兼容旧版环境
+            transcript_fetched = YouTubeTranscriptApi.get_transcript(video_id, languages=target_langs)
+        else:
+            # 适配云端新版 1.x 环境
+            ytt_api = YouTubeTranscriptApi()
+            if hasattr(ytt_api, 'list'):
+                transcript_list = ytt_api.list(video_id)
+            elif hasattr(ytt_api, 'list_transcripts'):
+                transcript_list = ytt_api.list_transcripts(video_id)
+            else:
+                transcript_fetched = ytt_api.fetch(video_id)
+                transcript_list = None
+                
+            if transcript_list is not None:
+                try:
+                    transcript = transcript_list.find_transcript(target_langs)
+                except Exception:
+                    # 找不到中英文字幕时，强行抓取列表中的第一个可用字幕进行兜底
+                    transcript = list(transcript_list)[0]
+                transcript_fetched = transcript.fetch()
+
+        # 统一处理返回的文本（兼容不同版本返回字典或对象的差异）
+        texts = []
+        for item in transcript_fetched:
+            if isinstance(item, dict) and 'text' in item:
+                texts.append(item['text'])
+            elif hasattr(item, 'text'):
+                texts.append(item.text)
+            else:
+                texts.append(str(item))
+                
+        text = "\n".join(texts)
         return text, [], None
     except Exception as e:
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
@@ -207,7 +240,7 @@ def get_content_from_url(url):
 # ==========================================
 # 2. 状态管理与 Prompt 预设
 # ==========================================
-# ⚠️ 注意：在此处填入 4 位编辑 + 1 位审稿员的完整 Prompt
+# ⚠️ 注意：请把你 Excel 里的内容直接覆盖掉下面五段文字
 DEFAULT_PROMPTS = {
     "发行主编": """我是发行主编的默认Prompt，请将 sheet1 的内容完整粘贴覆盖这段文字。""",
     
@@ -304,7 +337,7 @@ if st.session_state.current_step == 1:
         if not article_url_input and not video_url_input:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("启动弹性视觉引擎，深度定位正文图表..."):
+            with st.spinner("启动全息视网膜与字幕联合解析引擎..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
@@ -334,9 +367,9 @@ if st.session_state.current_step == 1:
                         st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
                     else:
                         if len(extracted_imgs) > 0:
-                            st.success(f"🎉 弹性引擎触发成功！共为您提取到 {len(extracted_imgs)} 张核心配图。")
+                            st.success(f"🎉 成功提取素材内容！共为您提取到 {len(extracted_imgs)} 张核心配图。")
                         else:
-                            st.success("🎉 素材提取成功！(该文章无有效正文图片)")
+                            st.success("🎉 成功提取素材内容！")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
@@ -363,7 +396,6 @@ if st.session_state.current_step == 1:
 elif st.session_state.current_step == 2:
     st.header("第二步：选择编辑与生成初稿")
     
-    # 这里增加了新的编辑选项
     editor_role = st.selectbox("选择【编辑】视角", ["发行主编", "研发主编", "游戏快讯编辑", "客观转录编辑"])
     editor_prompt = st.text_area("✍️ 编辑 Prompt (可自由修改)", value=DEFAULT_PROMPTS[editor_role], height=250)
     
@@ -374,7 +406,7 @@ elif st.session_state.current_step == 2:
             st.rerun()
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
-            with st.spinner("编辑正在分析图文并奋笔疾书，请耐心等待..."):
+            with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
                     base_url=current_base_url,
