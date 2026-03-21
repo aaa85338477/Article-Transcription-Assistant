@@ -12,15 +12,15 @@ from bs4 import BeautifulSoup
 # ==========================================
 # 0. API 与外部推送函数
 # ==========================================
-def call_llm(api_key, model_name, system_prompt, user_content):
+def call_llm(api_key, base_url, model_name, system_prompt, user_content):
     if not api_key:
-        st.error("⚠️ 请先在左侧边栏输入 DeerAPI Key！")
+        st.error("⚠️ 请先在左侧边栏输入 API Key！")
         st.stop()
         
     try:
         client = OpenAI(
             api_key=api_key,
-            base_url="https://api.deerapi.com/v1" 
+            base_url=base_url 
         )
         response = client.chat.completions.create(
             model=model_name,
@@ -154,17 +154,41 @@ st.set_page_config(page_title="公众号文章生成助手", page_icon="🕹️"
 
 with st.sidebar:
     st.header("⚙️ 引擎设置")
-    api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
-    selected_model = st.selectbox("🧠 选择驱动模型", [
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-flash-lite-preview-thinking",
-        "gemini-3.1-pro-preview",
-        "gemini-3.1-pro-preview-thinking",
-        "gpt-5.4-nano",
-        "gpt-5.4",
-        "qwen3.5-27b",
-        "qwen3.5-flash"
-    ])
+    
+    # 动态切换 API 供应商
+    api_provider = st.selectbox("🌐 选择 API 中转站", ["DeerAPI", "BLTCY (柏拉图次元)"])
+    
+    if api_provider == "DeerAPI":
+        api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
+        current_base_url = "https://api.deerapi.com/v1"
+        available_models = [
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview-thinking",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview-thinking",
+            "gpt-5.4-nano",
+            "gpt-5.4",
+            "qwen3.5-27b",
+            "qwen3.5-flash"
+        ]
+    else:
+        api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
+        current_base_url = "https://api.bltcy.ai/v1"
+        available_models = [
+            "gemini-3.1-flash-lite-preview-thinking-high",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview-thinking-high",
+            "gpt-5.4",
+            "gpt-5.4-nano",
+            "gpt-5.4-mini-2026-03-17",
+            "claude-opus-4-5-20251101-thinking",
+            "claude-opus-4-6-thinking",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6-thinking"
+        ]
+
+    selected_model = st.selectbox("🧠 选择驱动模型", available_models)
+    
     st.markdown("---")
     st.markdown("💡 **Tip**: 遇到长文拆解或需要拔高立意时，建议切换到带 `thinking` 的模型。")
 
@@ -245,6 +269,7 @@ elif st.session_state.current_step == 2:
             with st.spinner("编辑正在奋笔疾书，请耐心等待..."):
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
+                    base_url=current_base_url,
                     model_name=selected_model, 
                     system_prompt=editor_prompt, 
                     user_content=f"以下是提供的素材内容：\n\n{st.session_state.source_content}"
@@ -294,6 +319,7 @@ elif st.session_state.current_step == 3:
                 
                 st.session_state.review_feedback = call_llm(
                     api_key=api_key, 
+                    base_url=current_base_url,
                     model_name=selected_model, 
                     system_prompt=final_reviewer_system_prompt, 
                     user_content=combined_content
@@ -326,6 +352,7 @@ elif st.session_state.current_step == 4:
                 
                 st.session_state.final_article = call_llm(
                     api_key=api_key, 
+                    base_url=current_base_url,
                     model_name=selected_model, 
                     system_prompt=modification_prompt, 
                     user_content=content_to_modify
