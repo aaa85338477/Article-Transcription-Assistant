@@ -8,6 +8,7 @@ from openai import OpenAI
 import requests
 import json
 from bs4 import BeautifulSoup
+import re  # <--- 新增：引入正则表达式库用于尺寸过滤
 
 # ==========================================
 # 0. API 与外部推送函数
@@ -73,7 +74,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数 (视觉增强 + 反懒加载版)
+# 1. 核心抓取函数 (物理超度干扰项 + 尺寸识别)
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -95,7 +96,6 @@ def extract_youtube_transcript(url):
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
 
 def extract_article_content(url):
-    """图文双抓取逻辑（已攻克懒加载与相对路径伪装）"""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -106,26 +106,36 @@ def extract_article_content(url):
         text = trafilatura.extract(response.text)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 定位正文，防止抓到边缘无效图标
-        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in c.lower()) or soup
+        # --- 核心升级：网页大扫除（精准炸毁作者框、侧边栏等干扰项） ---
+        for noise in soup.find_all(['aside', 'nav', 'footer']):
+            noise.decompose()
+            
+        noise_keywords = ['author', 'related', 'comment', 'share', 'widget', 'sidebar', 'ad-container', 'popup', 'newsletter', 'avatar']
+        # 炸掉 class 命中的区块
+        for noise in soup.find_all(attrs={'class': lambda c: c and any(k in str(c).lower() for k in noise_keywords)}):
+            noise.decompose()
+        # 炸掉 id 命中的区块
+        for noise in soup.find_all(attrs={'id': lambda i: i and any(k in str(i).lower() for k in noise_keywords)}):
+            noise.decompose()
+        # ----------------------------------------------------------------
+        
+        # 此时的汤 (soup) 已经非常干净，只剩下干货了
+        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
         
         images = []
         for img in main_content.find_all('img'):
-            # 穿透懒加载机制
             possible_attrs = ['data-original', 'data-lazy-src', 'data-src', 'src']
             src = None
             for attr in possible_attrs:
                 val = img.get(attr)
                 if val:
-                    if isinstance(val, list):
-                        val = val[0]
-                    val = str(val)
+                    if isinstance(val, list): val = val[0]
+                    val = str(val).strip()
                     if not val.startswith('data:image'):
                         src = val
                         break
                         
-            if not src:
-                continue
+            if not src: continue
                 
             if src.startswith('//'):
                 src = 'https:' + src
@@ -136,10 +146,19 @@ def extract_article_content(url):
                 continue
                 
             src_lower = src.lower()
-            junk_keywords = ['icon', 'avatar', 'spinner', 'svg', 'gif', 'button', 'tracker', 'footer', 'sidebar']
+            junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'logo']
             if any(junk in src_lower for junk in junk_keywords):
                 continue
                 
+            # --- 核心升级：过滤低像素的边角料缩略图 ---
+            match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
+            if match:
+                w, h = int(match.group(1)), int(match.group(2))
+                # 凡是宽或高小于 300 像素的，一律视为垃圾图标踢掉
+                if w <= 300 or h <= 300:
+                    continue
+            # ---------------------------------------------------------
+
             if src not in images:
                 images.append(src)
                 if len(images) >= 5:
@@ -156,7 +175,6 @@ def extract_article_content(url):
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
 
-# 就是这个函数必须存在！它是联系文章抓取和视频抓取的桥梁
 def get_content_from_url(url):
     if "youtube.com" in url or "youtu.be" in url:
         return extract_youtube_transcript(url)
@@ -259,13 +277,12 @@ if st.session_state.current_step == 1:
         if not article_url_input and not video_url_input:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("正在努力抓取图文并解析内容..."):
+            with st.spinner("正在努力扫除无用信息，定位核心图表..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
                 
                 if article_url_input:
-                    # 在这里调用了 get_content_from_url
                     art_content, art_imgs, art_err = get_content_from_url(article_url_input)
                     if art_content:
                         combined_content += f"【文章素材文本】\n{art_content}\n\n================\n\n"
@@ -289,7 +306,7 @@ if st.session_state.current_step == 1:
                     if errors:
                         st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
                     else:
-                        st.success(f"🎉 素材提取成功！共提取到 {len(extracted_imgs)} 张核心配图。")
+                        st.success(f"🎉 成功避开作者头像和广告雷区！共提取到 {len(extracted_imgs)} 张正文数据图。")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
