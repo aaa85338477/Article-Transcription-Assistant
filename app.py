@@ -8,7 +8,7 @@ from openai import OpenAI
 import requests
 import json
 from bs4 import BeautifulSoup
-import re  # <--- 新增：引入正则表达式库用于尺寸过滤
+import re
 
 # ==========================================
 # 0. API 与外部推送函数
@@ -74,7 +74,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数 (物理超度干扰项 + 尺寸识别)
+# 1. 核心抓取函数 (引入“正文领地”探测算法)
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -106,24 +106,48 @@ def extract_article_content(url):
         text = trafilatura.extract(response.text)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # --- 核心升级：网页大扫除（精准炸毁作者框、侧边栏等干扰项） ---
-        for noise in soup.find_all(['aside', 'nav', 'footer']):
+        # 1. 物理大扫除（炸毁明显的无关区域）
+        noise_tags = ['aside', 'nav', 'footer', 'header']
+        for noise in soup.find_all(noise_tags):
             noise.decompose()
             
-        noise_keywords = ['author', 'related', 'comment', 'share', 'widget', 'sidebar', 'ad-container', 'popup', 'newsletter', 'avatar']
-        # 炸掉 class 命中的区块
+        noise_keywords = ['author', 'related', 'comment', 'share', 'widget', 'sidebar', 'ad-container', 'popup', 'newsletter']
         for noise in soup.find_all(attrs={'class': lambda c: c and any(k in str(c).lower() for k in noise_keywords)}):
             noise.decompose()
-        # 炸掉 id 命中的区块
         for noise in soup.find_all(attrs={'id': lambda i: i and any(k in str(i).lower() for k in noise_keywords)}):
             noise.decompose()
-        # ----------------------------------------------------------------
-        
-        # 此时的汤 (soup) 已经非常干净，只剩下干货了
-        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
-        
+            
+        # 2. 划定“正文领地 (Text Territory)”
+        # 找到所有包含实际文字内容的段落和标题
+        text_nodes = [n for n in soup.find_all(['p', 'h2', 'h3', 'li']) if len(n.get_text(strip=True)) > 20]
+        valid_ancestors = set()
+        for node in text_nodes:
+            curr = node.parent
+            depth = 0
+            # 向上追溯 4 层容器，这些容器被认定为“合法的正文区域”
+            while curr and curr.name not in ['body', 'html'] and depth < 4:
+                valid_ancestors.add(curr)
+                curr = curr.parent
+                depth += 1
+                
         images = []
-        for img in main_content.find_all('img'):
+        for img in soup.find_all('img'):
+            # 3. 核心判定：图片是否“夹杂在正文中间”？
+            curr = img.parent
+            is_in_text_flow = False
+            depth = 0
+            while curr and curr.name not in ['body', 'html'] and depth < 4:
+                if curr in valid_ancestors:
+                    is_in_text_flow = True
+                    break
+                curr = curr.parent
+                depth += 1
+                
+            # 如果图片不在文字领地内，直接扔掉！
+            if not is_in_text_flow:
+                continue
+
+            # 4. 提取懒加载的真实链接
             possible_attrs = ['data-original', 'data-lazy-src', 'data-src', 'src']
             src = None
             for attr in possible_attrs:
@@ -137,6 +161,7 @@ def extract_article_content(url):
                         
             if not src: continue
                 
+            # 处理相对路径
             if src.startswith('//'):
                 src = 'https:' + src
             elif src.startswith('/'):
@@ -145,23 +170,23 @@ def extract_article_content(url):
             elif not src.startswith('http'):
                 continue
                 
+            # 过滤干扰特征词
             src_lower = src.lower()
-            junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'logo']
+            junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'logo', 'avatar']
             if any(junk in src_lower for junk in junk_keywords):
                 continue
                 
-            # --- 核心升级：过滤低像素的边角料缩略图 ---
+            # 过滤低像素缩略图 (如 -150x150.jpg)
             match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
             if match:
                 w, h = int(match.group(1)), int(match.group(2))
-                # 凡是宽或高小于 300 像素的，一律视为垃圾图标踢掉
                 if w <= 300 or h <= 300:
                     continue
-            # ---------------------------------------------------------
 
             if src not in images:
                 images.append(src)
-                if len(images) >= 5:
+                # 为防止大图过多，最多提取正文里的前 8 张核心图表
+                if len(images) >= 8:
                     break
         
         if not text:
@@ -175,6 +200,7 @@ def extract_article_content(url):
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
 
+# 确保路由函数存在
 def get_content_from_url(url):
     if "youtube.com" in url or "youtu.be" in url:
         return extract_youtube_transcript(url)
@@ -277,7 +303,7 @@ if st.session_state.current_step == 1:
         if not article_url_input and not video_url_input:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("正在努力扫除无用信息，定位核心图表..."):
+            with st.spinner("正在利用DOM密度算法，精准狙击正文核心图表..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
@@ -306,7 +332,7 @@ if st.session_state.current_step == 1:
                     if errors:
                         st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
                     else:
-                        st.success(f"🎉 成功避开作者头像和广告雷区！共提取到 {len(extracted_imgs)} 张正文数据图。")
+                        st.success(f"🎉 成功锁定正文领地！共提取到 {len(extracted_imgs)} 张核心配图。")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
