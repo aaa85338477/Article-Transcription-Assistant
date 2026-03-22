@@ -3,6 +3,7 @@ import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 import io
+import os
 from docx import Document
 from openai import OpenAI
 import requests
@@ -11,7 +12,39 @@ from bs4 import BeautifulSoup
 import re
 
 # ==========================================
-# 0. API 与外部推送函数
+# 0. 提示词持久化管理 (JSON 存储)
+# ==========================================
+PROMPTS_FILE = "prompts.json"
+
+def load_prompts():
+    """读取本地的 Prompt 配置文件，如果没有则创建默认模板"""
+    if os.path.exists(PROMPTS_FILE):
+        try:
+            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+            
+    # 如果文件不存在或损坏，初始化默认结构
+    default_data = {
+        "editors": {
+            "发行主编": "你是一位资深的海外发行主编。请深度分析素材，重点关注买量、ROI与发行策略...",
+            "研发主编": "你是一位硬核游戏制作人。请深度拆解素材，重点关注核心循环、系统设计与工业化管线...",
+            "游戏快讯编辑": "你是一位敏锐的游戏媒体编辑。请将素材提炼为通俗易懂、具有爆点的新闻快讯...",
+            "客观转录编辑": "你是一位专业速记员。请剥离所有主观情绪，将素材客观、结构化地转录并总结..."
+        },
+        "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉..."
+    }
+    save_prompts(default_data)
+    return default_data
+
+def save_prompts(data):
+    """保存 Prompt 数据到本地 JSON 文件"""
+    with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# ==========================================
+# 1. API 与外部推送函数
 # ==========================================
 def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None):
     if not api_key:
@@ -74,7 +107,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 1. 核心抓取函数
+# 2. 核心抓取函数 (视觉增强 + 反懒加载版 + 智能穿透)
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -242,20 +275,8 @@ def get_content_from_url(url):
         return extract_article_content(url)
 
 # ==========================================
-# 2. 状态管理与 Prompt 预设
+# 3. 状态管理初始化
 # ==========================================
-DEFAULT_PROMPTS = {
-    "发行主编": """我是发行主编的默认Prompt，请将 sheet1 的内容完整粘贴覆盖这段文字。""",
-    
-    "研发主编": """我是研发主编的默认Prompt，请将 sheet2 的内容完整粘贴覆盖这段文字。""",
-    
-    "游戏快讯编辑": """我是游戏快讯编辑的默认Prompt，请在这里粘贴你的预设。""",
-    
-    "客观转录编辑": """我是客观转录编辑的默认Prompt，请在这里粘贴你的预设。""",
-    
-    "审稿员": """我是审稿员的默认Prompt，请将 sheet3 的内容完整粘贴覆盖这段文字。"""
-}
-
 def init_state():
     if 'current_step' not in st.session_state:
         st.session_state.current_step = 1
@@ -282,9 +303,12 @@ def go_to_step(step):
     st.session_state.current_step = step
 
 # ==========================================
-# 3. 页面与工作流渲染
+# 4. 页面与工作流渲染
 # ==========================================
 st.set_page_config(page_title="公众号文章生成助手", page_icon="🕹️", layout="wide")
+
+# 加载持久化 Prompt 数据
+prompts_data = load_prompts()
 
 with st.sidebar:
     st.header("⚙️ 引擎设置")
@@ -322,7 +346,55 @@ with st.sidebar:
     selected_model = st.selectbox("🧠 选择驱动模型", available_models)
     
     st.markdown("---")
-    st.markdown("💡 **Tip**: 遇到包含图片的研报，请务必选择支持 Vision 功能的模型。")
+    
+    # --- 新增：Prompt 管理中心 UI ---
+    st.header("🗂️ 提示词管理中心")
+    with st.expander("📝 角色与人设配置", expanded=False):
+        tab1, tab2 = st.tabs(["✍️ 编辑人设", "🧐 审稿员人设"])
+        
+        with tab1:
+            action = st.radio("操作类型", ["编辑现有角色", "新增角色", "删除角色"], horizontal=True)
+            
+            if action == "编辑现有角色":
+                edit_role = st.selectbox("选择编辑", list(prompts_data["editors"].keys()))
+                if edit_role:
+                    new_prompt = st.text_area("系统 Prompt", value=prompts_data["editors"][edit_role], height=200)
+                    if st.button("💾 保存修改", key="save_edit"):
+                        prompts_data["editors"][edit_role] = new_prompt
+                        save_prompts(prompts_data)
+                        st.success(f"已保存【{edit_role}】的修改！")
+                        st.rerun()
+                        
+            elif action == "新增角色":
+                new_role_name = st.text_input("新角色名称 (如：独立游戏分析师)")
+                new_role_prompt = st.text_area("新角色 Prompt", height=200)
+                if st.button("➕ 确认新增"):
+                    if new_role_name and new_role_name not in prompts_data["editors"]:
+                        prompts_data["editors"][new_role_name] = new_role_prompt
+                        save_prompts(prompts_data)
+                        st.success(f"已成功添加角色：【{new_role_name}】！")
+                        st.rerun()
+                    else:
+                        st.error("角色名不能为空，或该角色已存在！")
+                        
+            elif action == "删除角色":
+                del_role = st.selectbox("选择要删除的编辑", list(prompts_data["editors"].keys()))
+                if st.button("🗑️ 确认删除", type="primary"):
+                    if len(prompts_data["editors"]) > 1:
+                        del prompts_data["editors"][del_role]
+                        save_prompts(prompts_data)
+                        st.success(f"已删除【{del_role}】！")
+                        st.rerun()
+                    else:
+                        st.error("操作失败：必须至少保留一个编辑角色！")
+                        
+        with tab2:
+            new_reviewer_prompt = st.text_area("主编/审稿员系统指令", value=prompts_data["reviewer"], height=300)
+            if st.button("💾 保存审稿员设置"):
+                prompts_data["reviewer"] = new_reviewer_prompt
+                save_prompts(prompts_data)
+                st.success("已更新审稿员人设！")
+                st.rerun()
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 
@@ -399,8 +471,12 @@ if st.session_state.current_step == 1:
 elif st.session_state.current_step == 2:
     st.header("第二步：选择编辑与生成初稿")
     
-    editor_role = st.selectbox("选择【编辑】视角", ["发行主编", "研发主编", "游戏快讯编辑", "客观转录编辑"])
-    editor_prompt = st.text_area("✍️ 编辑 Prompt (可自由修改)", value=DEFAULT_PROMPTS[editor_role], height=250)
+    # 动态从 JSON 库中读取所有编辑角色
+    editor_options = list(prompts_data["editors"].keys())
+    editor_role = st.selectbox("选择【编辑】视角", editor_options)
+    
+    # 动态调取对应角色的 Prompt
+    editor_prompt = st.text_area("✍️ 编辑 Prompt (支持临时微调)", value=prompts_data["editors"][editor_role], height=250)
     
     col1, col2 = st.columns([1, 4])
     with col1:
@@ -410,7 +486,6 @@ elif st.session_state.current_step == 2:
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
-                # --- 动态组装 user_content，防止 Claude 报错 ---
                 if st.session_state.source_images:
                     editor_user_content = f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}"
                 else:
@@ -436,7 +511,8 @@ elif st.session_state.current_step == 3:
     
     st.divider()
     
-    reviewer_prompt = st.text_area("🧐 审稿员 Prompt (可自由修改)", value=DEFAULT_PROMPTS["审稿员"], height=200)
+    # 动态加载审稿员 Prompt
+    reviewer_prompt = st.text_area("🧐 审稿员 Prompt (支持临时微调)", value=prompts_data["reviewer"], height=200)
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -451,7 +527,6 @@ elif st.session_state.current_step == 3:
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
             with st.spinner("主编正在核对原文..."):
-                # --- 动态下发防幻觉指令 ---
                 if st.session_state.source_images:
                     anti_hallucination_instruction = """
                     \n\n【⚠️ 强制系统级指令：严禁幻觉】：
