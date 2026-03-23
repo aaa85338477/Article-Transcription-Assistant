@@ -88,7 +88,7 @@ def push_to_feishu(article_text, script_text):
     payload = {
         "msg_type": "text",
         "content": {
-            "text": f"📣 【公众号文章定稿通知】\n\n{article_text}\n\n================\n\n🎬【一分钟短视频 AI 分镜脚本】\n\n{script_text}"
+            "text": f"📣 【公众号文章定稿通知】\n\n{article_text}\n\n================\n\n🎬【短视频 AI 分镜脚本】\n\n{script_text}"
         }
     }
     
@@ -303,18 +303,29 @@ init_state()
 def go_to_step(step):
     st.session_state.current_step = step
 
-# --- 核心升级：为其他 AI 量身定制的系统指令 ---
-SCRIPT_SYS_PROMPT = """你是一位资深的AI视频流工业化编导。请将提供给你的长篇深度文章，浓缩提炼成一份可直接输入给其他AI工具（如文字转语音TTS、数字人、Midjourney、Runway、Sora等）解析的【一分钟口播与分镜脚本】。
+# --- 核心升级：动态生成口播稿 Prompt 的函数 ---
+def get_script_sys_prompt(duration_str):
+    # 根据时长推算正常语速(220字/分钟)下的字数区间
+    duration_map = {
+        "1分钟": "200 - 250",
+        "3分钟": "600 - 700",
+        "5分钟": "1000 - 1200",
+        "8分钟": "1600 - 1900"
+    }
+    target_words = duration_map.get(duration_str, "1000 - 1200")
+    
+    return f"""你是一位资深的AI视频流工业化编导。请将提供给你的长篇深度文章，浓缩提炼成一份可直接输入给【剪映AI】等工具解析的【{duration_str}口播与分镜脚本】。
 
 【强制执行规则】：
-1. 语速与篇幅：总的口播旁白字数必须严格控制在 200 - 250 字之间（对应约1分钟的短视频长度）。
+1. 语速与篇幅：正常人中文语速约为220字/分钟，因此总的口播旁白字数必须严格控制在 {target_words} 字左右（对应约{duration_str}的短视频长度）。
 2. 零废话输出：因为你的输出将被下一个自动化代码节点读取，请【绝对不要】在开头或结尾输出“好的，这是为您生成的脚本”等任何人类视角的寒暄语句，直接输出 Markdown 结构！
-3. 结构化呈现：必须严格按照以下 Markdown 列表格式输出每一个镜头（Scene），绝不能混用格式。
+3. 适配剪映AI：画面Prompt必须全部使用【纯中文】描述，包含明确的画面主体、场景细节和镜头动作，以便国内视频AI引擎精准生图/视频。
+4. 结构化呈现：必须严格按照以下 Markdown 列表格式输出每一个镜头（Scene），绝不能混用格式。
 
 【标准输出格式范例】：
 ### Scene 01 (0s - 5s)
-* 🗣️ **口播旁白**: "就在昨天，游戏圈又爆出了一个令人震惊的超级大瓜！" (要求：纯口语化，适合短视频前3秒抓人眼球)
-* 🎬 **画面Prompt**: "Cinematic medium shot, a shocked gamer looking at a glowing computer screen in a dark room, dynamic lighting, 8k resolution, photorealistic --ar 16:9" (要求：纯英文撰写，包含主体、环境、光影、镜头运动，直接可用于AI生图/生视频工具)
+* 🗣️ **口播旁白**: "就在昨天，游戏圈又爆出了一个令人震惊的超级大瓜！" (要求：纯口语化，适合短视频抓人眼球)
+* 🎬 **画面Prompt**: "电影级中景镜头，一个震惊的年轻玩家坐在昏暗的房间里看着发光的电脑屏幕，屏幕上显示着数据代码，动态光影，逼真质感，平移运镜" (要求：全中文撰写，详细描述画面内容)
 * ✨ **视觉特效/字幕**: 屏幕突然亮起，居中显示大字特效“超级大瓜”。
 
 ### Scene 02 (5s - 12s)
@@ -364,8 +375,17 @@ with st.sidebar:
         ]
 
     selected_model = st.selectbox("🧠 选择驱动模型", available_models)
-    st.markdown("---")
     
+    # --- 新增：分镜脚本时长设置 ---
+    st.markdown("---")
+    st.header("🎬 视频分镜设置")
+    script_duration = st.selectbox(
+        "⏱️ 设定分镜脚本目标时长", 
+        ["1分钟", "3分钟", "5分钟", "8分钟"], 
+        index=2 # 默认选中 5分钟
+    )
+    
+    st.markdown("---")
     st.header("🗂️ 提示词管理中心")
     with st.expander("📝 角色与人设配置", expanded=False):
         tab1, tab2 = st.tabs(["✍️ 编辑人设", "🧐 审稿员人设"])
@@ -544,12 +564,13 @@ elif st.session_state.current_step == 3:
             st.rerun()
     with col2:
         if st.button("⏭️ 完美，跳过审查直接定稿"):
-            with st.spinner("正在生成最终定稿与【一分钟口播及分镜脚本】..."):
+            with st.spinner(f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..."):
                 st.session_state.final_article = st.session_state.draft_article
+                script_sys_prompt = get_script_sys_prompt(script_duration)
                 st.session_state.spoken_script = call_llm(
                     api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                    system_prompt=SCRIPT_SYS_PROMPT,
-                    user_content=f"【请将以下深度文章转化为供AI解析的一分钟短视频口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                    system_prompt=script_sys_prompt,
+                    user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
                 )
                 go_to_step(5)
                 st.rerun()
@@ -592,18 +613,19 @@ elif st.session_state.current_step == 4:
             st.rerun()
     with col2:
         if st.button("⏭️ 忽略意见，强行定稿"):
-            with st.spinner("正在生成最终定稿与【一分钟口播及分镜脚本】..."):
+            with st.spinner(f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..."):
                 st.session_state.final_article = st.session_state.draft_article
+                script_sys_prompt = get_script_sys_prompt(script_duration)
                 st.session_state.spoken_script = call_llm(
                     api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                    system_prompt=SCRIPT_SYS_PROMPT,
-                    user_content=f"【请将以下深度文章转化为供AI解析的一分钟短视频口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                    system_prompt=script_sys_prompt,
+                    user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
                 )
                 go_to_step(5)
                 st.rerun()
     with col3:
         if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
-            with st.spinner("编辑正在修改文章，并生成【一分钟口播及分镜脚本】..."):
+            with st.spinner(f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..."):
                 modification_prompt = "你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。"
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
                 
@@ -615,10 +637,11 @@ elif st.session_state.current_step == 4:
                     user_content=content_to_modify
                 )
                 
+                script_sys_prompt = get_script_sys_prompt(script_duration)
                 st.session_state.spoken_script = call_llm(
                     api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                    system_prompt=SCRIPT_SYS_PROMPT,
-                    user_content=f"【请将以下深度文章转化为供AI解析的一分钟短视频口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                    system_prompt=script_sys_prompt,
+                    user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
                 )
                 
                 go_to_step(5)
@@ -633,7 +656,7 @@ elif st.session_state.current_step == 5:
     
     st.divider()
     
-    st.markdown("### 🎬 🎙️ 一分钟短视频 AI 分镜脚本 (供生图/TTS使用)")
+    st.markdown(f"### 🎬 🎙️ {script_duration} 剪映AI 分镜脚本")
     st.code(st.session_state.spoken_script, language="markdown")
     
     st.divider()
@@ -643,7 +666,7 @@ elif st.session_state.current_step == 5:
         doc.add_heading('【最终成稿】', level=1)
         doc.add_paragraph(article_text)
         
-        doc.add_heading('【一分钟短视频 AI 分镜脚本】', level=1)
+        doc.add_heading(f'【{script_duration}短视频 AI 分镜脚本】', level=1)
         doc.add_paragraph(script_text)
         
         bio = io.BytesIO()
