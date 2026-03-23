@@ -25,7 +25,6 @@ def load_prompts():
         except Exception:
             pass
             
-    # 如果文件不存在或损坏，初始化默认结构
     default_data = {
         "editors": {
             "发行主编": "你是一位资深的海外发行主编。请深度分析素材，重点关注买量、ROI与发行策略...",
@@ -83,13 +82,13 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         st.error(f"API 调用失败: {str(e)}")
         st.stop()
 
-def push_to_feishu(text_content):
+def push_to_feishu(article_text, script_text):
     webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
     headers = {"Content-Type": "application/json"}
     payload = {
         "msg_type": "text",
         "content": {
-            "text": f"📣 【公众号文章定稿通知】\n\n{text_content}"
+            "text": f"📣 【公众号文章定稿通知】\n\n{article_text}\n\n================\n\n🎬【一分钟短视频 AI 分镜脚本】\n\n{script_text}"
         }
     }
     
@@ -107,7 +106,7 @@ def push_to_feishu(text_content):
         return False, f"请求发生异常: {str(e)}"
 
 # ==========================================
-# 2. 核心抓取函数 (视觉增强 + 反懒加载版 + 智能穿透)
+# 2. 核心抓取函数
 # ==========================================
 def extract_youtube_transcript(url):
     try:
@@ -170,7 +169,7 @@ def extract_youtube_transcript(url):
                     else:
                         return None, [], "原生API被封锁，且备用穿透解析器未返回有效文本。"
                 except Exception as jina_e:
-                    return None, [], f"YouTube 提取失败 (双重解析均被拦截): 原生报错({str(inner_e)[:30]}...) | 备用报错({str(jina_e)[:30]}...)"
+                    return None, [], f"YouTube 提取失败: 原生报错({str(inner_e)[:30]}...) | 备用报错({str(jina_e)[:30]}...)"
             else:
                 raise inner_e
 
@@ -296,18 +295,39 @@ def init_state():
         st.session_state.review_feedback = ""
     if 'final_article' not in st.session_state:
         st.session_state.final_article = ""
+    if 'spoken_script' not in st.session_state:
+        st.session_state.spoken_script = ""
 
 init_state()
 
 def go_to_step(step):
     st.session_state.current_step = step
 
+# --- 核心升级：为其他 AI 量身定制的系统指令 ---
+SCRIPT_SYS_PROMPT = """你是一位资深的AI视频流工业化编导。请将提供给你的长篇深度文章，浓缩提炼成一份可直接输入给其他AI工具（如文字转语音TTS、数字人、Midjourney、Runway、Sora等）解析的【一分钟口播与分镜脚本】。
+
+【强制执行规则】：
+1. 语速与篇幅：总的口播旁白字数必须严格控制在 200 - 250 字之间（对应约1分钟的短视频长度）。
+2. 零废话输出：因为你的输出将被下一个自动化代码节点读取，请【绝对不要】在开头或结尾输出“好的，这是为您生成的脚本”等任何人类视角的寒暄语句，直接输出 Markdown 结构！
+3. 结构化呈现：必须严格按照以下 Markdown 列表格式输出每一个镜头（Scene），绝不能混用格式。
+
+【标准输出格式范例】：
+### Scene 01 (0s - 5s)
+* 🗣️ **口播旁白**: "就在昨天，游戏圈又爆出了一个令人震惊的超级大瓜！" (要求：纯口语化，适合短视频前3秒抓人眼球)
+* 🎬 **画面Prompt**: "Cinematic medium shot, a shocked gamer looking at a glowing computer screen in a dark room, dynamic lighting, 8k resolution, photorealistic --ar 16:9" (要求：纯英文撰写，包含主体、环境、光影、镜头运动，直接可用于AI生图/生视频工具)
+* ✨ **视觉特效/字幕**: 屏幕突然亮起，居中显示大字特效“超级大瓜”。
+
+### Scene 02 (5s - 12s)
+* 🗣️ **口播旁白**: "..."
+* 🎬 **画面Prompt**: "..."
+* ✨ **视觉特效/字幕**: "..."
+"""
+
 # ==========================================
 # 4. 页面与工作流渲染
 # ==========================================
 st.set_page_config(page_title="公众号文章生成助手", page_icon="🕹️", layout="wide")
 
-# 加载持久化 Prompt 数据
 prompts_data = load_prompts()
 
 with st.sidebar:
@@ -344,17 +364,14 @@ with st.sidebar:
         ]
 
     selected_model = st.selectbox("🧠 选择驱动模型", available_models)
-    
     st.markdown("---")
     
-    # --- 新增：Prompt 管理中心 UI ---
     st.header("🗂️ 提示词管理中心")
     with st.expander("📝 角色与人设配置", expanded=False):
         tab1, tab2 = st.tabs(["✍️ 编辑人设", "🧐 审稿员人设"])
         
         with tab1:
             action = st.radio("操作类型", ["编辑现有角色", "新增角色", "删除角色"], horizontal=True)
-            
             if action == "编辑现有角色":
                 edit_role = st.selectbox("选择编辑", list(prompts_data["editors"].keys()))
                 if edit_role:
@@ -364,7 +381,6 @@ with st.sidebar:
                         save_prompts(prompts_data)
                         st.success(f"已保存【{edit_role}】的修改！")
                         st.rerun()
-                        
             elif action == "新增角色":
                 new_role_name = st.text_input("新角色名称 (如：独立游戏分析师)")
                 new_role_prompt = st.text_area("新角色 Prompt", height=200)
@@ -376,7 +392,6 @@ with st.sidebar:
                         st.rerun()
                     else:
                         st.error("角色名不能为空，或该角色已存在！")
-                        
             elif action == "删除角色":
                 del_role = st.selectbox("选择要删除的编辑", list(prompts_data["editors"].keys()))
                 if st.button("🗑️ 确认删除", type="primary"):
@@ -471,24 +486,20 @@ if st.session_state.current_step == 1:
 elif st.session_state.current_step == 2:
     st.header("第二步：选择编辑与生成初稿")
     
-    # 动态从 JSON 库中读取所有编辑角色
     editor_options = list(prompts_data["editors"].keys())
-    
-    # 💡 修复 1：让系统记住你之前的下拉选择，防止退回时无脑重置
     if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
         st.session_state.selected_role = editor_options[0]
         
     default_idx = editor_options.index(st.session_state.selected_role)
     
     editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
-    st.session_state.selected_role = editor_role # 实时更新当前选择
+    st.session_state.selected_role = editor_role 
     
-    # 💡 修复 2：核心机制！加入动态 key，打破 Streamlit 的幽灵缓存魔咒
     editor_prompt = st.text_area(
         "✍️ 编辑 Prompt (支持临时微调)", 
         value=prompts_data["editors"][editor_role], 
         height=250,
-        key=f"prompt_text_{editor_role}"  # <--- 就是这个神奇的 key 解决了问题
+        key=f"prompt_text_{editor_role}"
     )
     
     col1, col2 = st.columns([1, 4])
@@ -499,7 +510,6 @@ elif st.session_state.current_step == 2:
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
-                # --- 动态组装 user_content，防止 Claude 报错 ---
                 if st.session_state.source_images:
                     editor_user_content = f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}"
                 else:
@@ -515,6 +525,7 @@ elif st.session_state.current_step == 2:
                 )
                 go_to_step(3)
                 st.rerun()
+
 # --- Step 3 ---
 elif st.session_state.current_step == 3:
     st.header("第三步：审稿员审查初稿")
@@ -524,7 +535,6 @@ elif st.session_state.current_step == 3:
     
     st.divider()
     
-    # 动态加载审稿员 Prompt
     reviewer_prompt = st.text_area("🧐 审稿员 Prompt (支持临时微调)", value=prompts_data["reviewer"], height=200)
     
     col1, col2, col3 = st.columns(3)
@@ -534,30 +544,26 @@ elif st.session_state.current_step == 3:
             st.rerun()
     with col2:
         if st.button("⏭️ 完美，跳过审查直接定稿"):
-            st.session_state.final_article = st.session_state.draft_article
-            go_to_step(5)
-            st.rerun()
+            with st.spinner("正在生成最终定稿与【一分钟口播及分镜脚本】..."):
+                st.session_state.final_article = st.session_state.draft_article
+                st.session_state.spoken_script = call_llm(
+                    api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                    system_prompt=SCRIPT_SYS_PROMPT,
+                    user_content=f"【请将以下深度文章转化为供AI解析的一分钟短视频口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                )
+                go_to_step(5)
+                st.rerun()
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
             with st.spinner("主编正在核对原文..."):
                 if st.session_state.source_images:
-                    anti_hallucination_instruction = """
-                    \n\n【⚠️ 强制系统级指令：严禁幻觉】：
-                    你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！
-                    绝对不允许使用你自身的内部知识库进行事实核对。
-                    如果【初稿】中写了某个数据或结论，只要它在【原始素材文本】或【参考配图】中存在依据，你就必须判定它是正确的。
-                    绝对不允许以“我不知道”或“原文未提及”为由去否认实际存在的内容！如果确实无中生有，请明确指出。
-                    """
-                    combined_content = f"下面是【原始素材文本】（这是你唯一的真相来源，请结合图片一起审查）：\n{st.session_state.source_content}\n\n================\n\n下面是【初稿】（你需要找茬的内容）：\n{st.session_state.draft_article}"
+                    anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
+                    你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！绝对不允许使用自身知识库进行事实核对。"""
+                    combined_content = f"下面是【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
                 else:
-                    anti_hallucination_instruction = """
-                    \n\n【⚠️ 强制系统级指令：严禁幻觉】：
-                    你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！
-                    绝对不允许使用你自身的内部知识库进行事实核对。
-                    如果【初稿】中写了某个数据或结论，只要它在【原始素材文本】中存在依据，你就必须判定它是正确的。
-                    绝对不允许以“我不知道”或“原文未提及”为由去否认实际存在的内容！如果确实无中生有，请明确指出。
-                    """
-                    combined_content = f"下面是【原始素材文本】（这是你唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n\n下面是【初稿】（你需要找茬的内容）：\n{st.session_state.draft_article}"
+                    anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
+                    你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"""
+                    combined_content = f"下面是【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
                 
                 final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
                 
@@ -586,12 +592,18 @@ elif st.session_state.current_step == 4:
             st.rerun()
     with col2:
         if st.button("⏭️ 忽略意见，强行定稿"):
-            st.session_state.final_article = st.session_state.draft_article
-            go_to_step(5)
-            st.rerun()
+            with st.spinner("正在生成最终定稿与【一分钟口播及分镜脚本】..."):
+                st.session_state.final_article = st.session_state.draft_article
+                st.session_state.spoken_script = call_llm(
+                    api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                    system_prompt=SCRIPT_SYS_PROMPT,
+                    user_content=f"【请将以下深度文章转化为供AI解析的一分钟短视频口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                )
+                go_to_step(5)
+                st.rerun()
     with col3:
         if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
-            with st.spinner("编辑正在根据主编意见进行修改..."):
+            with st.spinner("编辑正在修改文章，并生成【一分钟口播及分镜脚本】..."):
                 modification_prompt = "你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。"
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
                 
@@ -602,39 +614,56 @@ elif st.session_state.current_step == 4:
                     system_prompt=modification_prompt, 
                     user_content=content_to_modify
                 )
+                
+                st.session_state.spoken_script = call_llm(
+                    api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                    system_prompt=SCRIPT_SYS_PROMPT,
+                    user_content=f"【请将以下深度文章转化为供AI解析的一分钟短视频口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                )
+                
                 go_to_step(5)
                 st.rerun()
 
 # --- Step 5 ---
 elif st.session_state.current_step == 5:
-    st.header("第五步：文章定稿与导出")
+    st.header("第五步：文章定稿与多端分发")
     
-    st.markdown("### 最终成稿 🏆 (鼠标移至右上角可一键复制全文)")
+    st.markdown("### 🏆 最终成稿 (深度图文)")
     st.code(st.session_state.final_article, language="markdown")
     
     st.divider()
     
-    def create_docx(text):
+    st.markdown("### 🎬 🎙️ 一分钟短视频 AI 分镜脚本 (供生图/TTS使用)")
+    st.code(st.session_state.spoken_script, language="markdown")
+    
+    st.divider()
+    
+    def create_docx(article_text, script_text):
         doc = Document()
-        doc.add_paragraph(text)
+        doc.add_heading('【最终成稿】', level=1)
+        doc.add_paragraph(article_text)
+        
+        doc.add_heading('【一分钟短视频 AI 分镜脚本】', level=1)
+        doc.add_paragraph(script_text)
+        
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
         
-    docx_data = create_docx(st.session_state.final_article)
+    docx_data = create_docx(st.session_state.final_article, st.session_state.spoken_script)
     
     col1, col2, col3 = st.columns(3)
     with col1:
          st.download_button(
-            label="📄 导出 Word 文档",
+            label="📄 导出包含双版本的 Word",
             data=docx_data,
-            file_name="公众号文章_定稿.docx",
+            file_name="公众号与AI短视频脚本_定稿.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     with col2:
-        if st.button("✈️ 一键推送飞书群"):
-            with st.spinner("正在推送到飞书..."):
-                success, msg = push_to_feishu(st.session_state.final_article)
+        if st.button("✈️ 一键打包推送飞书群"):
+            with st.spinner("正在推送双文案到飞书..."):
+                success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script)
                 if success:
                     st.success("🎉 已成功推送到飞书群！")
                     st.balloons()
