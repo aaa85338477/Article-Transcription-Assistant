@@ -473,10 +473,23 @@ elif st.session_state.current_step == 2:
     
     # 动态从 JSON 库中读取所有编辑角色
     editor_options = list(prompts_data["editors"].keys())
-    editor_role = st.selectbox("选择【编辑】视角", editor_options)
     
-    # 动态调取对应角色的 Prompt
-    editor_prompt = st.text_area("✍️ 编辑 Prompt (支持临时微调)", value=prompts_data["editors"][editor_role], height=250)
+    # 💡 修复 1：让系统记住你之前的下拉选择，防止退回时无脑重置
+    if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
+        st.session_state.selected_role = editor_options[0]
+        
+    default_idx = editor_options.index(st.session_state.selected_role)
+    
+    editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
+    st.session_state.selected_role = editor_role # 实时更新当前选择
+    
+    # 💡 修复 2：核心机制！加入动态 key，打破 Streamlit 的幽灵缓存魔咒
+    editor_prompt = st.text_area(
+        "✍️ 编辑 Prompt (支持临时微调)", 
+        value=prompts_data["editors"][editor_role], 
+        height=250,
+        key=f"prompt_text_{editor_role}"  # <--- 就是这个神奇的 key 解决了问题
+    )
     
     col1, col2 = st.columns([1, 4])
     with col1:
@@ -486,6 +499,7 @@ elif st.session_state.current_step == 2:
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
+                # --- 动态组装 user_content，防止 Claude 报错 ---
                 if st.session_state.source_images:
                     editor_user_content = f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}"
                 else:
@@ -501,7 +515,6 @@ elif st.session_state.current_step == 2:
                 )
                 go_to_step(3)
                 st.rerun()
-
 # --- Step 3 ---
 elif st.session_state.current_step == 3:
     st.header("第三步：审稿员审查初稿")
