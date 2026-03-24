@@ -82,13 +82,20 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         st.error(f"API 调用失败: {str(e)}")
         st.stop()
 
-def push_to_feishu(article_text, script_text):
+def push_to_feishu(article_text, script_text=None):
     webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
     headers = {"Content-Type": "application/json"}
+    
+    # 动态组装推送内容
+    if script_text:
+        text_content = f"📣 【公众号文章定稿通知】\n\n{article_text}\n\n================\n\n🎬【短视频 AI 分镜脚本】\n\n{script_text}"
+    else:
+        text_content = f"📣 【公众号文章定稿通知】\n\n{article_text}"
+        
     payload = {
         "msg_type": "text",
         "content": {
-            "text": f"📣 【公众号文章定稿通知】\n\n{article_text}\n\n================\n\n🎬【短视频 AI 分镜脚本】\n\n{script_text}"
+            "text": text_content
         }
     }
     
@@ -303,9 +310,7 @@ init_state()
 def go_to_step(step):
     st.session_state.current_step = step
 
-# --- 核心升级：动态生成口播稿 Prompt 的函数 ---
 def get_script_sys_prompt(duration_str):
-    # 根据时长推算正常语速(220字/分钟)下的字数区间
     duration_map = {
         "1分钟": "200 - 250",
         "3分钟": "600 - 700",
@@ -376,13 +381,17 @@ with st.sidebar:
 
     selected_model = st.selectbox("🧠 选择驱动模型", available_models)
     
-    # --- 新增：分镜脚本时长设置 ---
     st.markdown("---")
     st.header("🎬 视频分镜设置")
+    
+    # --- 新增：脚本生成总开关 ---
+    enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
+    
     script_duration = st.selectbox(
         "⏱️ 设定分镜脚本目标时长", 
         ["1分钟", "3分钟", "5分钟", "8分钟"], 
-        index=2 # 默认选中 5分钟
+        index=2, # 默认选中 5分钟
+        disabled=not enable_script # 如果没开启总开关，此选项变灰不可选
     )
     
     st.markdown("---")
@@ -564,14 +573,21 @@ elif st.session_state.current_step == 3:
             st.rerun()
     with col2:
         if st.button("⏭️ 完美，跳过审查直接定稿"):
-            with st.spinner(f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..."):
+            spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
+            with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
-                script_sys_prompt = get_script_sys_prompt(script_duration)
-                st.session_state.spoken_script = call_llm(
-                    api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                    system_prompt=script_sys_prompt,
-                    user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                )
+                
+                # 根据开关决定是否提取分镜脚本
+                if enable_script:
+                    script_sys_prompt = get_script_sys_prompt(script_duration)
+                    st.session_state.spoken_script = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=script_sys_prompt,
+                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                    )
+                else:
+                    st.session_state.spoken_script = ""
+                    
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -613,19 +629,26 @@ elif st.session_state.current_step == 4:
             st.rerun()
     with col2:
         if st.button("⏭️ 忽略意见，强行定稿"):
-            with st.spinner(f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..."):
+            spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
+            with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
-                script_sys_prompt = get_script_sys_prompt(script_duration)
-                st.session_state.spoken_script = call_llm(
-                    api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                    system_prompt=script_sys_prompt,
-                    user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                )
+                
+                if enable_script:
+                    script_sys_prompt = get_script_sys_prompt(script_duration)
+                    st.session_state.spoken_script = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=script_sys_prompt,
+                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                    )
+                else:
+                    st.session_state.spoken_script = ""
+                    
                 go_to_step(5)
                 st.rerun()
     with col3:
         if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
-            with st.spinner(f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..."):
+            spinner_msg = f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "编辑正在根据主编意见修改文章..."
+            with st.spinner(spinner_msg):
                 modification_prompt = "你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。"
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
                 
@@ -637,12 +660,15 @@ elif st.session_state.current_step == 4:
                     user_content=content_to_modify
                 )
                 
-                script_sys_prompt = get_script_sys_prompt(script_duration)
-                st.session_state.spoken_script = call_llm(
-                    api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                    system_prompt=script_sys_prompt,
-                    user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                )
+                if enable_script:
+                    script_sys_prompt = get_script_sys_prompt(script_duration)
+                    st.session_state.spoken_script = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=script_sys_prompt,
+                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                    )
+                else:
+                    st.session_state.spoken_script = ""
                 
                 go_to_step(5)
                 st.rerun()
@@ -654,39 +680,41 @@ elif st.session_state.current_step == 5:
     st.markdown("### 🏆 最终成稿 (深度图文)")
     st.code(st.session_state.final_article, language="markdown")
     
+    # 根据是否生成了脚本，动态展示UI
+    if st.session_state.spoken_script:
+        st.divider()
+        st.markdown(f"### 🎬 🎙️ {script_duration} 剪映AI 分镜脚本")
+        st.code(st.session_state.spoken_script, language="markdown")
+    
     st.divider()
     
-    st.markdown(f"### 🎬 🎙️ {script_duration} 剪映AI 分镜脚本")
-    st.code(st.session_state.spoken_script, language="markdown")
-    
-    st.divider()
-    
-    def create_docx(article_text, script_text):
+    def create_docx(article_text, script_text=None):
         doc = Document()
         doc.add_heading('【最终成稿】', level=1)
         doc.add_paragraph(article_text)
         
-        doc.add_heading(f'【{script_duration}短视频 AI 分镜脚本】', level=1)
-        doc.add_paragraph(script_text)
+        if script_text:
+            doc.add_heading('【短视频 AI 分镜脚本】', level=1)
+            doc.add_paragraph(script_text)
         
         bio = io.BytesIO()
         doc.save(bio)
         return bio.getvalue()
         
-    docx_data = create_docx(st.session_state.final_article, st.session_state.spoken_script)
+    docx_data = create_docx(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
     
     col1, col2, col3 = st.columns(3)
     with col1:
          st.download_button(
-            label="📄 导出包含双版本的 Word",
+            label="📄 导出 Word 文档" if not st.session_state.spoken_script else "📄 导出包含双版本的 Word",
             data=docx_data,
-            file_name="公众号与AI短视频脚本_定稿.docx",
+            file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号与AI短视频脚本_定稿.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     with col2:
         if st.button("✈️ 一键打包推送飞书群"):
-            with st.spinner("正在推送双文案到飞书..."):
-                success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script)
+            with st.spinner("正在推送到飞书..."):
+                success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                 if success:
                     st.success("🎉 已成功推送到飞书群！")
                     st.balloons()
