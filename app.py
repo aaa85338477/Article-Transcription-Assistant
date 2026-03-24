@@ -17,7 +17,6 @@ import re
 PROMPTS_FILE = "prompts.json"
 
 def load_prompts():
-    """读取本地的 Prompt 配置文件，如果没有则创建默认模板"""
     if os.path.exists(PROMPTS_FILE):
         try:
             with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
@@ -38,14 +37,13 @@ def load_prompts():
     return default_data
 
 def save_prompts(data):
-    """保存 Prompt 数据到本地 JSON 文件"""
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 1. API 与外部推送函数
+# 1. API 与外部推送函数 (底层升级：支持历史对话)
 # ==========================================
-def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None):
+def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None):
     if not api_key:
         st.error("⚠️ 请先在左侧边栏输入 API Key！")
         st.stop()
@@ -59,6 +57,14 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
             base_url=base_url 
         )
         
+        # 组装基础的 System Prompt
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # 💡 新增：注入历史聊天记录，让 AI 拥有多轮对话的记忆
+        if history:
+            messages.extend(history)
+            
+        # 组装当前的 User 内容 (支持图文混合)
         if image_urls:
             message_content = [{"type": "text", "text": user_content}]
             for img_url in image_urls:
@@ -69,12 +75,11 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         else:
             message_content = user_content
 
+        messages.append({"role": "user", "content": message_content})
+
         response = client.chat.completions.create(
             model=model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message_content}
-            ],
+            messages=messages,
             temperature=0.3 
         )
         return response.choices[0].message.content
@@ -86,7 +91,6 @@ def push_to_feishu(article_text, script_text=None):
     webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
     headers = {"Content-Type": "application/json"}
     
-    # 动态组装推送内容
     if script_text:
         text_content = f"📣 【公众号文章定稿通知】\n\n{article_text}\n\n================\n\n🎬【短视频 AI 分镜脚本】\n\n{script_text}"
     else:
@@ -281,7 +285,7 @@ def get_content_from_url(url):
         return extract_article_content(url)
 
 # ==========================================
-# 3. 状态管理初始化
+# 3. 状态管理初始化 (新增：聊天记录缓存)
 # ==========================================
 def init_state():
     if 'current_step' not in st.session_state:
@@ -304,6 +308,9 @@ def init_state():
         st.session_state.final_article = ""
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
+    # 💡 核心新增：存储右侧聊天面板的历史记录
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
 
 init_state()
 
@@ -329,14 +336,9 @@ def get_script_sys_prompt(duration_str):
 
 【标准输出格式范例】：
 ### Scene 01 (0s - 5s)
-* 🗣️ **口播旁白**: "就在昨天，游戏圈又爆出了一个令人震惊的超级大瓜！" (要求：纯口语化，适合短视频抓人眼球)
-* 🎬 **画面Prompt**: "电影级中景镜头，一个震惊的年轻玩家坐在昏暗的房间里看着发光的电脑屏幕，屏幕上显示着数据代码，动态光影，逼真质感，平移运镜" (要求：全中文撰写，详细描述画面内容)
+* 🗣️ **口播旁白**: "就在昨天，游戏圈又爆出了一个令人震惊的超级大瓜！" 
+* 🎬 **画面Prompt**: "电影级中景镜头，一个震惊的年轻玩家坐在昏暗的房间里看着发光的电脑屏幕，屏幕上显示着数据代码，动态光影，逼真质感，平移运镜"
 * ✨ **视觉特效/字幕**: 屏幕突然亮起，居中显示大字特效“超级大瓜”。
-
-### Scene 02 (5s - 12s)
-* 🗣️ **口播旁白**: "..."
-* 🎬 **画面Prompt**: "..."
-* ✨ **视觉特效/字幕**: "..."
 """
 
 # ==========================================
@@ -383,15 +385,12 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🎬 视频分镜设置")
-    
-    # --- 新增：脚本生成总开关 ---
     enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
-    
     script_duration = st.selectbox(
         "⏱️ 设定分镜脚本目标时长", 
         ["1分钟", "3分钟", "5分钟", "8分钟"], 
-        index=2, # 默认选中 5分钟
-        disabled=not enable_script # 如果没开启总开关，此选项变灰不可选
+        index=2, 
+        disabled=not enable_script 
     )
     
     st.markdown("---")
@@ -577,7 +576,6 @@ elif st.session_state.current_step == 3:
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
                 
-                # 根据开关决定是否提取分镜脚本
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
                     st.session_state.spoken_script = call_llm(
@@ -673,55 +671,117 @@ elif st.session_state.current_step == 4:
                 go_to_step(5)
                 st.rerun()
 
-# --- Step 5 ---
+# --- Step 5：终极版分栏 UI ---
 elif st.session_state.current_step == 5:
-    st.header("第五步：文章定稿与多端分发")
+    st.header("第五步：文章定稿、精修与分发")
     
-    st.markdown("### 🏆 最终成稿 (深度图文)")
-    st.code(st.session_state.final_article, language="markdown")
+    # 💡 核心新增：左右分栏设计
+    left_col, right_col = st.columns([1.3, 1])
     
-    # 根据是否生成了脚本，动态展示UI
-    if st.session_state.spoken_script:
+    # ================= 左侧：定稿展示与分发 =================
+    with left_col:
+        st.markdown("### 🏆 最终成稿 (深度图文)")
+        st.code(st.session_state.final_article, language="markdown")
+        
+        if st.session_state.spoken_script:
+            st.divider()
+            st.markdown(f"### 🎬 🎙️ {script_duration} 剪映AI 分镜脚本")
+            st.code(st.session_state.spoken_script, language="markdown")
+        
         st.divider()
-        st.markdown(f"### 🎬 🎙️ {script_duration} 剪映AI 分镜脚本")
-        st.code(st.session_state.spoken_script, language="markdown")
-    
-    st.divider()
-    
-    def create_docx(article_text, script_text=None):
-        doc = Document()
-        doc.add_heading('【最终成稿】', level=1)
-        doc.add_paragraph(article_text)
         
-        if script_text:
-            doc.add_heading('【短视频 AI 分镜脚本】', level=1)
-            doc.add_paragraph(script_text)
+        def create_docx(article_text, script_text=None):
+            doc = Document()
+            doc.add_heading('【最终成稿】', level=1)
+            doc.add_paragraph(article_text)
+            
+            if script_text:
+                doc.add_heading('【短视频 AI 分镜脚本】', level=1)
+                doc.add_paragraph(script_text)
+            
+            bio = io.BytesIO()
+            doc.save(bio)
+            return bio.getvalue()
+            
+        docx_data = create_docx(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
         
-        bio = io.BytesIO()
-        doc.save(bio)
-        return bio.getvalue()
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
+        with btn_col1:
+             st.download_button(
+                label="📄 导出 Word 文档" if not st.session_state.spoken_script else "📄 导出包含双版本的 Word",
+                data=docx_data,
+                file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号与AI短视频脚本_定稿.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        with btn_col2:
+            if st.button("✈️ 一键打包推送飞书群"):
+                with st.spinner("正在推送到飞书..."):
+                    success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
+                    if success:
+                        st.success("🎉 已成功推送到飞书群！")
+                        st.balloons()
+                    else:
+                        st.error(f"❌ 推送失败：{msg}")
+        with btn_col3:
+            if st.button("🔄 开启新一篇"):
+                for key in st.session_state.keys():
+                    del st.session_state[key]
+                st.rerun()
+
+    # ================= 右侧：AI 精修与溯源对话框 =================
+    with right_col:
+        st.markdown("### ✨ 文章精修与溯源助手")
+        st.info("💡 **Tips:** 你可以框选左侧某段文字发给我，让我重写；或者问我文章里某句结论在原文中的出处在哪里。")
         
-    docx_data = create_docx(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-         st.download_button(
-            label="📄 导出 Word 文档" if not st.session_state.spoken_script else "📄 导出包含双版本的 Word",
-            data=docx_data,
-            file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号与AI短视频脚本_定稿.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-    with col2:
-        if st.button("✈️ 一键打包推送飞书群"):
-            with st.spinner("正在推送到飞书..."):
-                success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
-                if success:
-                    st.success("🎉 已成功推送到飞书群！")
-                    st.balloons()
-                else:
-                    st.error(f"❌ 推送失败：{msg}")
-    with col3:
-        if st.button("🔄 开启新一篇"):
-            for key in st.session_state.keys():
-                del st.session_state[key]
+        # 使用固定高度的容器包裹聊天记录，避免页面无限拉长
+        chat_container = st.container(height=500)
+        
+        with chat_container:
+            for msg in st.session_state.chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+        
+        # 聊天输入框
+        if user_query := st.chat_input("输入你的修改指令或疑问（回车发送）..."):
+            
+            # 1. 记录用户的输入并立刻在页面上显示
+            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            with chat_container:
+                with st.chat_message("user"):
+                    st.markdown(user_query)
+                    
+                # 2. 调用大模型思考并响应
+                with st.chat_message("assistant"):
+                    with st.spinner("思考与检索中..."):
+                        
+                        # 构建超级 RAG 溯源指令：将原文和当前定稿喂给它
+                        chat_sys_prompt = f"""你是一个极其专业的文章精修与溯源助手。
+                        
+                        【你的参考资料库（唯一的真相来源）】：
+                        {st.session_state.source_content}
+                        
+                        【当前正在精修的定稿文章】：
+                        {st.session_state.final_article}
+                        
+                        【你的任务】：
+                        1. 如果用户要求溯源，请精准定位到【参考资料库】中的原文片段，并客观回答。
+                        2. 如果用户要求重写某一段落，请直接输出修改后能够无缝替换回去的完美段落，不要说废话。
+                        3. 如果用户基于文章进行衍生提问，请结合上述资料给出专业见解。
+                        """
+                        
+                        # 提取除了最新一条（刚才 append 的）之外的历史记录，发给 API
+                        history_to_send = st.session_state.chat_history[:-1]
+                        
+                        ai_response = call_llm(
+                            api_key=api_key, 
+                            base_url=current_base_url, 
+                            model_name=selected_model,
+                            system_prompt=chat_sys_prompt,
+                            user_content=user_query,
+                            history=history_to_send
+                        )
+                        st.markdown(ai_response)
+                        
+            # 3. 把 AI 的回答存入状态字典
+            st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
             st.rerun()
