@@ -41,7 +41,7 @@ def save_prompts(data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# 1. API 与外部推送函数 (底层升级：支持历史对话)
+# 1. API 与外部推送函数
 # ==========================================
 def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None):
     if not api_key:
@@ -57,14 +57,11 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
             base_url=base_url 
         )
         
-        # 组装基础的 System Prompt
         messages = [{"role": "system", "content": system_prompt}]
         
-        # 💡 新增：注入历史聊天记录，让 AI 拥有多轮对话的记忆
         if history:
             messages.extend(history)
             
-        # 组装当前的 User 内容 (支持图文混合)
         if image_urls:
             message_content = [{"type": "text", "text": user_content}]
             for img_url in image_urls:
@@ -285,7 +282,7 @@ def get_content_from_url(url):
         return extract_article_content(url)
 
 # ==========================================
-# 3. 状态管理初始化 (新增：聊天记录缓存)
+# 3. 状态管理初始化
 # ==========================================
 def init_state():
     if 'current_step' not in st.session_state:
@@ -308,9 +305,11 @@ def init_state():
         st.session_state.final_article = ""
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
-    # 💡 核心新增：存储右侧聊天面板的历史记录
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
+    # 💡 新增：缓存智能配图的搜索关键词
+    if 'image_keywords' not in st.session_state:
+        st.session_state.image_keywords = ""
 
 init_state()
 
@@ -671,11 +670,10 @@ elif st.session_state.current_step == 4:
                 go_to_step(5)
                 st.rerun()
 
-# --- Step 5：终极版分栏 UI ---
+# --- Step 5：终极版分栏 UI (回滚微信直连版) ---
 elif st.session_state.current_step == 5:
     st.header("第五步：文章定稿、精修与分发")
     
-    # 💡 核心新增：左右分栏设计
     left_col, right_col = st.columns([1.3, 1])
     
     # ================= 左侧：定稿展示与分发 =================
@@ -690,6 +688,37 @@ elif st.session_state.current_step == 5:
         
         st.divider()
         
+        # 💡 新增：智能配图助手 (Google 搜图建议)
+        st.markdown("### 🔍 智能配图助手 (Google 搜图建议)")
+        st.info("需要为文章寻找真实、高质的配图？点击下方按钮，AI 将根据文章核心内容提取 10 个精确的 Google 图片搜索关键词。")
+        
+        if st.button("💡 提取 10 个 Google 搜图关键词", use_container_width=True):
+            with st.spinner("正在深度分析文章，提取精确的搜图词汇..."):
+                keyword_prompt = """请根据以下文章内容，提取 10 个最适合在 Google 图片（Google Images）中搜索配图的精准关键词组合。
+                
+                【核心要求】：
+                1. 必须精准输出 10 个。
+                2. 为了在 Google 搜出最高质量的图，请尽量采用【中英文混合】或【纯英文】的专业搜索词（例如："Genshin Impact UI design", "Sensor Tower SLG revenue chart 2024", "Tencent Games logo transparent"）。
+                3. 场景具体化：不要只搜游戏名，要加上明确的修饰词（如实机演示、数据图表、买量素材、应用商店截图等）。
+                4. 直接用编号 1-10 列出，不要有任何废话解释。
+                
+                【文章定稿内容】：
+                """ + st.session_state.final_article
+                
+                st.session_state.image_keywords = call_llm(
+                    api_key=api_key, 
+                    base_url=current_base_url,
+                    model_name=selected_model, 
+                    system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。", 
+                    user_content=keyword_prompt
+                )
+                
+        if st.session_state.image_keywords:
+            st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
+            st.code(st.session_state.image_keywords, language="markdown")
+            
+        st.divider()
+
         def create_docx(article_text, script_text=None):
             doc = Document()
             doc.add_heading('【最终成稿】', level=1)
@@ -708,22 +737,24 @@ elif st.session_state.current_step == 5:
         btn_col1, btn_col2, btn_col3 = st.columns(3)
         with btn_col1:
              st.download_button(
-                label="📄 导出 Word 文档" if not st.session_state.spoken_script else "📄 导出包含双版本的 Word",
+                label="📄 导出 Word 文档" if not st.session_state.spoken_script else "📄 导出图文与脚本(Word)",
                 data=docx_data,
-                file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号与AI短视频脚本_定稿.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号与短视频脚本_定稿.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
             )
+            
         with btn_col2:
-            if st.button("✈️ 一键打包推送飞书群"):
+            if st.button("✈️ 推送通知到飞书群", use_container_width=True):
                 with st.spinner("正在推送到飞书..."):
                     success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                     if success:
-                        st.success("🎉 已成功推送到飞书群！")
-                        st.balloons()
+                        st.success("🎉 飞书推送成功！")
                     else:
                         st.error(f"❌ 推送失败：{msg}")
+                            
         with btn_col3:
-            if st.button("🔄 开启新一篇"):
+            if st.button("🔄 开启新一篇工作流", use_container_width=True):
                 for key in st.session_state.keys():
                     del st.session_state[key]
                 st.rerun()
@@ -733,7 +764,6 @@ elif st.session_state.current_step == 5:
         st.markdown("### ✨ 文章精修与溯源助手")
         st.info("💡 **Tips:** 你可以框选左侧某段文字发给我，让我重写；或者问我文章里某句结论在原文中的出处在哪里。")
         
-        # 使用固定高度的容器包裹聊天记录，避免页面无限拉长
         chat_container = st.container(height=500)
         
         with chat_container:
@@ -741,20 +771,16 @@ elif st.session_state.current_step == 5:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
         
-        # 聊天输入框
         if user_query := st.chat_input("输入你的修改指令或疑问（回车发送）..."):
             
-            # 1. 记录用户的输入并立刻在页面上显示
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             with chat_container:
                 with st.chat_message("user"):
                     st.markdown(user_query)
                     
-                # 2. 调用大模型思考并响应
                 with st.chat_message("assistant"):
                     with st.spinner("思考与检索中..."):
                         
-                        # 构建超级 RAG 溯源指令：将原文和当前定稿喂给它
                         chat_sys_prompt = f"""你是一个极其专业的文章精修与溯源助手。
                         
                         【你的参考资料库（唯一的真相来源）】：
@@ -769,7 +795,6 @@ elif st.session_state.current_step == 5:
                         3. 如果用户基于文章进行衍生提问，请结合上述资料给出专业见解。
                         """
                         
-                        # 提取除了最新一条（刚才 append 的）之外的历史记录，发给 API
                         history_to_send = st.session_state.chat_history[:-1]
                         
                         ai_response = call_llm(
@@ -782,6 +807,5 @@ elif st.session_state.current_step == 5:
                         )
                         st.markdown(ai_response)
                         
-            # 3. 把 AI 的回答存入状态字典
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
             st.rerun()
