@@ -15,7 +15,7 @@ import re
 # 0. 提示词与草稿持久化管理 (JSON 存储)
 # ==========================================
 PROMPTS_FILE = "prompts.json"
-DRAFT_FILE = "draft_state.json"  # 💡 新增：草稿箱存储文件
+DRAFT_FILE = "draft_state.json"
 
 DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
@@ -53,9 +53,7 @@ def save_prompts(data):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# 💡 新增：核心草稿箱管理函数
 def save_draft():
-    """静默将当前 Session 状态持久化到本地"""
     keys_to_save = [
         'current_step', 'article_url', 'video_url', 'source_content', 
         'source_images', 'extraction_success', 'draft_article', 
@@ -70,7 +68,6 @@ def save_draft():
         print(f"草稿保存失败: {e}")
 
 def load_draft():
-    """读取本地草稿并覆盖当前 Session"""
     if os.path.exists(DRAFT_FILE):
         try:
             with open(DRAFT_FILE, "r", encoding="utf-8") as f:
@@ -84,7 +81,6 @@ def load_draft():
     return False
 
 def clear_draft():
-    """销毁本地草稿文件"""
     if os.path.exists(DRAFT_FILE):
         try:
             os.remove(DRAFT_FILE)
@@ -365,7 +361,7 @@ init_state()
 
 def go_to_step(step):
     st.session_state.current_step = step
-    save_draft() # 💡 核心机制：每次步骤流转，自动触发静默保存
+    save_draft()
 
 def get_script_sys_prompt(duration_str):
     duration_map = {
@@ -400,9 +396,31 @@ prompts_data = load_prompts()
 
 with st.sidebar:
     st.header("⚙️ 引擎设置")
-    api_provider = st.selectbox("🌐 选择 API 中转站", ["DeerAPI", "BLTCY (柏拉图次元)"])
     
-    if api_provider == "DeerAPI":
+    # 💡 核心修改 1：调整下拉栏默认顺序，BLTCY 设为首选
+    api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
+    
+    if api_provider == "BLTCY (柏拉图次元)":
+        api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
+        current_base_url = "https://api.bltcy.ai/v1"
+        # 💡 核心修改 3：扩充国产强力模型库
+        available_models = [
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-pro-preview-thinking-high",
+            "gemini-3.1-flash-lite-preview-thinking-high",
+            "claude-opus-4-6-thinking",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6-thinking",
+            "claude-opus-4-5-20251101-thinking",
+            "gpt-5.4",
+            "gpt-5.4-nano",
+            "gpt-5.4-mini-2026-03-17",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "qwen3.5-plus",
+            "kimi-k2.5"
+        ]
+    else:
         api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
         current_base_url = "https://api.deerapi.com/v1"
         available_models = [
@@ -415,23 +433,13 @@ with st.sidebar:
             "qwen3.5-27b",
             "qwen3.5-flash"
         ]
-    else:
-        api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
-        current_base_url = "https://api.bltcy.ai/v1"
-        available_models = [
-            "claude-opus-4-6-thinking",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6-thinking",
-            "claude-opus-4-5-20251101-thinking",
-            "gemini-3.1-pro-preview",
-            "gemini-3.1-pro-preview-thinking-high",
-            "gemini-3.1-flash-lite-preview-thinking-high",
-            "gpt-5.4",
-            "gpt-5.4-nano",
-            "gpt-5.4-mini-2026-03-17"
-        ]
 
-    selected_model = st.selectbox("🧠 选择驱动模型", available_models)
+    # 💡 核心修改 2：默认锁定 gemini-3.1-pro-preview
+    default_model_idx = 0
+    if "gemini-3.1-pro-preview" in available_models:
+        default_model_idx = available_models.index("gemini-3.1-pro-preview")
+        
+    selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
     
     st.markdown("---")
     st.header("🎬 视频分镜设置")
@@ -504,7 +512,6 @@ st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 if st.session_state.current_step == 1:
     st.header("第一步：输入素材源")
     
-    # 💡 核心新增：草稿恢复检测 UI
     if os.path.exists(DRAFT_FILE):
         st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？（如果在编辑中途刷新了网页，请点击恢复）")
         col_draft1, col_draft2 = st.columns([1, 4])
@@ -801,7 +808,7 @@ elif st.session_state.current_step == 5:
                     system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。", 
                     user_content=keyword_prompt
                 )
-                save_draft() # 💡 生成关键词后立刻静默保存
+                save_draft()
                 
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
@@ -845,7 +852,7 @@ elif st.session_state.current_step == 5:
                             
         with btn_col3:
             if st.button("🔄 开启新一篇工作流", use_container_width=True):
-                clear_draft() # 💡 明确开启新任务时，彻底销毁旧草稿
+                clear_draft()
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
@@ -898,5 +905,5 @@ elif st.session_state.current_step == 5:
                         st.markdown(ai_response)
                         
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
-            save_draft() # 💡 聊天结束后自动存档
+            save_draft()
             st.rerun()
