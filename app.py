@@ -12,9 +12,10 @@ from bs4 import BeautifulSoup
 import re
 
 # ==========================================
-# 0. 提示词持久化管理 (JSON 存储)
+# 0. 提示词与草稿持久化管理 (JSON 存储)
 # ==========================================
 PROMPTS_FILE = "prompts.json"
+DRAFT_FILE = "draft_state.json"  # 💡 新增：草稿箱存储文件
 
 DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
@@ -51,6 +52,44 @@ def load_prompts():
 def save_prompts(data):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+
+# 💡 新增：核心草稿箱管理函数
+def save_draft():
+    """静默将当前 Session 状态持久化到本地"""
+    keys_to_save = [
+        'current_step', 'article_url', 'video_url', 'source_content', 
+        'source_images', 'extraction_success', 'draft_article', 
+        'review_feedback', 'final_article', 'spoken_script', 
+        'chat_history', 'image_keywords'
+    ]
+    draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
+    try:
+        with open(DRAFT_FILE, "w", encoding="utf-8") as f:
+            json.dump(draft_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"草稿保存失败: {e}")
+
+def load_draft():
+    """读取本地草稿并覆盖当前 Session"""
+    if os.path.exists(DRAFT_FILE):
+        try:
+            with open(DRAFT_FILE, "r", encoding="utf-8") as f:
+                draft_data = json.load(f)
+            for k, v in draft_data.items():
+                st.session_state[k] = v
+            return True
+        except Exception as e:
+            print(f"草稿读取失败: {e}")
+            return False
+    return False
+
+def clear_draft():
+    """销毁本地草稿文件"""
+    if os.path.exists(DRAFT_FILE):
+        try:
+            os.remove(DRAFT_FILE)
+        except:
+            pass
 
 # ==========================================
 # 1. API 与外部推送函数
@@ -273,7 +312,7 @@ def extract_article_content(url):
                         
             if src not in images:
                 images.append(src)
-                if len(images) >= 8: # 单个链接最多提取8张图
+                if len(images) >= 8:
                     break
         
         if not text:
@@ -326,6 +365,7 @@ init_state()
 
 def go_to_step(step):
     st.session_state.current_step = step
+    save_draft() # 💡 核心机制：每次步骤流转，自动触发静默保存
 
 def get_script_sys_prompt(duration_str):
     duration_map = {
@@ -460,9 +500,26 @@ with st.sidebar:
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 
-# --- Step 1：升级支持多链接批量处理 ---
+# --- Step 1 ---
 if st.session_state.current_step == 1:
     st.header("第一步：输入素材源")
+    
+    # 💡 核心新增：草稿恢复检测 UI
+    if os.path.exists(DRAFT_FILE):
+        st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？（如果在编辑中途刷新了网页，请点击恢复）")
+        col_draft1, col_draft2 = st.columns([1, 4])
+        with col_draft1:
+            if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
+                if load_draft():
+                    st.success("草稿恢复成功！工作流已复原。")
+                    st.rerun()
+                else:
+                    st.error("草稿文件损坏，无法恢复。")
+        with col_draft2:
+            if st.button("🗑️ 抛弃旧草稿，全新开始", use_container_width=True):
+                clear_draft()
+                st.rerun()
+        st.divider()
     
     col1, col2 = st.columns(2)
     with col1:
@@ -471,7 +528,6 @@ if st.session_state.current_step == 1:
         video_url_input = st.text_area("📺 输入 YouTube 视频链接 (每行一个，支持批量)", value=st.session_state.video_url, height=150)
     
     if st.button("开始批量提取内容"):
-        # 按换行符分割，并去除空行
         article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
         video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
 
@@ -485,7 +541,6 @@ if st.session_state.current_step == 1:
                 errors = []
                 success_count = 0
                 
-                # 遍历提取文章链接
                 for idx, a_url in enumerate(article_urls):
                     art_content, art_imgs, art_err = get_content_from_url(a_url)
                     if art_content:
@@ -495,7 +550,6 @@ if st.session_state.current_step == 1:
                     else:
                         errors.append(f"文章 {idx+1} 提取失败: {art_err}")
                         
-                # 遍历提取视频链接
                 for idx, v_url in enumerate(video_urls):
                     vid_content, vid_imgs, vid_err = get_content_from_url(v_url)
                     if vid_content:
@@ -504,7 +558,6 @@ if st.session_state.current_step == 1:
                     else:
                         errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
                 
-                # 为了防止批量提取图片过多导致 Vision API 炸掉，这里将图片上限锁定为 15 张
                 extracted_imgs = extracted_imgs[:15]
 
                 if combined_content:
@@ -748,6 +801,7 @@ elif st.session_state.current_step == 5:
                     system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。", 
                     user_content=keyword_prompt
                 )
+                save_draft() # 💡 生成关键词后立刻静默保存
                 
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
@@ -791,7 +845,8 @@ elif st.session_state.current_step == 5:
                             
         with btn_col3:
             if st.button("🔄 开启新一篇工作流", use_container_width=True):
-                for key in st.session_state.keys():
+                clear_draft() # 💡 明确开启新任务时，彻底销毁旧草稿
+                for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
 
@@ -843,4 +898,5 @@ elif st.session_state.current_step == 5:
                         st.markdown(ai_response)
                         
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+            save_draft() # 💡 聊天结束后自动存档
             st.rerun()
