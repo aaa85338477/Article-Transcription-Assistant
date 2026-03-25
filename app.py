@@ -38,7 +38,6 @@ def load_prompts():
         try:
             with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 兼容旧版本的 json 文件，如果没有 global_instruction 则补全
                 if "global_instruction" not in data:
                     data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
                     save_prompts(data)
@@ -274,7 +273,7 @@ def extract_article_content(url):
                         
             if src not in images:
                 images.append(src)
-                if len(images) >= 8:
+                if len(images) >= 8: # 单个链接最多提取8张图
                     break
         
         if not text:
@@ -406,7 +405,6 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🗂️ 提示词管理中心")
-    # 💡 核心新增：全局去AI味规范 Tab
     with st.expander("📝 角色与全局人设配置", expanded=False):
         tab1, tab2, tab3 = st.tabs(["✍️ 编辑人设", "🧐 审稿人设", "🌍 全局去AI味规范"])
         
@@ -452,7 +450,7 @@ with st.sidebar:
                 st.rerun()
                 
         with tab3:
-            st.info("💡 此处的规范将**强制追加**到所有【编辑】的提示词末尾，用于统一全局的写作风格（如去 AI 味、禁用词汇）。")
+            st.info("💡 此处的规范将**强制追加**到所有【编辑】的提示词末尾，用于统一全局的写作风格。")
             new_global_prompt = st.text_area("全局强制规范", value=prompts_data.get("global_instruction", ""), height=300)
             if st.button("💾 保存全局规范"):
                 prompts_data["global_instruction"] = new_global_prompt
@@ -462,59 +460,73 @@ with st.sidebar:
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
 
-# --- Step 1 ---
+# --- Step 1：升级支持多链接批量处理 ---
 if st.session_state.current_step == 1:
     st.header("第一步：输入素材源")
     
     col1, col2 = st.columns(2)
     with col1:
-        article_url_input = st.text_input("📝 输入文章链接 (可选)", value=st.session_state.article_url)
+        article_url_input = st.text_area("📝 输入文章链接 (每行一个，支持批量)", value=st.session_state.article_url, height=150)
     with col2:
-        video_url_input = st.text_input("📺 输入 YouTube 视频链接 (可选)", value=st.session_state.video_url)
+        video_url_input = st.text_area("📺 输入 YouTube 视频链接 (每行一个，支持批量)", value=st.session_state.video_url, height=150)
     
-    if st.button("开始提取内容"):
-        if not article_url_input and not video_url_input:
+    if st.button("开始批量提取内容"):
+        # 按换行符分割，并去除空行
+        article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
+        video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
+
+        if not article_urls and not video_urls:
             st.warning("请至少输入一个链接！")
         else:
-            with st.spinner("启动全息解析引擎，智能获取素材..."):
+            total_urls = len(article_urls) + len(video_urls)
+            with st.spinner(f"启动全息解析引擎，正在批量获取 {total_urls} 个素材..."):
                 combined_content = ""
                 extracted_imgs = []
                 errors = []
+                success_count = 0
                 
-                if article_url_input:
-                    art_content, art_imgs, art_err = get_content_from_url(article_url_input)
+                # 遍历提取文章链接
+                for idx, a_url in enumerate(article_urls):
+                    art_content, art_imgs, art_err = get_content_from_url(a_url)
                     if art_content:
-                        combined_content += f"【文章素材文本】\n{art_content}\n\n================\n\n"
+                        combined_content += f"【文章素材 {idx+1}】来源于: {a_url}\n{art_content}\n\n================\n\n"
                         extracted_imgs.extend(art_imgs)
-                        st.session_state.article_url = article_url_input
+                        success_count += 1
                     else:
-                        errors.append(f"文章提取失败: {art_err}")
+                        errors.append(f"文章 {idx+1} 提取失败: {art_err}")
                         
-                if video_url_input:
-                    vid_content, vid_imgs, vid_err = get_content_from_url(video_url_input)
+                # 遍历提取视频链接
+                for idx, v_url in enumerate(video_urls):
+                    vid_content, vid_imgs, vid_err = get_content_from_url(v_url)
                     if vid_content:
-                        combined_content += f"【视频播客素材】\n{vid_content}\n\n================\n\n"
-                        st.session_state.video_url = video_url_input
+                        combined_content += f"【视频素材 {idx+1}】来源于: {v_url}\n{vid_content}\n\n================\n\n"
+                        success_count += 1
                     else:
-                        errors.append(f"视频提取失败: {vid_err}")
+                        errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
                 
+                # 为了防止批量提取图片过多导致 Vision API 炸掉，这里将图片上限锁定为 15 张
+                extracted_imgs = extracted_imgs[:15]
+
                 if combined_content:
+                    st.session_state.article_url = article_url_input
+                    st.session_state.video_url = video_url_input
                     st.session_state.source_content = combined_content
                     st.session_state.source_images = extracted_imgs
                     st.session_state.extraction_success = True
+                    
                     if errors:
-                        st.warning(f"部分内容提取成功，但有以下错误：\n" + "\n".join(errors))
+                        st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
                     else:
                         if len(extracted_imgs) > 0:
-                            st.success(f"🎉 成功提取素材内容！共为您提取到 {len(extracted_imgs)} 张核心配图。")
+                            st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并提取到 {len(extracted_imgs)} 张核心配图。")
                         else:
-                            st.success("🎉 成功提取素材内容！(该文章无有效配图，将走纯文本模式)")
+                            st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
                 else:
                     st.session_state.extraction_success = False
                     st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
             
     if st.session_state.extraction_success:
-        with st.expander("预览抓取到的原文与图表", expanded=False):
+        with st.expander("预览批量聚合的原始素材", expanded=False):
             if st.session_state.source_images:
                 st.markdown("🖼️ **提取到的核心配图：**")
                 img_cols = st.columns(2)
@@ -523,11 +535,11 @@ if st.session_state.current_step == 1:
                         st.image(img_url, use_column_width=True)
                 st.divider()
                 
-            st.markdown("📄 **提取到的文本正文：**")
+            st.markdown("📄 **合并后的文本正文：**")
             preview_text = st.session_state.source_content[:1500] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1500 else st.session_state.source_content
             st.code(preview_text, language="markdown")
             
-        if st.button("确认无误，继续下一步 👉"):
+        if st.button("素材无误，继续下一步 👉"):
             go_to_step(2)
             st.rerun()
 
@@ -558,22 +570,20 @@ elif st.session_state.current_step == 2:
             st.rerun()
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
-            with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
-                
-                # 💡 核心融合：将编辑器专属 Prompt 与 全局去AI味规范 强行拼接
+            with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
                 
                 if st.session_state.source_images:
-                    editor_user_content = f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}"
+                    editor_user_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
                 else:
-                    editor_user_content = f"以下是提供的素材内容，请根据纯文本进行深度分析：\n\n{st.session_state.source_content}"
+                    editor_user_content = f"以下是多个来源的素材聚合内容，请根据纯文本进行深度分析与融合：\n\n{st.session_state.source_content}"
                 
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
                     base_url=current_base_url,
                     model_name=selected_model, 
-                    system_prompt=final_editor_system_prompt, # 传递融合后的 Prompt
+                    system_prompt=final_editor_system_prompt,
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
@@ -616,15 +626,15 @@ elif st.session_state.current_step == 3:
                 st.rerun()
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
-            with st.spinner("主编正在核对原文..."):
+            with st.spinner("主编正在核对原文素材..."):
                 if st.session_state.source_images:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！绝对不允许使用自身知识库进行事实核对。"""
-                    combined_content = f"下面是【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
                 else:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"""
-                    combined_content = f"下面是【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
                 
                 final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
                 
@@ -673,8 +683,6 @@ elif st.session_state.current_step == 4:
         if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
             spinner_msg = f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "编辑正在根据主编意见修改文章..."
             with st.spinner(spinner_msg):
-                
-                # 💡 在修改阶段，编辑依然要受到全局去AI味规范的约束
                 global_instruction = prompts_data.get("global_instruction", "")
                 modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
                 
@@ -707,7 +715,6 @@ elif st.session_state.current_step == 5:
     
     left_col, right_col = st.columns([1.3, 1])
     
-    # ================= 左侧：定稿展示与分发 =================
     with left_col:
         st.markdown("### 🏆 最终成稿 (深度图文)")
         st.code(st.session_state.final_article, language="markdown")
@@ -788,7 +795,6 @@ elif st.session_state.current_step == 5:
                     del st.session_state[key]
                 st.rerun()
 
-    # ================= 右侧：AI 精修与溯源对话框 =================
     with right_col:
         st.markdown("### ✨ 文章精修与溯源助手")
         st.info("💡 **Tips:** 你可以框选左侧某段文字发给我，让我重写；或者问我文章里某句结论在原文中的出处在哪里。")
