@@ -16,14 +16,13 @@ import re
 # ==========================================
 PROMPTS_FILE = "prompts.json"
 
+DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
+1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
+2. 禁用伪高级“黑话”：严禁滥用带双引号的互联网/营销词汇（如“赋能”、“底层逻辑”、“打法”、“组合拳”、“降维打击”）。遇到专业概念，请用人话直白解释，不要故作高深。
+3. 拒绝强行升华：文章结尾禁止进行“爹味说教”或喊口号式的价值升华，客观给出冷酷的结论或留白即可。
+4. 打破匀速节奏：多用短句！避免一口气读不完的复杂长句。允许出现少量口语化的标点停顿，模仿人类写稿时真实的“呼吸感”和偶尔的“毒舌”感。"""
+
 def load_prompts():
-    if os.path.exists(PROMPTS_FILE):
-        try:
-            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-            
     default_data = {
         "editors": {
             "发行主编": "你是一位资深的海外发行主编。请深度分析素材，重点关注买量、ROI与发行策略...",
@@ -31,8 +30,22 @@ def load_prompts():
             "游戏快讯编辑": "你是一位敏锐的游戏媒体编辑。请将素材提炼为通俗易懂、具有爆点的新闻快讯...",
             "客观转录编辑": "你是一位专业速记员。请剥离所有主观情绪，将素材客观、结构化地转录并总结..."
         },
-        "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉..."
+        "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉...",
+        "global_instruction": DEFAULT_GLOBAL_PROMPT
     }
+    
+    if os.path.exists(PROMPTS_FILE):
+        try:
+            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # 兼容旧版本的 json 文件，如果没有 global_instruction 则补全
+                if "global_instruction" not in data:
+                    data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
+                    save_prompts(data)
+                return data
+        except Exception:
+            pass
+            
     save_prompts(default_data)
     return default_data
 
@@ -307,7 +320,6 @@ def init_state():
         st.session_state.spoken_script = ""
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
-    # 💡 新增：缓存智能配图的搜索关键词
     if 'image_keywords' not in st.session_state:
         st.session_state.image_keywords = ""
 
@@ -394,8 +406,9 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🗂️ 提示词管理中心")
-    with st.expander("📝 角色与人设配置", expanded=False):
-        tab1, tab2 = st.tabs(["✍️ 编辑人设", "🧐 审稿员人设"])
+    # 💡 核心新增：全局去AI味规范 Tab
+    with st.expander("📝 角色与全局人设配置", expanded=False):
+        tab1, tab2, tab3 = st.tabs(["✍️ 编辑人设", "🧐 审稿人设", "🌍 全局去AI味规范"])
         
         with tab1:
             action = st.radio("操作类型", ["编辑现有角色", "新增角色", "删除角色"], horizontal=True)
@@ -436,6 +449,15 @@ with st.sidebar:
                 prompts_data["reviewer"] = new_reviewer_prompt
                 save_prompts(prompts_data)
                 st.success("已更新审稿员人设！")
+                st.rerun()
+                
+        with tab3:
+            st.info("💡 此处的规范将**强制追加**到所有【编辑】的提示词末尾，用于统一全局的写作风格（如去 AI 味、禁用词汇）。")
+            new_global_prompt = st.text_area("全局强制规范", value=prompts_data.get("global_instruction", ""), height=300)
+            if st.button("💾 保存全局规范"):
+                prompts_data["global_instruction"] = new_global_prompt
+                save_prompts(prompts_data)
+                st.success("已成功更新全局规范！")
                 st.rerun()
 
 st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
@@ -537,6 +559,11 @@ elif st.session_state.current_step == 2:
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在分析素材并奋笔疾书，请耐心等待..."):
+                
+                # 💡 核心融合：将编辑器专属 Prompt 与 全局去AI味规范 强行拼接
+                global_instruction = prompts_data.get("global_instruction", "")
+                final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
+                
                 if st.session_state.source_images:
                     editor_user_content = f"以下是提供的素材内容，请结合附带的参考图片一起深度分析：\n\n{st.session_state.source_content}"
                 else:
@@ -546,7 +573,7 @@ elif st.session_state.current_step == 2:
                     api_key=api_key, 
                     base_url=current_base_url,
                     model_name=selected_model, 
-                    system_prompt=editor_prompt, 
+                    system_prompt=final_editor_system_prompt, # 传递融合后的 Prompt
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
@@ -646,7 +673,11 @@ elif st.session_state.current_step == 4:
         if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
             spinner_msg = f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "编辑正在根据主编意见修改文章..."
             with st.spinner(spinner_msg):
-                modification_prompt = "你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。"
+                
+                # 💡 在修改阶段，编辑依然要受到全局去AI味规范的约束
+                global_instruction = prompts_data.get("global_instruction", "")
+                modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
+                
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
                 
                 st.session_state.final_article = call_llm(
@@ -670,7 +701,7 @@ elif st.session_state.current_step == 4:
                 go_to_step(5)
                 st.rerun()
 
-# --- Step 5：终极版分栏 UI (回滚微信直连版) ---
+# --- Step 5：终极版分栏 UI ---
 elif st.session_state.current_step == 5:
     st.header("第五步：文章定稿、精修与分发")
     
@@ -687,8 +718,6 @@ elif st.session_state.current_step == 5:
             st.code(st.session_state.spoken_script, language="markdown")
         
         st.divider()
-        
-        # 💡 新增：智能配图助手 (Google 搜图建议)
         st.markdown("### 🔍 智能配图助手 (Google 搜图建议)")
         st.info("需要为文章寻找真实、高质的配图？点击下方按钮，AI 将根据文章核心内容提取 10 个精确的 Google 图片搜索关键词。")
         
