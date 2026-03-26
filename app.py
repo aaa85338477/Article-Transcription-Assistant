@@ -464,6 +464,7 @@ def inject_ui_theme():
             gap: 0.75rem;
         }
         .metric-card, .mode-card {
+            color: var(--text);
             min-width: 160px;
             padding: 0.95rem 1rem;
             border-radius: 16px;
@@ -473,11 +474,11 @@ def inject_ui_theme():
         .metric-card strong, .mode-card strong {
             display: block;
             margin-bottom: 0.3rem;
-            color: #f5faf7;
+            color: var(--text);
             font-size: 1.05rem;
         }
         .metric-card span, .mode-card span {
-            color: rgba(245, 250, 247, 0.72);
+            color: var(--text-muted);
             font-size: 0.86rem;
             line-height: 1.5;
         }
@@ -622,24 +623,27 @@ def render_stepper(current_step):
         ("定稿修订", "接收意见并形成最终版本"),
         ("分发工作台", "脚本、配图、导出与精修")
     ]
-    cards = []
-    for idx, (label, desc) in enumerate(step_meta, start=1):
+    st.markdown('<section class="stepper">', unsafe_allow_html=True)
+    columns = st.columns(len(step_meta))
+    for idx, ((label, desc), col) in enumerate(zip(step_meta, columns), start=1):
         if idx < current_step:
             class_name = "stepper-item done"
         elif idx == current_step:
             class_name = "stepper-item active"
         else:
             class_name = "stepper-item"
-        cards.append(
-            f"""
-            <div class="{class_name}">
-                <div class="step-index">{idx}</div>
-                <span class="step-label">{label}</span>
-                <span class="step-desc">{desc}</span>
-            </div>
-            """
-        )
-    st.markdown(f'<section class="stepper"><div class="step-grid">{"".join(cards)}</div></section>', unsafe_allow_html=True)
+        with col:
+            st.markdown(
+                f"""
+                <div class="{class_name}">
+                    <div class="step-index">{idx}</div>
+                    <span class="step-label">{label}</span>
+                    <span class="step-desc">{desc}</span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    st.markdown("</section>", unsafe_allow_html=True)
 
 
 def render_section_intro(title, subtitle=None, eyebrow=None):
@@ -1272,6 +1276,10 @@ elif st.session_state.current_step == 5:
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
             save_draft()
             st.rerun()
+
+
+
+
 
 
 
