@@ -791,38 +791,54 @@ render_stepper(st.session_state.current_step)
 # --- Step 1 ---
 if st.session_state.current_step == 1:
     render_section_intro("素材输入中枢", "在同一界面批量汇聚文章链接、YouTube 链接与图片素材，统一进入后续的编辑与审稿流程。", "Step 01")
+
     with st.container(border=True):
         st.markdown("""<div class="mode-grid"><div class="mode-card"><strong>批量素材输入</strong><span>支持多篇文章和多个视频链接合并提取，适合做专题与深度整合。</span></div><div class="mode-card"><strong>两种工作流模式</strong><span>手动精调适合逐步把关，全自动驾驶适合快速直达定稿。</span></div><div class="mode-card"><strong>统一定稿工作台</strong><span>脚本、搜图、导出、飞书推送和精修助手都在最后一页集中处理。</span></div></div>""", unsafe_allow_html=True)
-    
+
     if os.path.exists(DRAFT_FILE):
-        st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？")
-        col_draft1, col_draft2 = st.columns([1, 4])
-        with col_draft1:
-            if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
-                if load_draft():
-                    st.success("草稿恢复成功！工作流已复原。")
+        with st.container(border=True):
+            render_section_intro("继续上次工作", "如果上次停在中途，可以直接恢复到之前离开的步骤。", "Recovery")
+            st.markdown("<p class='toolbar-note'>恢复草稿会还原素材、初稿、审稿意见和定稿上下文；清空则重新开始新的工作流。</p>", unsafe_allow_html=True)
+            col_draft1, col_draft2 = st.columns(2)
+            with col_draft1:
+                if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
+                    if load_draft():
+                        st.success("草稿恢复成功！工作流已复原。")
+                        st.rerun()
+                    else:
+                        st.error("草稿文件损坏，无法恢复。")
+            with col_draft2:
+                if st.button("🗑️ 抛弃旧草稿，全新开始", use_container_width=True):
+                    clear_draft()
                     st.rerun()
-                else:
-                    st.error("草稿文件损坏，无法恢复。")
-        with col_draft2:
-            if st.button("🗑️ 抛弃旧草稿，全新开始", use_container_width=True):
-                clear_draft()
-                st.rerun()
-        st.divider()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        article_url_input = st.text_area("📝 输入文章链接 (每行一个，支持批量)", value=st.session_state.article_url, height=150)
-    with col2:
-        video_url_input = st.text_area("📺 输入 YouTube 视频链接 (每行一个，支持批量)", value=st.session_state.video_url, height=150)
-    
+
+    input_col1, input_col2 = st.columns(2)
+    with input_col1:
+        with st.container(border=True):
+            render_section_intro("文章链接池", "适合导入多篇新闻、报告或博客文章；每行一个链接。", "Articles")
+            article_url_input = st.text_area(
+                "📝 输入文章链接 (每行一个，支持批量)",
+                value=st.session_state.article_url,
+                height=180,
+                placeholder="https://example.com/article-1\nhttps://example.com/article-2"
+            )
+    with input_col2:
+        with st.container(border=True):
+            render_section_intro("视频链接池", "适合把 YouTube 字幕与文章一起并入同一份素材上下文。", "Videos")
+            video_url_input = st.text_area(
+                "📺 输入 YouTube 视频链接 (每行一个，支持批量)",
+                value=st.session_state.video_url,
+                height=180,
+                placeholder="https://youtu.be/...\nhttps://www.youtube.com/watch?v=..."
+            )
+
     with st.container(border=True):
         render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
         st.markdown("<p class='toolbar-note'>建议先把主题相近的文章和视频放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
         if st.button("开始批量提取内容", type="primary", use_container_width=True):
             article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
             video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
-    
+
             if not article_urls and not video_urls:
                 st.warning("请至少输入一个链接！")
             else:
@@ -832,7 +848,7 @@ if st.session_state.current_step == 1:
                     extracted_imgs = []
                     errors = []
                     success_count = 0
-                    
+
                     for idx, a_url in enumerate(article_urls):
                         art_content, art_imgs, art_err = get_content_from_url(a_url)
                         if art_content:
@@ -841,7 +857,7 @@ if st.session_state.current_step == 1:
                             success_count += 1
                         else:
                             errors.append(f"文章 {idx+1} 提取失败: {art_err}")
-                            
+
                     for idx, v_url in enumerate(video_urls):
                         vid_content, vid_imgs, vid_err = get_content_from_url(v_url)
                         if vid_content:
@@ -849,16 +865,16 @@ if st.session_state.current_step == 1:
                             success_count += 1
                         else:
                             errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
-                    
+
                     extracted_imgs = extracted_imgs[:15]
-    
+
                     if combined_content:
                         st.session_state.article_url = article_url_input
                         st.session_state.video_url = video_url_input
                         st.session_state.source_content = combined_content
                         st.session_state.source_images = extracted_imgs
                         st.session_state.extraction_success = True
-                        
+
                         if errors:
                             st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
                         else:
@@ -869,108 +885,104 @@ if st.session_state.current_step == 1:
                     else:
                         st.session_state.extraction_success = False
                         st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
-                
+
     if st.session_state.extraction_success:
-        with st.expander("预览批量聚合的原始素材", expanded=False):
+        with st.container(border=True):
+            render_section_intro("聚合素材预览", "先快速检查抓取结果，再决定是走手动精调还是全自动驾驶。", "Preview")
             if st.session_state.source_images:
-                st.markdown("🖼️ **提取到的核心配图：**")
+                st.markdown("#### 核心配图")
                 img_cols = st.columns(3)
                 for idx, img_url in enumerate(st.session_state.source_images):
                     with img_cols[idx % 3]:
                         st.image(img_url, use_column_width=True)
                 st.divider()
-                
-            st.markdown("📄 **合并后的文本正文：**")
+
+            st.markdown("#### 合并后的文本正文")
             preview_text = st.session_state.source_content[:1800] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1800 else st.session_state.source_content
             st.code(preview_text, language="markdown")
-        
-        # 💡 核心新增：手动模式与全自动驾驶模式的分流
-        st.markdown("### 选择工作流模式")
-        col_flow1, col_flow2 = st.columns(2)
-        
-        with col_flow1:
-            if st.button("👉 手动精调模式 (逐步确认)", use_container_width=True):
-                go_to_step(2)
-                st.rerun()
-                
-        with col_flow2:
-            if st.button("🚀 一键全自动驾驶 (AI路由直达定稿)", type="primary", use_container_width=True):
-                if not api_key:
-                    st.error("⚠️ 请先在左侧边栏输入 API Key！")
-                    st.stop()
-                    
-                with st.status("🤖 全自动驾驶已启动，AI 正在接管工作流...", expanded=True) as status:
-                    # 1. AI 智能选角 (Routing)
-                    st.write("🔍 正在分析素材内容，为您匹配最佳编辑人设...")
-                    editor_names = list(prompts_data["editors"].keys())
-                    routing_prompt = f"""你是一个智能路由系统。请阅读以下素材，判断哪种身份最适合将其改写为深度文章。
-                    请只输出角色的完整名称，绝不允许包含任何其他标点或解释废话！
-                    可选角色：{', '.join(editor_names)}"""
-                    
-                    chosen_editor_raw = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=routing_prompt, user_content=st.session_state.source_content[:5000] # 只传前5000字判断以节省Token
-                    )
-                    
-                    chosen_editor = chosen_editor_raw.strip() if chosen_editor_raw else ""
-                    if chosen_editor not in editor_names:
-                        chosen_editor = editor_names[0] # 容错回退
-                        
-                    st.session_state.selected_role = chosen_editor
-                    st.write(f"✅ 意图识别完成，已自动指派：**【{chosen_editor}】**")
-                    
-                    # 2. 自动生成初稿
-                    st.write("✍️ 编辑正在奋笔疾书，生成初稿中...")
-                    editor_prompt = prompts_data["editors"][chosen_editor]
-                    global_instruction = prompts_data.get("global_instruction", "")
-                    final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
-                    
-                    draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
-                    st.session_state.draft_article = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
-                    )
-                    
-                    # 3. 自动主编审查
-                    st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
-                    reviewer_prompt = prompts_data["reviewer"]
-                    anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
-                    final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
-                    
-                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
-                    st.session_state.review_feedback = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
-                    )
-                    
-                    # 4. 自动接收意见并定稿
-                    st.write("✨ 接收修改意见，正在进行最终打磨...")
-                    modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
-                    content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
-                    
-                    st.session_state.final_article = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=modification_prompt, user_content=content_to_modify
-                    )
-                    
-                    # 5. 可选：自动生成脚本
-                    if enable_script:
-                        st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
-                        script_sys_prompt = get_script_sys_prompt(script_duration)
-                        st.session_state.spoken_script = call_llm(
-                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                            system_prompt=script_sys_prompt,
-                            user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                        )
-                    else:
-                        st.session_state.spoken_script = ""
-                        
-                    status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
-                
-                # 状态流转与保存
-                go_to_step(5)
-                st.rerun()
 
+        with st.container(border=True):
+            render_section_intro("选择工作流模式", "手动精调适合逐步把关，全自动驾驶适合快速得到高完成度定稿。", "Workflow")
+            col_flow1, col_flow2 = st.columns(2)
+
+            with col_flow1:
+                st.markdown("<p class='toolbar-note'>逐步确认编辑角色、初稿、审稿意见与修改结果，适合需要人工把关的稿件。</p>", unsafe_allow_html=True)
+                if st.button("👉 手动精调模式 (逐步确认)", use_container_width=True):
+                    go_to_step(2)
+                    st.rerun()
+
+            with col_flow2:
+                st.markdown("<p class='toolbar-note'>自动完成角色路由、写稿、审稿、改稿和可选脚本生成，适合快速交付。</p>", unsafe_allow_html=True)
+                if st.button("🚀 一键全自动驾驶 (AI路由直达定稿)", type="primary", use_container_width=True):
+                    if not api_key:
+                        st.error("⚠️ 请先在左侧边栏输入 API Key！")
+                        st.stop()
+
+                    with st.status("🤖 全自动驾驶已启动，AI 正在接管工作流...", expanded=True) as status:
+                        st.write("🔍 正在分析素材内容，为您匹配最佳编辑人设...")
+                        editor_names = list(prompts_data["editors"].keys())
+                        routing_prompt = f"""你是一个智能路由系统。请阅读以下素材，判断哪种身份最适合将其改写为深度文章。
+                        请只输出角色的完整名称，绝不允许包含任何其他标点或解释废话！
+                        可选角色：{', '.join(editor_names)}"""
+
+                        chosen_editor_raw = call_llm(
+                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                            system_prompt=routing_prompt, user_content=st.session_state.source_content[:5000]
+                        )
+
+                        chosen_editor = chosen_editor_raw.strip() if chosen_editor_raw else ""
+                        if chosen_editor not in editor_names:
+                            chosen_editor = editor_names[0]
+
+                        st.session_state.selected_role = chosen_editor
+                        st.write(f"✅ 意图识别完成，已自动指派：**【{chosen_editor}】**")
+
+                        st.write("✍️ 编辑正在奋笔疾书，生成初稿中...")
+                        editor_prompt = prompts_data["editors"][chosen_editor]
+                        global_instruction = prompts_data.get("global_instruction", "")
+                        final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
+
+                        draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
+                        st.session_state.draft_article = call_llm(
+                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                            system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
+                        )
+
+                        st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
+                        reviewer_prompt = prompts_data["reviewer"]
+                        anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
+                        final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
+
+                        combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                        st.session_state.review_feedback = call_llm(
+                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                            system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
+                        )
+
+                        st.write("✨ 接收修改意见，正在进行最终打磨...")
+                        modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
+                        content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
+
+                        st.session_state.final_article = call_llm(
+                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                            system_prompt=modification_prompt, user_content=content_to_modify
+                        )
+
+                        if enable_script:
+                            st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
+                            script_sys_prompt = get_script_sys_prompt(script_duration)
+                            st.session_state.spoken_script = call_llm(
+                                api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                                system_prompt=script_sys_prompt,
+                                user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                            )
+                        else:
+                            st.session_state.spoken_script = ""
+
+                        status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
+
+                    go_to_step(5)
+                    st.rerun()
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
     render_section_intro("初稿生成", "选择合适的编辑角色，确认当前模型与写作规范，然后输出首版文章。", "Step 02")
@@ -1231,57 +1243,79 @@ elif st.session_state.current_step == 5:
                 st.rerun()
 
     with right_col:
-        st.markdown("### 精修侧栏")
-        st.info("💡 **Tips:** 你可以框选左侧某段文字发给我，让我重写；或者问我文章里某句结论在原文中的出处在哪里。")
-        
+        with st.container(border=True):
+            render_section_intro("精修侧栏", "在这里追问出处、重写局部段落，或把主稿改成更适合公众号和视频的表达。", "Assistant")
+            st.markdown("<p class='toolbar-note'>常用操作：追问某句结论的原文出处、要求重写某段、补一版更适合导语的开场、把段落改成更适合视频口播的语气。</p>", unsafe_allow_html=True)
+            quick_col1, quick_col2 = st.columns(2)
+            with quick_col1:
+                st.markdown("- 重写一段为更克制的媒体口吻")
+                st.markdown("- 追问文中某个数据的素材出处")
+            with quick_col2:
+                st.markdown("- 补一版更抓人的导语")
+                st.markdown("- 改写为更适合口播的表达")
+
+        with st.container(border=True):
+            render_section_intro("快捷动作", "先给使用者几个明确的提问方向，降低上手成本。", "Shortcuts")
+            shortcut_col1, shortcut_col2 = st.columns(2)
+            with shortcut_col1:
+                st.caption("适合改文")
+                st.markdown("- 帮我把导语写得更抓人")
+                st.markdown("- 把第三段改成更像媒体报道")
+            with shortcut_col2:
+                st.caption("适合追溯")
+                st.markdown("- 这句结论在原文哪一段")
+                st.markdown("- 这个数据的素材出处是什么")
+
         with st.container(border=True):
             render_section_intro("对话区", "所有精修历史都保存在这里，方便反复迭代。", "Chat")
             chat_container = st.container(height=500)
-        
-        with chat_container:
-            for msg in st.session_state.chat_history:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-        
-        if user_query := st.chat_input("输入你的修改指令或疑问（回车发送）..."):
-            
-            st.session_state.chat_history.append({"role": "user", "content": user_query})
+
             with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(user_query)
-                    
-                with st.chat_message("assistant"):
-                    with st.spinner("思考与检索中..."):
-                        
-                        chat_sys_prompt = f"""你是一个极其专业的文章精修与溯源助手。
-                        
-                        【你的参考资料库（唯一的真相来源）】：
-                        {st.session_state.source_content}
-                        
-                        【当前正在精修的定稿文章】：
-                        {st.session_state.final_article}
-                        
-                        【你的任务】：
-                        1. 如果用户要求溯源，请精准定位到【参考资料库】中的原文片段，并客观回答。
-                        2. 如果用户要求重写某一段落，请直接输出修改后能够无缝替换回去的完美段落，不要说废话。
-                        3. 如果用户基于文章进行衍生提问，请结合上述资料给出专业见解。
-                        """
-                        
-                        history_to_send = st.session_state.chat_history[:-1]
-                        
-                        ai_response = call_llm(
-                            api_key=api_key, 
-                            base_url=current_base_url, 
-                            model_name=selected_model,
-                            system_prompt=chat_sys_prompt,
-                            user_content=user_query,
-                            history=history_to_send
-                        )
-                        st.markdown(ai_response)
-                        
-            st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
-            save_draft()
+                for msg in st.session_state.chat_history:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+
+            if user_query := st.chat_input("输入你的修改指令或疑问（回车发送）..."):
+                st.session_state.chat_history.append({"role": "user", "content": user_query})
+                with chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(user_query)
+
+                    with st.chat_message("assistant"):
+                        with st.spinner("思考与检索中..."):
+                            chat_sys_prompt = f"""你是一个极其专业的文章精修与溯源助手。
+
+                            【你的参考资料库（唯一的真相来源）】：
+                            {st.session_state.source_content}
+
+                            【当前正在精修的定稿文章】：
+                            {st.session_state.final_article}
+
+                            【你的任务】：
+                            1. 如果用户要求溯源，请精准定位到【参考资料库】中的原文片段，并客观回答。
+                            2. 如果用户要求重写某一段落，请直接输出修改后能够无缝替换回去的完美段落，不要说废话。
+                            3. 如果用户基于文章进行衍生提问，请结合上述资料给出专业见解。
+                            """
+
+                            history_to_send = st.session_state.chat_history[:-1]
+
+                            ai_response = call_llm(
+                                api_key=api_key,
+                                base_url=current_base_url,
+                                model_name=selected_model,
+                                system_prompt=chat_sys_prompt,
+                                user_content=user_query,
+                                history=history_to_send
+                            )
+                            st.markdown(ai_response)
+
+                st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+                save_draft()
+                st.rerun()            save_draft()
             st.rerun()
+
+
+
 
 
 
