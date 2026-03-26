@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
@@ -388,14 +388,292 @@ def get_script_sys_prompt(duration_str):
 * ✨ **视觉特效/字幕**: 屏幕突然亮起，居中显示大字特效“超级大瓜”。
 """
 
+def inject_ui_theme():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --panel: rgba(255, 255, 255, 0.78);
+            --border: rgba(41, 59, 51, 0.12);
+            --text: #16211c;
+            --text-muted: #5e6d66;
+            --brand: #1f6f5f;
+            --brand-strong: #174f44;
+            --shadow-soft: 0 18px 40px rgba(22, 33, 28, 0.08);
+            --shadow-strong: 0 24px 60px rgba(22, 33, 28, 0.12);
+            --radius-lg: 24px;
+            --radius-md: 18px;
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(31, 111, 95, 0.12), transparent 32%),
+                radial-gradient(circle at top right, rgba(201, 139, 93, 0.10), transparent 24%),
+                linear-gradient(180deg, #f4f8f5 0%, #ecf1ee 100%);
+            color: var(--text);
+        }
+        [data-testid="stAppViewContainer"] > .main { padding-top: 1.5rem; }
+        [data-testid="stHeader"] { background: rgba(244, 248, 245, 0.65); }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(18, 32, 27, 0.96), rgba(26, 44, 37, 0.92));
+            border-right: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        [data-testid="stSidebar"] * { color: #eef5f1; }
+        [data-testid="stSidebar"] .stTextInput input,
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] .stTextArea textarea {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.10) !important;
+            color: #eef5f1 !important;
+        }
+        .block-container {
+            max-width: 1440px;
+            padding-top: 0.5rem;
+            padding-bottom: 4rem;
+        }
+        .app-hero {
+            margin-bottom: 1.25rem;
+            padding: 2rem 2.25rem;
+            border-radius: var(--radius-lg);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            background: linear-gradient(135deg, rgba(16, 33, 29, 0.97), rgba(31, 111, 95, 0.90));
+            box-shadow: var(--shadow-strong);
+            color: #f5faf7;
+        }
+        .app-kicker {
+            display: inline-flex;
+            margin-bottom: 0.85rem;
+            padding: 0.35rem 0.8rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.14);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+        }
+        .app-hero h1 { margin: 0; color: #f8fdfb; font-size: 2.3rem; }
+        .app-hero p {
+            max-width: 840px;
+            margin: 0.7rem 0 1.25rem;
+            color: rgba(248, 253, 251, 0.82);
+            font-size: 1rem;
+            line-height: 1.7;
+        }
+        .hero-metrics, .step-grid, .chip-row, .mode-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+        .metric-card, .mode-card {
+            min-width: 160px;
+            padding: 0.95rem 1rem;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: rgba(255, 255, 255, 0.10);
+        }
+        .metric-card strong, .mode-card strong {
+            display: block;
+            margin-bottom: 0.3rem;
+            color: #f5faf7;
+            font-size: 1.05rem;
+        }
+        .metric-card span, .mode-card span {
+            color: rgba(245, 250, 247, 0.72);
+            font-size: 0.86rem;
+            line-height: 1.5;
+        }
+        .stepper {
+            margin: 0.5rem 0 1rem;
+            padding: 1rem 1.1rem;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.65);
+            box-shadow: var(--shadow-soft);
+        }
+        .stepper-item {
+            flex: 1 1 150px;
+            min-width: 120px;
+            padding: 0.9rem 1rem;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            background: rgba(244, 248, 246, 0.88);
+        }
+        .stepper-item.active {
+            background: linear-gradient(135deg, rgba(31, 111, 95, 0.12), rgba(201, 139, 93, 0.12));
+            border-color: rgba(31, 111, 95, 0.28);
+        }
+        .stepper-item.done {
+            background: rgba(31, 138, 85, 0.08);
+            border-color: rgba(31, 138, 85, 0.20);
+        }
+        .step-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            margin-bottom: 0.45rem;
+            border-radius: 50%;
+            background: rgba(22, 33, 28, 0.08);
+            color: var(--brand-strong);
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+        .stepper-item.active .step-index { background: var(--brand); color: #ffffff; }
+        .step-label { display: block; margin-bottom: 0.2rem; color: var(--text); font-weight: 700; }
+        .step-desc { color: var(--text-muted); font-size: 0.82rem; line-height: 1.5; }
+        .section-head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; margin-bottom: 0.8rem; }
+        .section-title { margin: 0; font-size: 1.05rem; font-weight: 700; color: var(--text); }
+        .section-subtitle { margin: 0.25rem 0 0; color: var(--text-muted); font-size: 0.92rem; line-height: 1.6; }
+        .eyebrow {
+            display: inline-flex;
+            margin-bottom: 0.35rem;
+            color: var(--brand);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.42rem 0.72rem;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.65);
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .chip.active {
+            background: rgba(31, 111, 95, 0.10);
+            border-color: rgba(31, 111, 95, 0.22);
+            color: var(--brand-strong);
+        }
+        .context-strip {
+            margin: 0.2rem 0 1rem;
+            padding: 0.95rem 1.1rem;
+            border-radius: 14px;
+            border: 1px solid rgba(31, 111, 95, 0.12);
+            background: rgba(31, 111, 95, 0.06);
+        }
+        .toolbar-note { color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; }
+        .stButton > button, .stDownloadButton > button {
+            min-height: 2.85rem;
+            border-radius: 14px;
+            border: 1px solid rgba(31, 111, 95, 0.14);
+            background: linear-gradient(180deg, #ffffff, #f5f8f6);
+            color: var(--text);
+            font-weight: 700;
+            box-shadow: 0 8px 18px rgba(22, 33, 28, 0.06);
+        }
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+            color: #ffffff;
+            border-color: rgba(31, 111, 95, 0.55);
+            box-shadow: 0 14px 28px rgba(31, 111, 95, 0.24);
+        }
+        .stTextInput input, .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
+            border-radius: 14px !important;
+            border: 1px solid var(--border) !important;
+            background: rgba(255, 255, 255, 0.88) !important;
+        }
+        .stCodeBlock, [data-testid="stCodeBlock"] {
+            border-radius: 16px !important;
+            border: 1px solid rgba(22, 33, 28, 0.08);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_app_hero():
+    st.markdown(
+        """
+        <section class="app-hero">
+            <div class="app-kicker">Professional Media Workspace</div>
+            <h1>公众号文章生成助手</h1>
+            <p>围绕游戏行业内容生产打造的一站式工作台。聚合多源素材、智能分配角色、统一审稿与定稿，并延伸到脚本、配图和分发环节。</p>
+            <div class="hero-metrics">
+                <div class="metric-card">
+                    <strong>多源聚合</strong>
+                    <span>文章链接、YouTube 字幕、网页图片统一进入同一工作流</span>
+                </div>
+                <div class="metric-card">
+                    <strong>多角色协作</strong>
+                    <span>编辑、审稿、精修、分镜脚本均可按角色和规范驱动</span>
+                </div>
+                <div class="metric-card">
+                    <strong>一站式定稿</strong>
+                    <span>从初稿到导出、飞书推送和配图建议全部在同一界面完成</span>
+                </div>
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_stepper(current_step):
+    step_meta = [
+        ("素材输入", "汇聚文章、视频与图像素材"),
+        ("初稿生成", "选择角色并产出首版文章"),
+        ("严格审稿", "核查事实、逻辑与风格"),
+        ("定稿修订", "接收意见并形成最终版本"),
+        ("分发工作台", "脚本、配图、导出与精修")
+    ]
+    cards = []
+    for idx, (label, desc) in enumerate(step_meta, start=1):
+        if idx < current_step:
+            class_name = "stepper-item done"
+        elif idx == current_step:
+            class_name = "stepper-item active"
+        else:
+            class_name = "stepper-item"
+        cards.append(
+            f"""
+            <div class="{class_name}">
+                <div class="step-index">{idx}</div>
+                <span class="step-label">{label}</span>
+                <span class="step-desc">{desc}</span>
+            </div>
+            """
+        )
+    st.markdown(f'<section class="stepper"><div class="step-grid">{"".join(cards)}</div></section>', unsafe_allow_html=True)
+
+
+def render_section_intro(title, subtitle=None, eyebrow=None):
+    eyebrow_html = f'<div class="eyebrow">{eyebrow}</div>' if eyebrow else ""
+    subtitle_html = f'<p class="section-subtitle">{subtitle}</p>' if subtitle else ""
+    st.markdown(
+        f"""
+        <div class="section-head">
+            <div>
+                {eyebrow_html}
+                <h3 class="section-title">{title}</h3>
+                {subtitle_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_context_strip(items):
+    chips = "".join([f'<span class="chip active">{item}</span>' for item in items if item])
+    if chips:
+        st.markdown(f'<div class="context-strip"><div class="chip-row">{chips}</div></div>', unsafe_allow_html=True)
 # ==========================================
 # 4. 页面与工作流渲染
 # ==========================================
 st.set_page_config(page_title="公众号文章生成助手", page_icon="🕹️", layout="wide")
+inject_ui_theme()
 
 prompts_data = load_prompts()
 
 with st.sidebar:
+    st.markdown("## 控制面板")
+    st.caption("管理模型、脚本生成策略与写作 Prompt，所有改动都会直接作用到当前工作流。")
     st.header("⚙️ 引擎设置")
     api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
     
@@ -503,11 +781,13 @@ with st.sidebar:
                 st.success("已成功更新全局规范！")
                 st.rerun()
 
-st.title("🕹️ 公众号文章生成助手 - 多智能体工作流")
+render_app_hero()
+render_stepper(st.session_state.current_step)
 
 # --- Step 1 ---
 if st.session_state.current_step == 1:
-    st.header("第一步：输入素材源")
+    render_section_intro("素材输入中枢", "在同一界面批量汇聚文章链接、YouTube 链接与图片素材，统一进入后续的编辑与审稿流程。", "Step 01")
+    st.markdown("""<div class="mode-grid"><div class="mode-card"><strong>批量素材输入</strong><span>支持多篇文章和多个视频链接合并提取，适合做专题与深度整合。</span></div><div class="mode-card"><strong>两种工作流模式</strong><span>手动精调适合逐步把关，全自动驾驶适合快速直达定稿。</span></div><div class="mode-card"><strong>统一定稿工作台</strong><span>脚本、搜图、导出、飞书推送和精修助手都在最后一页集中处理。</span></div></div>""", unsafe_allow_html=True)
     
     if os.path.exists(DRAFT_FILE):
         st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？")
@@ -685,7 +965,8 @@ if st.session_state.current_step == 1:
 
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
-    st.header("第二步：选择编辑与生成初稿")
+    render_section_intro("初稿生成", "选择合适的编辑角色，确认当前模型与写作规范，然后输出首版文章。", "Step 02")
+    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     editor_options = list(prompts_data["editors"].keys())
     if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
@@ -732,7 +1013,8 @@ elif st.session_state.current_step == 2:
 
 # --- Step 3 (手动模式) ---
 elif st.session_state.current_step == 3:
-    st.header("第三步：审稿员审查初稿")
+    render_section_intro("严格审稿", "主编从事实、逻辑和风格三个维度核查初稿，确保对外可发布。", "Step 03")
+    render_context_strip([f"当前模型：{selected_model}", f"当前角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     with st.expander("📝 查看当前初稿内容 (鼠标移至右上角可一键复制)", expanded=True):
         st.code(st.session_state.draft_article, language="markdown")
@@ -791,7 +1073,8 @@ elif st.session_state.current_step == 3:
 
 # --- Step 4 (手动模式) ---
 elif st.session_state.current_step == 4:
-    st.header("第四步：处理审查意见")
+    render_section_intro("定稿修订", "根据主编反馈完成最后一轮修改，并同步决定是否生成脚本。", "Step 04")
+    render_context_strip([f"当前模型：{selected_model}", f"当前角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     st.info("**主编审稿意见 (鼠标移至下方框内右上角可复制)：**")
     st.code(st.session_state.review_feedback, language="markdown")
@@ -851,21 +1134,23 @@ elif st.session_state.current_step == 4:
 
 # --- Step 5：终极版分栏 UI ---
 elif st.session_state.current_step == 5:
-    st.header("第五步：文章定稿、精修与分发")
+    render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 05")
+    render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
     
-    left_col, right_col = st.columns([1.3, 1])
+    st.markdown("<p class='toolbar-note'>主稿、分镜脚本、搜图和分发操作统一留在左侧主工作区；右侧专门用于精修、追问和追溯原文依据。</p>", unsafe_allow_html=True)
+    left_col, right_col = st.columns([1.45, 0.95])
     
     with left_col:
-        st.markdown("### 🏆 最终成稿 (深度图文)")
+        st.markdown("### 主稿面板")
         st.code(st.session_state.final_article, language="markdown")
         
         if st.session_state.spoken_script:
             st.divider()
-            st.markdown(f"### 🎬 🎙️ {script_duration} 剪映AI 分镜脚本")
+            st.markdown(f"### 分镜脚本 · {script_duration}")
             st.code(st.session_state.spoken_script, language="markdown")
         
         st.divider()
-        st.markdown("### 🔍 智能配图助手 (Google 搜图建议)")
+        st.markdown("### 智能配图助手")
         st.info("需要为文章寻找真实、高质的配图？点击下方按钮，AI 将根据文章核心内容提取 10 个精确的 Google 图片搜索关键词。")
         
         if st.button("💡 提取 10 个 Google 搜图关键词", use_container_width=True):
@@ -938,7 +1223,7 @@ elif st.session_state.current_step == 5:
                 st.rerun()
 
     with right_col:
-        st.markdown("### ✨ 文章精修与溯源助手")
+        st.markdown("### 精修侧栏")
         st.info("💡 **Tips:** 你可以框选左侧某段文字发给我，让我重写；或者问我文章里某句结论在原文中的出处在哪里。")
         
         chat_container = st.container(height=500)
@@ -987,3 +1272,10 @@ elif st.session_state.current_step == 5:
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
             save_draft()
             st.rerun()
+
+
+
+
+
+
+
