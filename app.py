@@ -791,7 +791,8 @@ render_stepper(st.session_state.current_step)
 # --- Step 1 ---
 if st.session_state.current_step == 1:
     render_section_intro("素材输入中枢", "在同一界面批量汇聚文章链接、YouTube 链接与图片素材，统一进入后续的编辑与审稿流程。", "Step 01")
-    st.markdown("""<div class="mode-grid"><div class="mode-card"><strong>批量素材输入</strong><span>支持多篇文章和多个视频链接合并提取，适合做专题与深度整合。</span></div><div class="mode-card"><strong>两种工作流模式</strong><span>手动精调适合逐步把关，全自动驾驶适合快速直达定稿。</span></div><div class="mode-card"><strong>统一定稿工作台</strong><span>脚本、搜图、导出、飞书推送和精修助手都在最后一页集中处理。</span></div></div>""", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("""<div class="mode-grid"><div class="mode-card"><strong>批量素材输入</strong><span>支持多篇文章和多个视频链接合并提取，适合做专题与深度整合。</span></div><div class="mode-card"><strong>两种工作流模式</strong><span>手动精调适合逐步把关，全自动驾驶适合快速直达定稿。</span></div><div class="mode-card"><strong>统一定稿工作台</strong><span>脚本、搜图、导出、飞书推送和精修助手都在最后一页集中处理。</span></div></div>""", unsafe_allow_html=True)
     
     if os.path.exists(DRAFT_FILE):
         st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？")
@@ -815,69 +816,72 @@ if st.session_state.current_step == 1:
     with col2:
         video_url_input = st.text_area("📺 输入 YouTube 视频链接 (每行一个，支持批量)", value=st.session_state.video_url, height=150)
     
-    if st.button("开始批量提取内容"):
-        article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
-        video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
-
-        if not article_urls and not video_urls:
-            st.warning("请至少输入一个链接！")
-        else:
-            total_urls = len(article_urls) + len(video_urls)
-            with st.spinner(f"启动全息解析引擎，正在批量获取 {total_urls} 个素材..."):
-                combined_content = ""
-                extracted_imgs = []
-                errors = []
-                success_count = 0
-                
-                for idx, a_url in enumerate(article_urls):
-                    art_content, art_imgs, art_err = get_content_from_url(a_url)
-                    if art_content:
-                        combined_content += f"【文章素材 {idx+1}】来源于: {a_url}\n{art_content}\n\n================\n\n"
-                        extracted_imgs.extend(art_imgs)
-                        success_count += 1
-                    else:
-                        errors.append(f"文章 {idx+1} 提取失败: {art_err}")
-                        
-                for idx, v_url in enumerate(video_urls):
-                    vid_content, vid_imgs, vid_err = get_content_from_url(v_url)
-                    if vid_content:
-                        combined_content += f"【视频素材 {idx+1}】来源于: {v_url}\n{vid_content}\n\n================\n\n"
-                        success_count += 1
-                    else:
-                        errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
-                
-                extracted_imgs = extracted_imgs[:15]
-
-                if combined_content:
-                    st.session_state.article_url = article_url_input
-                    st.session_state.video_url = video_url_input
-                    st.session_state.source_content = combined_content
-                    st.session_state.source_images = extracted_imgs
-                    st.session_state.extraction_success = True
+    with st.container(border=True):
+        render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
+        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章和视频放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
+        if st.button("开始批量提取内容", type="primary", use_container_width=True):
+            article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
+            video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
+    
+            if not article_urls and not video_urls:
+                st.warning("请至少输入一个链接！")
+            else:
+                total_urls = len(article_urls) + len(video_urls)
+                with st.spinner(f"启动全息解析引擎，正在批量获取 {total_urls} 个素材..."):
+                    combined_content = ""
+                    extracted_imgs = []
+                    errors = []
+                    success_count = 0
                     
-                    if errors:
-                        st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
-                    else:
-                        if len(extracted_imgs) > 0:
-                            st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并提取到 {len(extracted_imgs)} 张核心配图。")
+                    for idx, a_url in enumerate(article_urls):
+                        art_content, art_imgs, art_err = get_content_from_url(a_url)
+                        if art_content:
+                            combined_content += f"【文章素材 {idx+1}】来源于: {a_url}\n{art_content}\n\n================\n\n"
+                            extracted_imgs.extend(art_imgs)
+                            success_count += 1
                         else:
-                            st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
-                else:
-                    st.session_state.extraction_success = False
-                    st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
-            
+                            errors.append(f"文章 {idx+1} 提取失败: {art_err}")
+                            
+                    for idx, v_url in enumerate(video_urls):
+                        vid_content, vid_imgs, vid_err = get_content_from_url(v_url)
+                        if vid_content:
+                            combined_content += f"【视频素材 {idx+1}】来源于: {v_url}\n{vid_content}\n\n================\n\n"
+                            success_count += 1
+                        else:
+                            errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
+                    
+                    extracted_imgs = extracted_imgs[:15]
+    
+                    if combined_content:
+                        st.session_state.article_url = article_url_input
+                        st.session_state.video_url = video_url_input
+                        st.session_state.source_content = combined_content
+                        st.session_state.source_images = extracted_imgs
+                        st.session_state.extraction_success = True
+                        
+                        if errors:
+                            st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
+                        else:
+                            if len(extracted_imgs) > 0:
+                                st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并提取到 {len(extracted_imgs)} 张核心配图。")
+                            else:
+                                st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
+                    else:
+                        st.session_state.extraction_success = False
+                        st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
+                
     if st.session_state.extraction_success:
         with st.expander("预览批量聚合的原始素材", expanded=False):
             if st.session_state.source_images:
                 st.markdown("🖼️ **提取到的核心配图：**")
-                img_cols = st.columns(2)
+                img_cols = st.columns(3)
                 for idx, img_url in enumerate(st.session_state.source_images):
-                    with img_cols[idx % 2]:
+                    with img_cols[idx % 3]:
                         st.image(img_url, use_column_width=True)
                 st.divider()
                 
             st.markdown("📄 **合并后的文本正文：**")
-            preview_text = st.session_state.source_content[:1500] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1500 else st.session_state.source_content
+            preview_text = st.session_state.source_content[:1800] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1800 else st.session_state.source_content
             st.code(preview_text, language="markdown")
         
         # 💡 核心新增：手动模式与全自动驾驶模式的分流
@@ -1230,7 +1234,9 @@ elif st.session_state.current_step == 5:
         st.markdown("### 精修侧栏")
         st.info("💡 **Tips:** 你可以框选左侧某段文字发给我，让我重写；或者问我文章里某句结论在原文中的出处在哪里。")
         
-        chat_container = st.container(height=500)
+        with st.container(border=True):
+            render_section_intro("对话区", "所有精修历史都保存在这里，方便反复迭代。", "Chat")
+            chat_container = st.container(height=500)
         
         with chat_container:
             for msg in st.session_state.chat_history:
@@ -1276,6 +1282,14 @@ elif st.session_state.current_step == 5:
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
             save_draft()
             st.rerun()
+
+
+
+
+
+
+
+
 
 
 
