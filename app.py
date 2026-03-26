@@ -1311,8 +1311,8 @@ elif st.session_state.current_step == 5:
 
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
-                st.rerun()            save_draft()
-            st.rerun()
+                st.rerun()
+
 
 
 
