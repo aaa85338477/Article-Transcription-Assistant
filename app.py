@@ -58,7 +58,7 @@ def save_draft():
         'current_step', 'article_url', 'video_url', 'source_content', 
         'source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords'
+        'chat_history', 'image_keywords', 'selected_role'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -163,6 +163,7 @@ def push_to_feishu(article_text, script_text=None):
 # ==========================================
 # 2. 核心抓取函数
 # ==========================================
+# (抓取函数保持不变)
 def extract_youtube_transcript(url):
     try:
         parsed_url = urlparse(url)
@@ -396,14 +397,11 @@ prompts_data = load_prompts()
 
 with st.sidebar:
     st.header("⚙️ 引擎设置")
-    
-    # 💡 核心修改 1：调整下拉栏默认顺序，BLTCY 设为首选
     api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
     
     if api_provider == "BLTCY (柏拉图次元)":
         api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
         current_base_url = "https://api.bltcy.ai/v1"
-        # 💡 核心修改 3：扩充国产强力模型库
         available_models = [
             "gemini-3.1-pro-preview",
             "gemini-3.1-pro-preview-thinking-high",
@@ -434,7 +432,6 @@ with st.sidebar:
             "qwen3.5-flash"
         ]
 
-    # 💡 核心修改 2：默认锁定 gemini-3.1-pro-preview
     default_model_idx = 0
     if "gemini-3.1-pro-preview" in available_models:
         default_model_idx = available_models.index("gemini-3.1-pro-preview")
@@ -513,7 +510,7 @@ if st.session_state.current_step == 1:
     st.header("第一步：输入素材源")
     
     if os.path.exists(DRAFT_FILE):
-        st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？（如果在编辑中途刷新了网页，请点击恢复）")
+        st.info("📦 **系统提示**：检测到您上次有未完成的草稿进度，是否需要恢复？")
         col_draft1, col_draft2 = st.columns([1, 4])
         with col_draft1:
             if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
@@ -598,12 +595,95 @@ if st.session_state.current_step == 1:
             st.markdown("📄 **合并后的文本正文：**")
             preview_text = st.session_state.source_content[:1500] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1500 else st.session_state.source_content
             st.code(preview_text, language="markdown")
-            
-        if st.button("素材无误，继续下一步 👉"):
-            go_to_step(2)
-            st.rerun()
+        
+        # 💡 核心新增：手动模式与全自动驾驶模式的分流
+        st.markdown("### 选择工作流模式")
+        col_flow1, col_flow2 = st.columns(2)
+        
+        with col_flow1:
+            if st.button("👉 手动精调模式 (逐步确认)", use_container_width=True):
+                go_to_step(2)
+                st.rerun()
+                
+        with col_flow2:
+            if st.button("🚀 一键全自动驾驶 (AI路由直达定稿)", type="primary", use_container_width=True):
+                if not api_key:
+                    st.error("⚠️ 请先在左侧边栏输入 API Key！")
+                    st.stop()
+                    
+                with st.status("🤖 全自动驾驶已启动，AI 正在接管工作流...", expanded=True) as status:
+                    # 1. AI 智能选角 (Routing)
+                    st.write("🔍 正在分析素材内容，为您匹配最佳编辑人设...")
+                    editor_names = list(prompts_data["editors"].keys())
+                    routing_prompt = f"""你是一个智能路由系统。请阅读以下素材，判断哪种身份最适合将其改写为深度文章。
+                    请只输出角色的完整名称，绝不允许包含任何其他标点或解释废话！
+                    可选角色：{', '.join(editor_names)}"""
+                    
+                    chosen_editor_raw = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=routing_prompt, user_content=st.session_state.source_content[:5000] # 只传前5000字判断以节省Token
+                    )
+                    
+                    chosen_editor = chosen_editor_raw.strip() if chosen_editor_raw else ""
+                    if chosen_editor not in editor_names:
+                        chosen_editor = editor_names[0] # 容错回退
+                        
+                    st.session_state.selected_role = chosen_editor
+                    st.write(f"✅ 意图识别完成，已自动指派：**【{chosen_editor}】**")
+                    
+                    # 2. 自动生成初稿
+                    st.write("✍️ 编辑正在奋笔疾书，生成初稿中...")
+                    editor_prompt = prompts_data["editors"][chosen_editor]
+                    global_instruction = prompts_data.get("global_instruction", "")
+                    final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
+                    
+                    draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
+                    st.session_state.draft_article = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
+                    )
+                    
+                    # 3. 自动主编审查
+                    st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
+                    reviewer_prompt = prompts_data["reviewer"]
+                    anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
+                    final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
+                    
+                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    st.session_state.review_feedback = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
+                    )
+                    
+                    # 4. 自动接收意见并定稿
+                    st.write("✨ 接收修改意见，正在进行最终打磨...")
+                    modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
+                    content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
+                    
+                    st.session_state.final_article = call_llm(
+                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                        system_prompt=modification_prompt, user_content=content_to_modify
+                    )
+                    
+                    # 5. 可选：自动生成脚本
+                    if enable_script:
+                        st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
+                        script_sys_prompt = get_script_sys_prompt(script_duration)
+                        st.session_state.spoken_script = call_llm(
+                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
+                            system_prompt=script_sys_prompt,
+                            user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                        )
+                    else:
+                        st.session_state.spoken_script = ""
+                        
+                    status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
+                
+                # 状态流转与保存
+                go_to_step(5)
+                st.rerun()
 
-# --- Step 2 ---
+# --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
     st.header("第二步：选择编辑与生成初稿")
     
@@ -650,7 +730,7 @@ elif st.session_state.current_step == 2:
                 go_to_step(3)
                 st.rerun()
 
-# --- Step 3 ---
+# --- Step 3 (手动模式) ---
 elif st.session_state.current_step == 3:
     st.header("第三步：审稿员审查初稿")
     
@@ -709,7 +789,7 @@ elif st.session_state.current_step == 3:
                 go_to_step(4)
                 st.rerun()
 
-# --- Step 4 ---
+# --- Step 4 (手动模式) ---
 elif st.session_state.current_step == 4:
     st.header("第四步：处理审查意见")
     
