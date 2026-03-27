@@ -10,6 +10,8 @@ import requests
 import json
 from bs4 import BeautifulSoup
 import re
+import hashlib
+import html
 
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
@@ -57,7 +59,7 @@ def save_prompts(data):
 def save_draft():
     keys_to_save = [
         'current_step', 'article_url', 'video_url', 'source_content', 
-        'source_images', 'extraction_success', 'draft_article', 
+        'source_images', 'removed_source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
         'chat_history', 'image_keywords', 'selected_role'
     ]
@@ -87,6 +89,32 @@ def clear_draft():
             os.remove(DRAFT_FILE)
         except:
             pass
+
+def get_image_widget_key(prefix, image_url):
+    digest = hashlib.md5(image_url.encode('utf-8')).hexdigest()[:12]
+    return f'{prefix}_{digest}'
+
+def clear_image_selection_state():
+    for key in list(st.session_state.keys()):
+        if key.startswith('remove_image_'):
+            del st.session_state[key]
+
+def render_image_preview_card(image_url, title, badge_text, badge_class=""):
+    safe_url = html.escape(image_url, quote=True)
+    safe_title = html.escape(title)
+    safe_badge = html.escape(badge_text)
+    st.markdown(
+        f"""
+        <div class="image-preview-card {badge_class}">
+            <div class="image-preview-meta">
+                <span class="image-preview-title">{safe_title}</span>
+                <span class="image-preview-badge">{safe_badge}</span>
+            </div>
+            <img src="{safe_url}" alt="{safe_title}" />
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 # ==========================================
 # 1. API 与外部推送函数
@@ -344,6 +372,8 @@ def init_state():
         st.session_state.source_content = ""
     if 'source_images' not in st.session_state:
         st.session_state.source_images = []
+    if 'removed_source_images' not in st.session_state:
+        st.session_state.removed_source_images = []
     if 'extraction_success' not in st.session_state:
         st.session_state.extraction_success = False
     if 'draft_article' not in st.session_state:
@@ -559,6 +589,67 @@ def inject_ui_theme():
             background: rgba(31, 111, 95, 0.06);
         }
         .toolbar-note { color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; }
+        .image-preview-card {
+            margin-bottom: 0.65rem;
+            padding: 0.7rem;
+            border-radius: 18px;
+            border: 1px solid rgba(41, 59, 51, 0.12);
+            background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(247,250,248,0.94));
+            box-shadow: 0 10px 24px rgba(22, 33, 28, 0.06);
+            transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+        .image-preview-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(31, 111, 95, 0.34);
+            box-shadow: 0 16px 34px rgba(22, 33, 28, 0.10);
+        }
+        .image-preview-card.selected {
+            border-color: rgba(184, 67, 54, 0.42);
+            background: linear-gradient(180deg, rgba(255,245,244,0.98), rgba(255,250,249,0.96));
+            box-shadow: 0 16px 34px rgba(184, 67, 54, 0.10);
+        }
+        .image-preview-card.removed {
+            border-color: rgba(128, 140, 136, 0.24);
+            background: linear-gradient(180deg, rgba(248,249,248,0.96), rgba(243,245,244,0.94));
+            opacity: 0.92;
+        }
+        .image-preview-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin-bottom: 0.65rem;
+        }
+        .image-preview-title {
+            color: var(--text);
+            font-size: 0.88rem;
+            font-weight: 700;
+        }
+        .image-preview-badge {
+            padding: 0.24rem 0.6rem;
+            border-radius: 999px;
+            background: rgba(31, 111, 95, 0.10);
+            color: var(--brand-strong);
+            font-size: 0.76rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .image-preview-card.selected .image-preview-badge {
+            background: rgba(184, 67, 54, 0.12);
+            color: #a23b31;
+        }
+        .image-preview-card.removed .image-preview-badge {
+            background: rgba(128, 140, 136, 0.16);
+            color: #55615c;
+        }
+        .image-preview-card img {
+            display: block;
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            object-fit: cover;
+            border-radius: 14px;
+            border: 1px solid rgba(41, 59, 51, 0.08);
+        }
         .stButton > button, .stDownloadButton > button {
             min-height: 2.85rem;
             border-radius: 14px;
@@ -874,7 +965,10 @@ if st.session_state.current_step == 1:
                         st.session_state.video_url = video_url_input
                         st.session_state.source_content = combined_content
                         st.session_state.source_images = extracted_imgs
+                        st.session_state.removed_source_images = []
                         st.session_state.extraction_success = True
+                        clear_image_selection_state()
+                        save_draft()
 
                         if errors:
                             st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
@@ -889,13 +983,64 @@ if st.session_state.current_step == 1:
 
     if st.session_state.extraction_success:
         with st.container(border=True):
-            render_section_intro("聚合素材预览", "先快速检查抓取结果，再决定是走手动精调还是全自动驾驶。", "Preview")
+            render_section_intro("聚合素材预览", "先快速检查抓取结果，并手动移除会干扰分析的图片。", "Preview")
+            active_image_count = len(st.session_state.source_images)
+            removed_image_count = len(st.session_state.removed_source_images)
+            st.caption(f"当前参与分析图片：{active_image_count} 张｜已移除：{removed_image_count} 张")
+
             if st.session_state.source_images:
-                st.markdown("#### 核心配图")
+                st.markdown("#### 当前参与分析的图片")
                 img_cols = st.columns(3)
                 for idx, img_url in enumerate(st.session_state.source_images):
                     with img_cols[idx % 3]:
-                        st.image(img_url, use_column_width=True)
+                        remove_key = get_image_widget_key("remove_image", img_url)
+                        is_marked = st.session_state.get(remove_key, False)
+                        render_image_preview_card(
+                            img_url,
+                            f"图片 {idx + 1}",
+                            "已标记移除" if is_marked else "保留中",
+                            "selected" if is_marked else ""
+                        )
+                        st.checkbox("标记移除", key=remove_key)
+
+                selected_for_removal = [
+                    img_url for img_url in st.session_state.source_images
+                    if st.session_state.get(get_image_widget_key("remove_image", img_url), False)
+                ]
+                if st.button("🗑️ 移除已勾选图片", use_container_width=True):
+                    if selected_for_removal:
+                        st.session_state.source_images = [
+                            img_url for img_url in st.session_state.source_images
+                            if img_url not in selected_for_removal
+                        ]
+                        for img_url in selected_for_removal:
+                            if img_url not in st.session_state.removed_source_images:
+                                st.session_state.removed_source_images.append(img_url)
+                        clear_image_selection_state()
+                        save_draft()
+                        st.rerun()
+                    else:
+                        st.info("请先勾选想要移除的图片。")
+                st.divider()
+            else:
+                st.info("当前没有参与分析的图片，系统会自动退化为纯文本模式。")
+
+            if st.session_state.removed_source_images:
+                with st.expander(f"已移除图片（{len(st.session_state.removed_source_images)} 张，可恢复）", expanded=False):
+                    removed_cols = st.columns(3)
+                    for idx, img_url in enumerate(st.session_state.removed_source_images):
+                        with removed_cols[idx % 3]:
+                            render_image_preview_card(img_url, f"已移除图片 {idx + 1}", "已移除", "removed")
+                            if st.button("↩️ 恢复", key=get_image_widget_key("restore_image", img_url), use_container_width=True):
+                                st.session_state.removed_source_images = [
+                                    existing_url for existing_url in st.session_state.removed_source_images
+                                    if existing_url != img_url
+                                ]
+                                if img_url not in st.session_state.source_images:
+                                    st.session_state.source_images.append(img_url)
+                                clear_image_selection_state()
+                                save_draft()
+                                st.rerun()
                 st.divider()
 
             st.markdown("#### 合并后的文本正文")
@@ -904,6 +1049,7 @@ if st.session_state.current_step == 1:
 
         with st.container(border=True):
             render_section_intro("选择工作流模式", "手动精调适合逐步把关，全自动驾驶适合快速得到高完成度定稿。", "Workflow")
+            st.caption(f"当前将基于 {len(st.session_state.source_images)} 张图片和聚合正文进入后续生成流程。")
             col_flow1, col_flow2 = st.columns(2)
 
             with col_flow1:
@@ -943,7 +1089,10 @@ if st.session_state.current_step == 1:
                         global_instruction = prompts_data.get("global_instruction", "")
                         final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
 
-                        draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
+                        if st.session_state.source_images:
+                            draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
+                        else:
+                            draft_content = f"以下是多个来源的素材聚合内容，请根据纯文本进行深度分析与融合：\n\n{st.session_state.source_content}"
                         st.session_state.draft_article = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
@@ -1313,6 +1462,9 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
 
 
 
