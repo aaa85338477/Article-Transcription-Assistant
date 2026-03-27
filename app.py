@@ -37,14 +37,24 @@ def load_prompts():
         "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉...",
         "global_instruction": DEFAULT_GLOBAL_PROMPT
     }
-    
     if os.path.exists(PROMPTS_FILE):
         try:
-            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+            with open(PROMPTS_FILE, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
+
+                if "editors" not in data or not isinstance(data["editors"], dict):
+                    data["editors"] = {}
+
+                for role_name, role_prompt in default_data["editors"].items():
+                    if role_name not in data["editors"]:
+                        data["editors"][role_name] = role_prompt
+
+                if "reviewer" not in data:
+                    data["reviewer"] = default_data["reviewer"]
                 if "global_instruction" not in data:
                     data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
-                    save_prompts(data)
+
+                save_prompts(data)
                 return data
         except Exception:
             pass
