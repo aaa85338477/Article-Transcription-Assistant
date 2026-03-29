@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 import re
 import hashlib
 import html
+import base64
 
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
@@ -125,6 +126,27 @@ def render_image_preview_card(image_url, title, badge_text, badge_class=""):
         """,
         unsafe_allow_html=True
     )
+
+def uploaded_file_to_data_url(uploaded_file):
+    file_bytes = uploaded_file.getvalue()
+    mime_type = uploaded_file.type or "image/png"
+    encoded = base64.b64encode(file_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+def build_uploaded_image_material(uploaded_files):
+    uploaded_images = []
+    uploaded_text_blocks = []
+
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
+        data_url = uploaded_file_to_data_url(uploaded_file)
+        uploaded_images.append(data_url)
+        uploaded_text_blocks.append(
+            f"【截图素材 {idx}】文件名：{uploaded_file.name}\n说明：这是用户上传的网页截图，请直接从图片中提取正文、标题、数据、图表或关键上下文。"
+        )
+
+    combined_text = "\n\n================\n\n".join(uploaded_text_blocks)
+    return combined_text, uploaded_images
+
 
 # ==========================================
 # 1. API 与外部推送函数
@@ -1060,17 +1082,31 @@ if st.session_state.current_step == 1:
             )
 
     with st.container(border=True):
+        render_section_intro("截图上传区", "当网站无法抓取正文时，可以直接上传网页截图作为分析素材。支持多张图片混合输入。", "Screenshots")
+        uploaded_screenshots = st.file_uploader(
+            "🖼️ 上传网页截图（支持多张）",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            help="适合 Reddit、X、行业报告截图、数据图表或被反爬的网站页面截图。"
+        )
+        st.markdown("<p class='toolbar-note'>截图会作为可视化信息源直接送进模型分析；如果同时填写了链接，系统会把截图和链接正文一起聚合。</p>", unsafe_allow_html=True)
+        if uploaded_screenshots:
+            st.caption(f"当前已选择 {len(uploaded_screenshots)} 张截图素材。")
+
+    with st.container(border=True):
         render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
-        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章和视频放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
+        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章、视频和截图放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
         if st.button("开始批量提取内容", type="primary", use_container_width=True):
             article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
             video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
+            screenshot_count = len(uploaded_screenshots) if uploaded_screenshots else 0
 
-            if not article_urls and not video_urls:
-                st.warning("请至少输入一个链接！")
+            if not article_urls and not video_urls and screenshot_count == 0:
+                st.warning("请至少输入一个链接或上传一张截图！")
             else:
                 total_urls = len(article_urls) + len(video_urls)
-                with st.spinner(f"启动全息解析引擎，正在批量获取 {total_urls} 个素材..."):
+                total_materials = total_urls + screenshot_count
+                with st.spinner(f"启动全息解析引擎，正在批量获取 {total_materials} 个素材..."):
                     combined_content = ""
                     extracted_imgs = []
                     errors = []
@@ -1093,9 +1129,22 @@ if st.session_state.current_step == 1:
                         else:
                             errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
 
+                    if uploaded_screenshots:
+                        screenshot_content, screenshot_images = build_uploaded_image_material(uploaded_screenshots)
+                        if screenshot_content:
+                            if combined_content:
+                                combined_content += f"{screenshot_content}\n\n================\n\n"
+                            else:
+                                combined_content = screenshot_content + "\n\n================\n\n"
+                        extracted_imgs = screenshot_images + extracted_imgs
+                        success_count += len(uploaded_screenshots)
+
                     extracted_imgs = extracted_imgs[:15]
 
-                    if combined_content:
+                    if combined_content or extracted_imgs:
+                        if not combined_content and extracted_imgs:
+                            combined_content = f"【截图素材说明】用户上传了 {len(extracted_imgs)} 张网页截图，请直接从图片中提取正文、标题、图表、评论和页面上下文，并基于这些视觉素材进行分析。"
+
                         st.session_state.article_url = article_url_input
                         st.session_state.video_url = video_url_input
                         st.session_state.source_content = combined_content
@@ -1106,15 +1155,15 @@ if st.session_state.current_step == 1:
                         save_draft()
 
                         if errors:
-                            st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
+                            st.warning(f"部分内容提取成功 ({success_count}/{total_materials})，但有以下错误：\n" + "\n".join(errors))
                         else:
                             if len(extracted_imgs) > 0:
-                                st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并提取到 {len(extracted_imgs)} 张核心配图。")
+                                st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并整理出 {len(extracted_imgs)} 张可供分析的图片素材。")
                             else:
                                 st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
                     else:
                         st.session_state.extraction_success = False
-                        st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
+                        st.error("❌ 所有素材提取均失败，请检查链接、截图内容或网络状态。\n" + "\n".join(errors))
 
     if st.session_state.extraction_success:
         with st.container(border=True):
@@ -1597,6 +1646,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
