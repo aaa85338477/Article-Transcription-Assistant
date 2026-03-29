@@ -271,6 +271,100 @@ def extract_youtube_transcript(url):
     except Exception as e:
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
 
+def extract_reddit_content(url):
+    try:
+        parsed_url = urlparse(url)
+        clean_url = parsed_url._replace(query="", fragment="").geturl().rstrip("/")
+        json_url = clean_url if clean_url.endswith(".json") else f"{clean_url}.json"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 ArticleTranscriptionAssistant/1.0"
+        }
+
+        response = requests.get(json_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+
+        if not isinstance(payload, list) or len(payload) < 1:
+            return None, [], "Reddit 返回数据结构异常。"
+
+        post_listing = payload[0].get("data", {}).get("children", [])
+        if not post_listing:
+            return None, [], "未找到 Reddit 帖子正文。"
+
+        post_data = post_listing[0].get("data", {})
+        title = (post_data.get("title") or "").strip()
+        selftext = (post_data.get("selftext") or "").strip()
+        subreddit = post_data.get("subreddit_name_prefixed") or post_data.get("subreddit") or "Reddit"
+        author = post_data.get("author") or "未知作者"
+        score = post_data.get("score")
+        comment_count = post_data.get("num_comments")
+
+        text_parts = [
+            f"【Reddit 帖子】{title}" if title else "【Reddit 帖子】",
+            f"版区：{subreddit}",
+            f"作者：u/{author}"
+        ]
+        if score is not None:
+            text_parts.append(f"点赞数：{score}")
+        if comment_count is not None:
+            text_parts.append(f"评论数：{comment_count}")
+        if selftext:
+            text_parts.append("")
+            text_parts.append("【正文】")
+            text_parts.append(selftext)
+
+        comments_listing = payload[1].get("data", {}).get("children", []) if len(payload) > 1 else []
+        top_comments = []
+        for item in comments_listing:
+            comment_data = item.get("data", {})
+            body = (comment_data.get("body") or "").strip()
+            comment_author = comment_data.get("author") or "未知用户"
+            if body:
+                top_comments.append(f"- u/{comment_author}: {body}")
+            if len(top_comments) >= 5:
+                break
+
+        if top_comments:
+            text_parts.append("")
+            text_parts.append("【高赞评论摘录】")
+            text_parts.extend(top_comments)
+
+        images = []
+        preview_images = post_data.get("preview", {}).get("images", [])
+        for preview in preview_images:
+            source = preview.get("source", {})
+            image_url = source.get("url")
+            if image_url:
+                image_url = image_url.replace("&amp;", "&")
+                if image_url not in images:
+                    images.append(image_url)
+
+        media_metadata = post_data.get("media_metadata", {})
+        for meta in media_metadata.values():
+            source = meta.get("s", {})
+            image_url = source.get("u") or source.get("gif") or source.get("mp4")
+            if image_url:
+                image_url = image_url.replace("&amp;", "&")
+                if image_url not in images:
+                    images.append(image_url)
+
+        text = "\n".join(part for part in text_parts if part is not None).strip()
+        if text and len(text) > 50:
+            return text, images[:8], None
+    except Exception as reddit_error:
+        try:
+            jina_url = f"https://r.jina.ai/{url}"
+            response = requests.get(jina_url, headers={"Accept": "text/plain"}, timeout=20)
+            response.raise_for_status()
+            text = response.text.strip()
+            if text and len(text) > 50:
+                return text, [], None
+            return None, [], f"Reddit 提取失败：原生接口报错({str(reddit_error)[:60]})，备用解析未返回有效文本。"
+        except Exception as jina_error:
+            return None, [], f"Reddit 提取失败：原生接口报错({str(reddit_error)[:60]})，备用解析报错({str(jina_error)[:60]})"
+
+    return None, [], "Reddit 内容为空或不可用。"
+
 def extract_article_content(url):
     try:
         headers = {
@@ -363,14 +457,14 @@ def extract_article_content(url):
         return None, [], f"文章抓取失败: {str(e)}"
 
 def get_content_from_url(url):
-    if "youtube.com" in url or "youtu.be" in url:
+    parsed_url = urlparse(url)
+    netloc = parsed_url.netloc.lower()
+    if "youtube.com" in netloc or "youtu.be" in netloc:
         return extract_youtube_transcript(url)
+    elif "reddit.com" in netloc or "redd.it" in netloc:
+        return extract_reddit_content(url)
     else:
         return extract_article_content(url)
-
-# ==========================================
-# 3. 状态管理初始化
-# ==========================================
 def init_state():
     if 'current_step' not in st.session_state:
         st.session_state.current_step = 1
