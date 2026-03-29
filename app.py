@@ -272,18 +272,19 @@ def extract_youtube_transcript(url):
         return None, [], f"YouTube 字幕抓取失败: {str(e)}"
 
 def extract_reddit_content(url):
-    try:
-        parsed_url = urlparse(url)
-        clean_url = parsed_url._replace(query="", fragment="").geturl().rstrip("/")
-        json_url = clean_url if clean_url.endswith(".json") else f"{clean_url}.json"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 ArticleTranscriptionAssistant/1.0"
-        }
+    blocked_markers = [
+        "you've been blocked by network security",
+        "use your developer token",
+        "target url returned error 403",
+        "log in to your reddit account",
+        "reddit wants you to log in"
+    ]
 
-        response = requests.get(json_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        payload = response.json()
+    def looks_like_block_page(text):
+        lowered = (text or "").lower()
+        return any(marker in lowered for marker in blocked_markers)
 
+    def parse_reddit_listing(payload):
         if not isinstance(payload, list) or len(payload) < 1:
             return None, [], "Reddit 返回数据结构异常。"
 
@@ -319,7 +320,7 @@ def extract_reddit_content(url):
             comment_data = item.get("data", {})
             body = (comment_data.get("body") or "").strip()
             comment_author = comment_data.get("author") or "未知用户"
-            if body:
+            if body and body not in ("[deleted]", "[removed]"):
                 top_comments.append(f"- u/{comment_author}: {body}")
             if len(top_comments) >= 5:
                 break
@@ -349,21 +350,51 @@ def extract_reddit_content(url):
                     images.append(image_url)
 
         text = "\n".join(part for part in text_parts if part is not None).strip()
-        if text and len(text) > 50:
+        if text and len(text) > 50 and not looks_like_block_page(text):
             return text, images[:8], None
-    except Exception as reddit_error:
-        try:
-            jina_url = f"https://r.jina.ai/{url}"
-            response = requests.get(jina_url, headers={"Accept": "text/plain"}, timeout=20)
-            response.raise_for_status()
-            text = response.text.strip()
-            if text and len(text) > 50:
-                return text, [], None
-            return None, [], f"Reddit 提取失败：原生接口报错({str(reddit_error)[:60]})，备用解析未返回有效文本。"
-        except Exception as jina_error:
-            return None, [], f"Reddit 提取失败：原生接口报错({str(reddit_error)[:60]})，备用解析报错({str(jina_error)[:60]})"
+        return None, [], "Reddit 内容为空、过短，或返回了拦截页。"
 
-    return None, [], "Reddit 内容为空或不可用。"
+    parsed_url = urlparse(url)
+    clean_path = parsed_url.path.rstrip("/")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 ArticleTranscriptionAssistant/1.0",
+        "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8"
+    }
+
+    candidate_urls = []
+    if clean_path:
+        candidate_urls.extend([
+            f"https://api.reddit.com{clean_path}",
+            f"https://www.reddit.com{clean_path}.json?raw_json=1",
+            f"https://old.reddit.com{clean_path}.json?raw_json=1"
+        ])
+
+    errors = []
+    for candidate_url in candidate_urls:
+        try:
+            response = requests.get(candidate_url, headers=headers, timeout=15, allow_redirects=True)
+            response.raise_for_status()
+            payload = response.json()
+            text, images, error = parse_reddit_listing(payload)
+            if text:
+                return text, images, None
+            errors.append(f"{candidate_url} -> {error}")
+        except Exception as candidate_error:
+            errors.append(f"{candidate_url} -> {str(candidate_error)[:80]}")
+
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        response = requests.get(jina_url, headers={"Accept": "text/plain"}, timeout=20)
+        response.raise_for_status()
+        text = response.text.strip()
+        if text and len(text) > 50 and not looks_like_block_page(text):
+            return text, [], None
+        errors.append("r.jina.ai 返回了拦截页或无效文本")
+    except Exception as jina_error:
+        errors.append(f"r.jina.ai -> {str(jina_error)[:80]}")
+
+    return None, [], "Reddit 提取失败: " + " | ".join(errors[:4])
+
 
 def extract_article_content(url):
     try:
