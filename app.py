@@ -90,7 +90,8 @@ def save_draft():
         'current_step', 'article_url', 'video_url', 'source_content', 
         'source_images', 'removed_source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords', 'selected_role', 'final_polisher_mode'
+        'chat_history', 'image_keywords', 'selected_role', 'final_polisher_mode',
+        'raw_final_article', 'raw_spoken_script', 'final_polish_applied'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -620,11 +621,25 @@ def init_state():
         st.session_state.image_keywords = ""
     if 'final_polisher_mode' not in st.session_state:
         st.session_state.final_polisher_mode = DEFAULT_FINAL_POLISH_MODE
+    if 'raw_final_article' not in st.session_state:
+        st.session_state.raw_final_article = ""
+    if 'raw_spoken_script' not in st.session_state:
+        st.session_state.raw_spoken_script = ""
+    if 'final_polish_applied' not in st.session_state:
+        st.session_state.final_polish_applied = False
 
 init_state()
 
 def go_to_step(step):
     st.session_state.current_step = step
+    save_draft()
+
+def set_final_assets(article_text, script_text=""):
+    st.session_state.raw_final_article = article_text or ""
+    st.session_state.final_article = article_text or ""
+    st.session_state.raw_spoken_script = script_text or ""
+    st.session_state.spoken_script = script_text or ""
+    st.session_state.final_polish_applied = False
     save_draft()
 
 def get_script_sys_prompt(duration_str):
@@ -1044,16 +1059,8 @@ with st.sidebar:
         
     selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
     
-    final_polisher_options = list(get_final_polisher_prompts(prompts_data).keys())
-    default_polisher_index = final_polisher_options.index(DEFAULT_FINAL_POLISH_MODE) if DEFAULT_FINAL_POLISH_MODE in final_polisher_options else 0
-    selected_polisher_index = final_polisher_options.index(st.session_state.final_polisher_mode) if st.session_state.final_polisher_mode in final_polisher_options else default_polisher_index
-    final_polisher_mode = st.selectbox(
-        "🪄 选择定稿语气优化方案",
-        final_polisher_options,
-        index=selected_polisher_index
-    )
-    st.session_state.final_polisher_mode = final_polisher_mode
-    st.caption(f"最终稿会固定使用 {FINAL_POLISH_MODEL} 按【{final_polisher_mode}】方案做一轮中文润色。")
+    st.caption(f"定稿生成后，你可以在 Step 5 按需调用【{FINAL_POLISH_MODEL}】做语气优化。")
+    
     
     st.markdown("---")
     st.header("🎬 视频分镜设置")
@@ -1121,7 +1128,7 @@ with st.sidebar:
                 st.rerun()
 
         with tab4:
-            st.info(f"💡 最终稿在输出前会固定调用【{FINAL_POLISH_MODEL}】做一轮中文润色；你可以分别维护【玩家社区】和【微信公众号】两套方案。")
+            st.info(f"💡 最终稿生成后，你可以在 Step 5 按需触发【{FINAL_POLISH_MODEL}】做语气优化；这里用于分别维护【玩家社区】和【微信公众号】两套方案。")
             polish_prompts = get_final_polisher_prompts(prompts_data)
             polish_tab1, polish_tab2 = st.tabs(["🎮 玩家社区", "📮 微信公众号"])
             with polish_tab1:
@@ -1404,13 +1411,6 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
-                        st.write("🪄 正在使用 qwen3.5-plus 做中文润色...")
-                        st.session_state.final_article = polish_final_article(
-                            api_key=api_key,
-                            base_url=current_base_url,
-                            article_text=st.session_state.final_article,
-                            polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
-                        )
 
                         if enable_script:
                             st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
@@ -1425,6 +1425,7 @@ if st.session_state.current_step == 1:
 
                         status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
 
+                    set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
                     go_to_step(5)
                     st.rerun()
 # --- Step 2 (手动模式) ---
@@ -1497,12 +1498,6 @@ elif st.session_state.current_step == 3:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
-                st.session_state.final_article = polish_final_article(
-                    api_key=api_key,
-                    base_url=current_base_url,
-                    article_text=st.session_state.final_article,
-                    polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
-                )
                 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1514,6 +1509,7 @@ elif st.session_state.current_step == 3:
                 else:
                     st.session_state.spoken_script = ""
                     
+                set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -1559,12 +1555,6 @@ elif st.session_state.current_step == 4:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
-                st.session_state.final_article = polish_final_article(
-                    api_key=api_key,
-                    base_url=current_base_url,
-                    article_text=st.session_state.final_article,
-                    polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
-                )
                 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1576,6 +1566,7 @@ elif st.session_state.current_step == 4:
                 else:
                     st.session_state.spoken_script = ""
                     
+                set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -1594,12 +1585,6 @@ elif st.session_state.current_step == 4:
                     system_prompt=modification_prompt, 
                     user_content=content_to_modify
                 )
-                st.session_state.final_article = polish_final_article(
-                    api_key=api_key,
-                    base_url=current_base_url,
-                    article_text=st.session_state.final_article,
-                    polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
-                )
                 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1611,30 +1596,76 @@ elif st.session_state.current_step == 4:
                 else:
                     st.session_state.spoken_script = ""
                 
+                set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
                 go_to_step(5)
                 st.rerun()
 
 # --- Step 5：终极版分栏 UI ---
 elif st.session_state.current_step == 5:
     render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 05")
-    render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
-    
+    polish_status = f"已按【{st.session_state.final_polisher_mode}】优化" if st.session_state.final_polish_applied else "未做语气优化"
+    render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}", f"润色状态：{polish_status}"])
     st.markdown("<p class='toolbar-note'>主稿、分镜脚本、搜图和分发操作统一留在左侧主工作区；右侧专门用于精修、追问和追溯原文依据。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.95])
     
     with left_col:
+        with st.container(border=True):
+            render_section_intro("语气优化", "主编修改稿已经生成。你可以先审一遍，再决定是否调用 qwen3.5-plus 做最后一轮风格润色。", "Polish")
+            polish_prompts = get_final_polisher_prompts(prompts_data)
+            polish_options = list(polish_prompts.keys())
+            if st.session_state.final_polisher_mode not in polish_options:
+                st.session_state.final_polisher_mode = DEFAULT_FINAL_POLISH_MODE if DEFAULT_FINAL_POLISH_MODE in polish_options else polish_options[0]
+            st.session_state.final_polisher_mode = st.selectbox("选择语气优化方案", polish_options, index=polish_options.index(st.session_state.final_polisher_mode), key="step5_final_polisher_mode")
+            if st.session_state.final_polish_applied:
+                st.success(f"当前定稿已按【{st.session_state.final_polisher_mode}】完成语气优化。")
+            else:
+                st.info("当前显示的是主编修改后的原始定稿，尚未做语气优化。")
+            polish_col1, polish_col2 = st.columns([1.2, 1])
+            with polish_col1:
+                if st.button(f"🪄 使用 {FINAL_POLISH_MODEL} 优化当前终稿", use_container_width=True):
+                    with st.spinner("正在进行中文语气优化..."):
+                        raw_article = st.session_state.raw_final_article or st.session_state.final_article
+                        polished_article = polish_final_article(
+                            api_key=api_key,
+                            base_url=current_base_url,
+                            article_text=raw_article,
+                            polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
+                        )
+                        st.session_state.raw_final_article = raw_article
+                        st.session_state.final_article = polished_article
+                        if st.session_state.raw_spoken_script:
+                            st.session_state.spoken_script = call_llm(
+                                api_key=api_key,
+                                base_url=current_base_url,
+                                model_name=selected_model,
+                                system_prompt=get_script_sys_prompt(script_duration),
+                                user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+                            )
+                        st.session_state.final_polish_applied = True
+                        save_draft()
+                        st.rerun()
+            with polish_col2:
+                restore_disabled = not st.session_state.final_polish_applied or not st.session_state.raw_final_article
+                if st.button("↩️ 恢复润色前版本", use_container_width=True, disabled=restore_disabled):
+                    st.session_state.final_article = st.session_state.raw_final_article
+                    if st.session_state.raw_spoken_script:
+                        st.session_state.spoken_script = st.session_state.raw_spoken_script
+                    st.session_state.final_polish_applied = False
+                    save_draft()
+                    st.rerun()
+
         st.markdown("### 主稿面板")
         st.code(st.session_state.final_article, language="markdown")
-        
+
         if st.session_state.spoken_script:
             st.divider()
             st.markdown(f"### 分镜脚本 · {script_duration}")
             st.code(st.session_state.spoken_script, language="markdown")
-        
+
         st.divider()
         st.markdown("### 智能配图助手")
         st.info("需要为文章寻找真实、高质的配图？点击下方按钮，AI 将根据文章核心内容提取 10 个精确的 Google 图片搜索关键词。")
-        
+
         if st.button("💡 提取 10 个 Google 搜图关键词", use_container_width=True):
             with st.spinner("正在深度分析文章，提取精确的搜图词汇..."):
                 keyword_prompt = """请根据以下文章内容，提取 10 个最适合在 Google 图片（Google Images）中搜索配图的精准关键词组合。
@@ -1656,7 +1687,7 @@ elif st.session_state.current_step == 5:
                     user_content=keyword_prompt
                 )
                 save_draft()
-                
+
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
             st.code(st.session_state.image_keywords, language="markdown")
@@ -1774,6 +1805,9 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
 
 
 
