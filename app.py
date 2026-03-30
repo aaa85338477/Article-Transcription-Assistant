@@ -25,7 +25,12 @@ DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 2. 禁用伪高级“黑话”：严禁滥用带双引号的互联网/营销词汇（如“赋能”、“底层逻辑”、“打法”、“组合拳”、“降维打击”）。遇到专业概念，请用人话直白解释，不要故作高深。
 3. 拒绝强行升华：文章结尾禁止进行“爹味说教”或喊口号式的价值升华，客观给出冷酷的结论或留白即可。
 4. 打破匀速节奏：多用短句！避免一口气读不完的复杂长句。允许出现少量口语化的标点停顿，模仿人类写稿时真实的“呼吸感”和偶尔的“毒舌”感。"""
-
+FINAL_POLISH_MODEL = "qwen3.5-plus"
+DEFAULT_FINAL_POLISH_MODE = "微信公众号"
+DEFAULT_FINAL_POLISHERS = {
+    "玩家社区": "# Role\n你是一位骨灰级玩家兼硬核游戏爱好者（平时爱玩动作类、开放世界和独立游戏），现在正在小黑盒等玩家社区发帖。你非常懂游戏底层的设计逻辑，但你从不说教，而是用最接地气、最有梗的玩家语言和兄弟们交流游戏体验。\n\n# Task\n请将下方的【文章初稿】转化为一篇面向玩家社区的爆款帖子。你需要把原来可能偏枯燥、硬核的行业分析或技术名词，完全“降维”成玩家关心的痛点和爽点。\n\n# Guidelines (小黑盒网感法则)\n1. **视角转换（从“做游戏”到“玩游戏”）**：\n   - 把行业黑话翻译成玩家黑话。例如：把“留存率”替换为“这游戏有多肝/多上头”；把“本地化”替换为“这汉化有没有机翻味”；把“数值策划”替换为“官方教你玩游戏/数值崩坏”。\n2. **情绪拉满，敢于锐评**：\n   - 玩家社区喜欢看真实的吐槽和极度热爱的安利。行文要带有强烈的主观色彩，少一点客观中立，多一点“直接吹爆”或“不吐不快”的真实感。\n3. **排版与视觉呼吸感**：\n   - 多用短句、神转折。\n   - 适当穿插emoji（但不要泛滥，保持硬核感）。\n   - 重要的吐槽或核心结论加粗，方便玩家一目了然。\n4. **去除商务与AI感**：\n   - 绝对不能出现“值得深思”、“行业前景”、“综上所述”等公文词汇。语气要像是在游戏群里和群友吹水。\n\n# Input\n【文章初稿】：\n{{此处替换为初稿文本}}\n\n# Output Format\n直接输出优化后的社区帖子正文。不需要包含任何解释。",
+    "微信公众号": "# Role\n你是一位拥有近五年一线实战经验的“海外游戏发行与运营专家”。你长期关注全球游戏市场动向、买量策略、独立游戏生态以及AI工具的应用。你的受众是游戏行业的从业者、制作人和投资人，你的文字风格是：犀利、克制、数据驱动、极具商业洞察力。\n\n# Task\n请将下方的【文章初稿】进行深度润色，转化为一篇适合发布在专业游戏行业微信公众号上的深度推文。你需要剔除口水话和浅层表述，提升文章的行业格调与逻辑深度。\n\n# Guidelines (ToB 深度法则)\n1. **重塑专业语境（操盘手视角）**：\n   - 强化行业黑话的精准使用（如：ROI、LTV、获客成本、本地化适配、长线运营、品类破圈等）。\n   - 将主观感受转化为客观的方法论或行业趋势。不要只说“游戏好玩”，要剖析“它的核心循环（Core Loop）为什么能跑通”。\n2. **提升信息密度与逻辑链条**：\n   - 拒绝废话和AI常见的车轱辘话。每一个段落都必须提供一个增量信息或独立观点。\n   - 增强逻辑推演：多探讨“为什么出现这种现象”、“这对出海/研发意味着什么”、“下一步的变量在哪里”。\n3. **沉稳克制的极简文风**：\n   - 语气要平视读者（同行交流）。不要使用过度夸张的修饰词（如“史诗级”、“颠覆性”），用事实、案例或数据来体现力度。\n   - 彻底删除“首先、其次、总之”这种僵硬的过渡，用清晰的副标题或核心观点句来引领段落。\n\n# Input\n【文章初稿】：\n{{此处替换为初稿文本}}\n\n# Output Format\n直接输出优化后的公众号推文正文。保留适合微信阅读的段落结构，不需要任何废话和前置说明。"
+}
 def load_prompts():
     default_data = {
         "editors": {
@@ -36,7 +41,8 @@ def load_prompts():
             "游戏行业评论人": "# Role: 资深游戏行业观察主编\n\n## Background\n你是一位在游戏行业沉淀多年、极具影响力的媒体主编兼资深行业观察家。你的视角不局限于“游戏好不好玩”，而是能穿透表象，洞察事件背后的商业逻辑、资本运作、组织架构变动以及全球市场趋势。你深谙游戏研发、海内外发行与长线运营的痛点，能够对行业内的裁员、工作室重组、高管变动、并购或政策调整等事件，给出极其专业、客观且一针见血的评论。\n\n## Objectives\n- 接收用户提供的游戏行业新闻/事件。\n- 褪去情绪化的行业焦虑，以中立、客观的第三方视角进行剖析。\n- 为文章构思并提供多个极具洞察力与传播度的深度标题。\n- 产出逻辑严密、视角独特、论证详实的深度评论长文，揭示事件对具体公司、细分赛道以及整个游戏产业链的影响。\n\n## Capabilities\n1. **商业洞察力**：能从财报、投融资环境、全球化竞争等宏观角度拆解事件发生的原因。\n2. **研运结合视角**：能准确指出事件在实际的研发管理、发行策略或买量运营环节中暴露出的具体问题。\n3. **旁征博引**：能够自然地调取游戏行业过往的类似事件、其他大厂的成败案例作为论据，增强文章的厚度。\n4. **爆款标题提炼**：深谙新媒体与专业媒体的传播规律，能一语道破商业本质。\n\n## Tone & Style\n- 沉稳、专业、犀利、富有逻辑，具备强烈的个人洞察和主编色彩。\n- 拒绝八股文和刻板的列表式输出，行文应如行云流水般自然，段落之间过渡平滑，逻辑层层递进。\n- 语言风格类似于《晚点LatePost》、《36氪》深度专栏或顶尖商业周刊的深度长篇评论。\n\n## Title Generation Guidelines (标题生成指南)\n在正文开始前，请务必先提供 3-5 个不同切入点的文章标题供选择。标题必须拒绝低俗吸睛，要求直指核心、带有判断性或启发性。请参考以下方向：\n1. **犀利定性型**：直接对事件进行冷峻的商业定性（例：《大厂抛弃XX赛道：买量神话破灭后的断臂求生》）。\n2. **宏观洞察型**：将单一事件拔高到行业趋势（例：《XX工作室重组背后，是出海大盘见顶的阵痛期》）。\n3. **灵魂发问型**：用极具深度的行业痛点作为疑问（例：《裁掉一半研发后，XX还能靠老产品吃多少年老本？》）。\n\n## Content Guidelines & Depth (写作指引与深度要求)\n请放弃死板的结构模板，但你的长文必须在自然流畅的叙述中，涵盖并深挖以下核心维度：\n1. **事件的本质**：不要只做简单的新闻复述，一针见血地挑明事件的核心矛盾。\n2. **多维度的深度拆解**：从资本运作、预算控制、组织架构臃肿度、海外发行策略失效等多个深层维度进行详细剖析。\n3. **行业横向对比**：引入至少 2-3 个行业内其他厂商或过往的历史相似案例进行对比印证。\n4. **长远预判**：探讨该事件的涟漪效应，对从业者、竞品及未来的赛道趋势给出你的终局推演。\n\n## Length Requirement\n**目标字数：约 3000 字左右。**\n为了达到这一深度，你必须避免泛泛而谈。需要对每一个观点进行极度细致的延展，利用丰富的假设性推演、详细的研运环节拆解（如具体的买量转化逻辑、项目立项的 ROI 模型等）来充实文章血肉，确保内容有极高的信息密度。\n\n## Initialization\n“你好！我是你的游戏行业观察主编。今天圈内又发生了什么值得剖析的动态？把新闻甩给我，我们先定几个一针见血的标题，然后再深挖它背后的商业逻辑和行业底色。”"
         },
         "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉...",
-        "global_instruction": DEFAULT_GLOBAL_PROMPT
+        "global_instruction": DEFAULT_GLOBAL_PROMPT,
+        "final_polishers": DEFAULT_FINAL_POLISHERS.copy()
     }
     if os.path.exists(PROMPTS_FILE):
         try:
@@ -54,6 +60,18 @@ def load_prompts():
                     data["reviewer"] = default_data["reviewer"]
                 if "global_instruction" not in data:
                     data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
+                if "final_polishers" not in data:
+                    if "final_polisher" in data and isinstance(data["final_polisher"], str):
+                        data["final_polishers"] = {
+                            "玩家社区": data["final_polisher"],
+                            "微信公众号": data["final_polisher"]
+                        }
+                    else:
+                        data["final_polishers"] = DEFAULT_FINAL_POLISHERS.copy()
+                elif isinstance(data["final_polishers"], dict):
+                    for polish_mode, polish_prompt in DEFAULT_FINAL_POLISHERS.items():
+                        if polish_mode not in data["final_polishers"] or not data["final_polishers"][polish_mode]:
+                            data["final_polishers"][polish_mode] = polish_prompt
 
                 save_prompts(data)
                 return data
@@ -72,7 +90,7 @@ def save_draft():
         'current_step', 'article_url', 'video_url', 'source_content', 
         'source_images', 'removed_source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords', 'selected_role'
+        'chat_history', 'image_keywords', 'selected_role', 'final_polisher_mode'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -191,6 +209,61 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
     except Exception as e:
         st.error(f"API 调用失败: {str(e)}")
         st.stop()
+
+
+def call_llm_optional(api_key, base_url, model_name, system_prompt, user_content, fallback_text=""):
+    if not api_key:
+        return fallback_text
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.warning(f"⚠️ 中文润色步骤调用 {model_name} 失败，已保留润色前定稿：{str(e)}")
+        return fallback_text
+
+def get_final_polisher_prompts(prompts_data):
+    final_polishers = prompts_data.get("final_polishers", {})
+    if isinstance(final_polishers, str):
+        final_polishers = {
+            "玩家社区": final_polishers,
+            "微信公众号": final_polishers
+        }
+    elif not isinstance(final_polishers, dict):
+        final_polishers = {}
+
+    merged_prompts = DEFAULT_FINAL_POLISHERS.copy()
+    for polish_mode, polish_prompt in final_polishers.items():
+        if polish_prompt:
+            merged_prompts[polish_mode] = polish_prompt
+    return merged_prompts
+
+def get_selected_final_polisher_prompt(prompts_data, polish_mode):
+    final_polishers = get_final_polisher_prompts(prompts_data)
+    return final_polishers.get(polish_mode, final_polishers[DEFAULT_FINAL_POLISH_MODE])
+
+def polish_final_article(api_key, base_url, article_text, polish_prompt):
+    if not article_text or not article_text.strip():
+        return article_text
+
+    polish_user_content = f"【待润色文章】\n\n{article_text}"
+    polished_text = call_llm_optional(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=FINAL_POLISH_MODEL,
+        system_prompt=polish_prompt,
+        user_content=polish_user_content,
+        fallback_text=article_text
+    )
+    return polished_text or article_text
 
 def push_to_feishu(article_text, script_text=None):
     webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
@@ -545,6 +618,8 @@ def init_state():
         st.session_state.chat_history = []
     if 'image_keywords' not in st.session_state:
         st.session_state.image_keywords = ""
+    if 'final_polisher_mode' not in st.session_state:
+        st.session_state.final_polisher_mode = DEFAULT_FINAL_POLISH_MODE
 
 init_state()
 
@@ -969,6 +1044,17 @@ with st.sidebar:
         
     selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
     
+    final_polisher_options = list(get_final_polisher_prompts(prompts_data).keys())
+    default_polisher_index = final_polisher_options.index(DEFAULT_FINAL_POLISH_MODE) if DEFAULT_FINAL_POLISH_MODE in final_polisher_options else 0
+    selected_polisher_index = final_polisher_options.index(st.session_state.final_polisher_mode) if st.session_state.final_polisher_mode in final_polisher_options else default_polisher_index
+    final_polisher_mode = st.selectbox(
+        "🪄 选择定稿语气优化方案",
+        final_polisher_options,
+        index=selected_polisher_index
+    )
+    st.session_state.final_polisher_mode = final_polisher_mode
+    st.caption(f"最终稿会固定使用 {FINAL_POLISH_MODEL} 按【{final_polisher_mode}】方案做一轮中文润色。")
+    
     st.markdown("---")
     st.header("🎬 视频分镜设置")
     enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
@@ -982,7 +1068,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("🗂️ 提示词管理中心")
     with st.expander("📝 角色与全局人设配置", expanded=False):
-        tab1, tab2, tab3 = st.tabs(["✍️ 编辑人设", "🧐 审稿人设", "🌍 全局去AI味规范"])
+        tab1, tab2, tab3, tab4 = st.tabs(["✍️ 编辑人设", "🧐 审稿人设", "🌍 全局去AI味规范", "🪄 定稿润色"] )
         
         with tab1:
             action = st.radio("操作类型", ["编辑现有角色", "新增角色", "删除角色"], horizontal=True)
@@ -1032,6 +1118,23 @@ with st.sidebar:
                 prompts_data["global_instruction"] = new_global_prompt
                 save_prompts(prompts_data)
                 st.success("已成功更新全局规范！")
+                st.rerun()
+
+        with tab4:
+            st.info(f"💡 最终稿在输出前会固定调用【{FINAL_POLISH_MODEL}】做一轮中文润色；你可以分别维护【玩家社区】和【微信公众号】两套方案。")
+            polish_prompts = get_final_polisher_prompts(prompts_data)
+            polish_tab1, polish_tab2 = st.tabs(["🎮 玩家社区", "📮 微信公众号"])
+            with polish_tab1:
+                player_polish_prompt = st.text_area("玩家社区润色 Prompt", value=polish_prompts.get("玩家社区", DEFAULT_FINAL_POLISHERS["玩家社区"]), height=220)
+            with polish_tab2:
+                wechat_polish_prompt = st.text_area("微信公众号润色 Prompt", value=polish_prompts.get("微信公众号", DEFAULT_FINAL_POLISHERS["微信公众号"]), height=220)
+            if st.button("💾 保存润色 Prompt"):
+                prompts_data["final_polishers"] = {
+                    "玩家社区": player_polish_prompt,
+                    "微信公众号": wechat_polish_prompt
+                }
+                save_prompts(prompts_data)
+                st.success("已成功更新两套定稿润色 Prompt！")
                 st.rerun()
 
 render_app_hero()
@@ -1301,6 +1404,13 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
+                        st.write("🪄 正在使用 qwen3.5-plus 做中文润色...")
+                        st.session_state.final_article = polish_final_article(
+                            api_key=api_key,
+                            base_url=current_base_url,
+                            article_text=st.session_state.final_article,
+                            polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
+                        )
 
                         if enable_script:
                             st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
@@ -1387,6 +1497,12 @@ elif st.session_state.current_step == 3:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
+                st.session_state.final_article = polish_final_article(
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    article_text=st.session_state.final_article,
+                    polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
+                )
                 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1443,6 +1559,12 @@ elif st.session_state.current_step == 4:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
+                st.session_state.final_article = polish_final_article(
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    article_text=st.session_state.final_article,
+                    polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
+                )
                 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1471,6 +1593,12 @@ elif st.session_state.current_step == 4:
                     model_name=selected_model, 
                     system_prompt=modification_prompt, 
                     user_content=content_to_modify
+                )
+                st.session_state.final_article = polish_final_article(
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    article_text=st.session_state.final_article,
+                    polish_prompt=get_selected_final_polisher_prompt(prompts_data, st.session_state.final_polisher_mode)
                 )
                 
                 if enable_script:
@@ -1646,6 +1774,12 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
+
+
+
 
 
 
