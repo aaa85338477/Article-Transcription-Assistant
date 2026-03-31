@@ -282,12 +282,6 @@ def build_uploaded_file_material(uploaded_files):
     return combined_text, uploaded_images, success_count, errors
 
 
-        uploaded_text_blocks.append(
-            f"【截图素材 {idx}】文件名：{uploaded_file.name}\n说明：这是用户上传的网页截图，请直接从图片中提取正文、标题、数据、图表或关键上下文。"
-        )
-
-    combined_text = "\n\n================\n\n".join(uploaded_text_blocks)
-    return combined_text, uploaded_images
 
 
 # ==========================================
