@@ -13,6 +13,12 @@ import re
 import hashlib
 import html
 import base64
+import csv
+
+try:
+    from openpyxl import load_workbook
+except Exception:
+    load_workbook = None
 
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
@@ -152,13 +158,130 @@ def uploaded_file_to_data_url(uploaded_file):
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
 
-def build_uploaded_image_material(uploaded_files):
+def decode_uploaded_text(file_bytes):
+    for encoding in ["utf-8-sig", "utf-8", "gb18030", "utf-16"]:
+        try:
+            return file_bytes.decode(encoding)
+        except Exception:
+            continue
+    return None
+
+def extract_text_from_docx_bytes(file_bytes):
+    doc = Document(io.BytesIO(file_bytes))
+    parts = []
+
+    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+    if paragraphs:
+        parts.append("\n".join(paragraphs))
+
+    table_blocks = []
+    for table in doc.tables:
+        rows = []
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
+            if cells:
+                rows.append(" | ".join(cells))
+        if rows:
+            table_blocks.append("\n".join(rows))
+
+    if table_blocks:
+        parts.append("\n\n".join(table_blocks))
+
+    return "\n\n".join(parts).strip()
+
+def extract_text_from_excel_bytes(file_bytes):
+    if load_workbook is None:
+        raise RuntimeError("当前环境未安装 openpyxl，暂时无法解析 Excel 文件。")
+
+    workbook = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    sheet_blocks = []
+
+    for sheet in workbook.worksheets:
+        rows = []
+        for row in sheet.iter_rows(values_only=True):
+            cleaned = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+            if cleaned:
+                rows.append(" | ".join(cleaned))
+        if rows:
+            sheet_blocks.append(f"【Sheet: {sheet.title}】\n" + "\n".join(rows))
+
+    return "\n\n".join(sheet_blocks).strip()
+
+def extract_text_from_csv_bytes(file_bytes):
+    decoded = decode_uploaded_text(file_bytes)
+    if not decoded:
+        return ""
+
+    reader = csv.reader(io.StringIO(decoded))
+    rows = []
+    for row in reader:
+        cleaned = [cell.strip() for cell in row if cell and cell.strip()]
+        if cleaned:
+            rows.append(" | ".join(cleaned))
+    return "\n".join(rows).strip()
+
+def build_uploaded_file_material(uploaded_files):
     uploaded_images = []
     uploaded_text_blocks = []
+    errors = []
+    success_count = 0
+    image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+    text_exts = {".txt", ".md"}
+    excel_exts = {".xlsx"}
+    csv_exts = {".csv"}
+    doc_exts = {".docx"}
 
     for idx, uploaded_file in enumerate(uploaded_files, start=1):
-        data_url = uploaded_file_to_data_url(uploaded_file)
-        uploaded_images.append(data_url)
+        file_name = uploaded_file.name or f"uploaded_file_{idx}"
+        suffix = os.path.splitext(file_name)[1].lower()
+        file_bytes = uploaded_file.getvalue()
+        mime_type = (uploaded_file.type or "").lower()
+
+        try:
+            if mime_type.startswith("image/") or suffix in image_exts:
+                data_url = uploaded_file_to_data_url(uploaded_file)
+                uploaded_images.append(data_url)
+                uploaded_text_blocks.append(
+                    f"【图片素材 {idx}】文件名：{file_name}\n说明：这是用户上传的页面截图或图片素材，请直接从图片中提取正文、标题、数据、图表、评论区内容或关键上下文。"
+                )
+                success_count += 1
+            elif suffix in text_exts:
+                decoded_text = decode_uploaded_text(file_bytes)
+                if decoded_text and decoded_text.strip():
+                    uploaded_text_blocks.append(f"【文档素材 {idx}】文件名：{file_name}\n{decoded_text.strip()}")
+                    success_count += 1
+                else:
+                    errors.append(f"文件 {file_name} 内容为空或编码无法识别。")
+            elif suffix in doc_exts:
+                doc_text = extract_text_from_docx_bytes(file_bytes)
+                if doc_text:
+                    uploaded_text_blocks.append(f"【Word 素材 {idx}】文件名：{file_name}\n{doc_text}")
+                    success_count += 1
+                else:
+                    errors.append(f"Word 文件 {file_name} 未提取到有效文本。")
+            elif suffix in excel_exts:
+                excel_text = extract_text_from_excel_bytes(file_bytes)
+                if excel_text:
+                    uploaded_text_blocks.append(f"【Excel 素材 {idx}】文件名：{file_name}\n{excel_text}")
+                    success_count += 1
+                else:
+                    errors.append(f"Excel 文件 {file_name} 未提取到有效表格内容。")
+            elif suffix in csv_exts:
+                csv_text = extract_text_from_csv_bytes(file_bytes)
+                if csv_text:
+                    uploaded_text_blocks.append(f"【表格素材 {idx}】文件名：{file_name}\n{csv_text}")
+                    success_count += 1
+                else:
+                    errors.append(f"CSV 文件 {file_name} 未提取到有效内容。")
+            else:
+                errors.append(f"文件 {file_name} 暂不支持。请上传图片、txt、md、docx、xlsx 或 csv。")
+        except Exception as e:
+            errors.append(f"文件 {file_name} 解析失败: {str(e)}")
+
+    combined_text = "\n\n================\n\n".join(uploaded_text_blocks)
+    return combined_text, uploaded_images, success_count, errors
+
+
         uploaded_text_blocks.append(
             f"【截图素材 {idx}】文件名：{uploaded_file.name}\n说明：这是用户上传的网页截图，请直接从图片中提取正文、标题、数据、图表或关键上下文。"
         )
@@ -1192,30 +1315,30 @@ if st.session_state.current_step == 1:
             )
 
     with st.container(border=True):
-        render_section_intro("截图上传区", "当网站无法抓取正文时，可以直接上传网页截图作为分析素材。支持多张图片混合输入。", "Screenshots")
-        uploaded_screenshots = st.file_uploader(
-            "🖼️ 上传网页截图（支持多张）",
-            type=["png", "jpg", "jpeg", "webp"],
+        render_section_intro("文件上传区", "支持上传网页截图，也支持把 txt、md、Word、Excel、CSV 作为文章原素材直接并入分析。", "Files")
+        uploaded_source_files = st.file_uploader(
+            "📁 上传素材文件（支持多选）",
+            type=["png", "jpg", "jpeg", "webp", "txt", "md", "docx", "xlsx", "csv"],
             accept_multiple_files=True,
-            help="适合 Reddit、X、行业报告截图、数据图表或被反爬的网站页面截图。"
+            help="图片会作为视觉素材送进模型；txt、md、Word、Excel、CSV 会先抽取文本，再并入统一素材底稿。"
         )
-        st.markdown("<p class='toolbar-note'>截图会作为可视化信息源直接送进模型分析；如果同时填写了链接，系统会把截图和链接正文一起聚合。</p>", unsafe_allow_html=True)
-        if uploaded_screenshots:
-            st.caption(f"当前已选择 {len(uploaded_screenshots)} 张截图素材。")
+        st.markdown("<p class='toolbar-note'>适合上传网页截图、Reddit/X 页面截图、行业报告截图，也适合直接上传 txt、md、Word、Excel、CSV 等原始资料文件。</p>", unsafe_allow_html=True)
+        if uploaded_source_files:
+            st.caption(f"当前已选择 {len(uploaded_source_files)} 份文件素材。")
 
     with st.container(border=True):
         render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
-        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章、视频和截图放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
+        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章、视频和文件放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
         if st.button("开始批量提取内容", type="primary", use_container_width=True):
             article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
             video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
-            screenshot_count = len(uploaded_screenshots) if uploaded_screenshots else 0
+            uploaded_file_count = len(uploaded_source_files) if uploaded_source_files else 0
 
-            if not article_urls and not video_urls and screenshot_count == 0:
-                st.warning("请至少输入一个链接或上传一张截图！")
+            if not article_urls and not video_urls and uploaded_file_count == 0:
+                st.warning("请至少输入一个链接或上传一份文件！")
             else:
                 total_urls = len(article_urls) + len(video_urls)
-                total_materials = total_urls + screenshot_count
+                total_materials = total_urls + uploaded_file_count
                 with st.spinner(f"启动全息解析引擎，正在批量获取 {total_materials} 个素材..."):
                     combined_content = ""
                     extracted_imgs = []
@@ -1239,21 +1362,22 @@ if st.session_state.current_step == 1:
                         else:
                             errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
 
-                    if uploaded_screenshots:
-                        screenshot_content, screenshot_images = build_uploaded_image_material(uploaded_screenshots)
-                        if screenshot_content:
+                    if uploaded_source_files:
+                        uploaded_content, uploaded_images, uploaded_success_count, uploaded_errors = build_uploaded_file_material(uploaded_source_files)
+                        if uploaded_content:
                             if combined_content:
-                                combined_content += f"{screenshot_content}\n\n================\n\n"
+                                combined_content += f"{uploaded_content}\n\n================\n\n"
                             else:
-                                combined_content = screenshot_content + "\n\n================\n\n"
-                        extracted_imgs = screenshot_images + extracted_imgs
-                        success_count += len(uploaded_screenshots)
+                                combined_content = uploaded_content + "\n\n================\n\n"
+                        extracted_imgs = uploaded_images + extracted_imgs
+                        success_count += uploaded_success_count
+                        errors.extend(uploaded_errors)
 
                     extracted_imgs = extracted_imgs[:15]
 
                     if combined_content or extracted_imgs:
                         if not combined_content and extracted_imgs:
-                            combined_content = f"【截图素材说明】用户上传了 {len(extracted_imgs)} 张网页截图，请直接从图片中提取正文、标题、图表、评论和页面上下文，并基于这些视觉素材进行分析。"
+                            combined_content = f"【图片素材说明】用户上传了 {len(extracted_imgs)} 张图片文件，请直接从图片中提取正文、标题、图表、评论和页面上下文，并基于这些视觉素材进行分析。"
 
                         st.session_state.article_url = article_url_input
                         st.session_state.video_url = video_url_input
@@ -1273,8 +1397,7 @@ if st.session_state.current_step == 1:
                                 st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
                     else:
                         st.session_state.extraction_success = False
-                        st.error("❌ 所有素材提取均失败，请检查链接、截图内容或网络状态。\n" + "\n".join(errors))
-
+                        st.error("❌ 所有素材提取均失败，请检查链接、上传文件内容或网络状态。\n" + "\n".join(errors))
     if st.session_state.extraction_success:
         with st.container(border=True):
             render_section_intro("聚合素材预览", "先快速检查抓取结果，并手动移除会干扰分析的图片。", "Preview")
@@ -1805,6 +1928,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
