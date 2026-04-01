@@ -1,4 +1,5 @@
 ﻿import streamlit as st
+import streamlit.components.v1 as components
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
@@ -744,6 +745,12 @@ def init_state():
         st.session_state.raw_spoken_script = ""
     if 'final_polish_applied' not in st.session_state:
         st.session_state.final_polish_applied = False
+    if 'sound_notifications_enabled' not in st.session_state:
+        st.session_state.sound_notifications_enabled = True
+    if 'pending_completion_notice' not in st.session_state:
+        st.session_state.pending_completion_notice = None
+    if 'notification_counter' not in st.session_state:
+        st.session_state.notification_counter = 0
 
 init_state()
 
@@ -758,6 +765,48 @@ def set_final_assets(article_text, script_text=""):
     st.session_state.spoken_script = script_text or ""
     st.session_state.final_polish_applied = False
     save_draft()
+
+def play_completion_sound(message):
+    st.toast(f"🔔 {message}")
+    if st.session_state.get("sound_notifications_enabled", True):
+        token = st.session_state.get("notification_counter", 0)
+        components.html(
+            f"""
+            <script>
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.type = "sine";
+            oscillator.frequency.value = 880;
+            gainNode.gain.setValueAtTime(0.001, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.16, audioContext.currentTime + 0.02);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.36);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.start();
+            oscillator.stop(audioContext.currentTime + 0.38);
+            </script>
+            <div data-notify-token="{token}"></div>
+            """,
+            height=0
+        )
+
+def notify_completion(message, defer_until_rerun=False):
+    st.session_state.notification_counter = st.session_state.get("notification_counter", 0) + 1
+    notice = {"message": message, "token": st.session_state.notification_counter}
+    if defer_until_rerun:
+        st.session_state.pending_completion_notice = notice
+    else:
+        st.session_state.pending_completion_notice = None
+        play_completion_sound(message)
+
+def render_pending_completion_notice():
+    notice = st.session_state.get("pending_completion_notice")
+    if notice:
+        play_completion_sound(notice.get("message", "任务已完成"))
+        st.session_state.pending_completion_notice = None
+
+render_pending_completion_notice()
 
 def get_script_sys_prompt(duration_str):
     duration_map = {
@@ -1134,6 +1183,7 @@ prompts_data = load_prompts()
 with st.sidebar:
     st.markdown("## 控制面板")
     st.caption("管理模型、脚本生成策略与写作 Prompt，所有改动都会直接作用到当前工作流。")
+    st.session_state.sound_notifications_enabled = st.toggle("🔔 完成声音提醒", value=st.session_state.sound_notifications_enabled)
     st.header("⚙️ 引擎设置")
     api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
     
@@ -1280,6 +1330,7 @@ if st.session_state.current_step == 1:
                 if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
                     if load_draft():
                         st.success("草稿恢复成功！工作流已复原。")
+                        notify_completion("草稿恢复完成", defer_until_rerun=True)
                         st.rerun()
                     else:
                         st.error("草稿文件损坏，无法恢复。")
@@ -1384,11 +1435,14 @@ if st.session_state.current_step == 1:
 
                         if errors:
                             st.warning(f"部分内容提取成功 ({success_count}/{total_materials})，但有以下错误：\n" + "\n".join(errors))
+                            notify_completion(f"素材提取完成，已融合 {success_count} 个素材")
                         else:
                             if len(extracted_imgs) > 0:
                                 st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并整理出 {len(extracted_imgs)} 张可供分析的图片素材。")
+                                notify_completion(f"素材提取完成，已整理 {len(extracted_imgs)} 张图片")
                             else:
                                 st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
+                                notify_completion(f"素材提取完成，已融合 {success_count} 个素材")
                     else:
                         st.session_state.extraction_success = False
                         st.error("❌ 所有素材提取均失败，请检查链接、上传文件内容或网络状态。\n" + "\n".join(errors))
@@ -1543,6 +1597,7 @@ if st.session_state.current_step == 1:
                         status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
 
                     set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
+                    notify_completion("最终稿已生成，已进入分发工作台", defer_until_rerun=True)
                     go_to_step(5)
                     st.rerun()
 # --- Step 2 (手动模式) ---
@@ -1590,6 +1645,7 @@ elif st.session_state.current_step == 2:
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
+                notify_completion("文章初稿生成完成", defer_until_rerun=True)
                 go_to_step(3)
                 st.rerun()
 
@@ -1615,7 +1671,7 @@ elif st.session_state.current_step == 3:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
-                
+
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
                     st.session_state.spoken_script = call_llm(
@@ -1625,8 +1681,9 @@ elif st.session_state.current_step == 3:
                     )
                 else:
                     st.session_state.spoken_script = ""
-                    
+
                 set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
+                notify_completion("最终稿已生成，已进入分发工作台", defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -1640,17 +1697,18 @@ elif st.session_state.current_step == 3:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"""
                     combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
-                
+
                 final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
-                
+
                 st.session_state.review_feedback = call_llm(
-                    api_key=api_key, 
+                    api_key=api_key,
                     base_url=current_base_url,
-                    model_name=selected_model, 
-                    system_prompt=final_reviewer_system_prompt, 
+                    model_name=selected_model,
+                    system_prompt=final_reviewer_system_prompt,
                     user_content=combined_content,
                     image_urls=st.session_state.source_images
                 )
+                notify_completion("严格审稿完成", defer_until_rerun=True)
                 go_to_step(4)
                 st.rerun()
 
@@ -1684,6 +1742,7 @@ elif st.session_state.current_step == 4:
                     st.session_state.spoken_script = ""
                     
                 set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
+                notify_completion("最终稿已生成，已进入分发工作台", defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -1714,6 +1773,7 @@ elif st.session_state.current_step == 4:
                     st.session_state.spoken_script = ""
                 
                 set_final_assets(st.session_state.final_article, st.session_state.spoken_script)
+                notify_completion("最终稿已生成，已进入分发工作台", defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
 
@@ -1760,6 +1820,7 @@ elif st.session_state.current_step == 5:
                             )
                         st.session_state.final_polish_applied = True
                         save_draft()
+                        notify_completion(f"已完成【{st.session_state.final_polisher_mode}】语气优化", defer_until_rerun=True)
                         st.rerun()
             with polish_col2:
                 restore_disabled = not st.session_state.final_polish_applied or not st.session_state.raw_final_article
@@ -1804,6 +1865,7 @@ elif st.session_state.current_step == 5:
                     user_content=keyword_prompt
                 )
                 save_draft()
+                notify_completion("搜图关键词提取完成")
 
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
@@ -1842,6 +1904,7 @@ elif st.session_state.current_step == 5:
                     success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                     if success:
                         st.success("🎉 飞书推送成功！")
+                        notify_completion("飞书推送完成")
                     else:
                         st.error(f"❌ 推送失败：{msg}")
                             
@@ -1922,6 +1985,13 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
+
+
+
+
 
 
 
