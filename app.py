@@ -779,7 +779,7 @@ def play_completion_sound(message):
             master.gain.value = 0.22;
             master.connect(audioContext.destination);
 
-            const playTone = (freq, startOffset, duration, type = "triangle") => {
+            const playTone = (freq, startOffset, duration, type = "triangle") => {{
                 const osc = audioContext.createOscillator();
                 const gain = audioContext.createGain();
                 const t0 = now + startOffset;
@@ -793,13 +793,13 @@ def play_completion_sound(message):
                 gain.connect(master);
                 osc.start(t0);
                 osc.stop(t1 + 0.01);
-            };
+            }};
 
             playTone(880, 0.00, 0.20, "triangle");
             playTone(1320, 0.24, 0.26, "square");
-            if (navigator.vibrate) {
+            if (navigator.vibrate) {{
                 navigator.vibrate([55, 35, 80]);
-            }
+            }}
             </script>
             <div data-notify-token="{token}"></div>
             """,
@@ -2000,6 +2000,8 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
 
 
 
