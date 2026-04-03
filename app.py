@@ -774,17 +774,32 @@ def play_completion_sound(message):
             f"""
             <script>
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const oscillator = audioContext.createOscillator();
-            const gainNode = audioContext.createGain();
-            oscillator.type = "sine";
-            oscillator.frequency.value = 880;
-            gainNode.gain.setValueAtTime(0.001, audioContext.currentTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.16, audioContext.currentTime + 0.02);
-            gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.36);
-            oscillator.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-            oscillator.start();
-            oscillator.stop(audioContext.currentTime + 0.38);
+            const now = audioContext.currentTime;
+            const master = audioContext.createGain();
+            master.gain.value = 0.22;
+            master.connect(audioContext.destination);
+
+            const playTone = (freq, startOffset, duration, type = "triangle") => {
+                const osc = audioContext.createOscillator();
+                const gain = audioContext.createGain();
+                const t0 = now + startOffset;
+                const t1 = t0 + duration;
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, t0);
+                gain.gain.setValueAtTime(0.0001, t0);
+                gain.gain.exponentialRampToValueAtTime(1.0, t0 + 0.02);
+                gain.gain.exponentialRampToValueAtTime(0.0001, t1);
+                osc.connect(gain);
+                gain.connect(master);
+                osc.start(t0);
+                osc.stop(t1 + 0.01);
+            };
+
+            playTone(880, 0.00, 0.20, "triangle");
+            playTone(1320, 0.24, 0.26, "square");
+            if (navigator.vibrate) {
+                navigator.vibrate([55, 35, 80]);
+            }
             </script>
             <div data-notify-token="{token}"></div>
             """,
