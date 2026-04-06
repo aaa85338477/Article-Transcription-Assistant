@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import streamlit.components.v1 as components
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -15,6 +15,7 @@ import hashlib
 import html
 import base64
 import csv
+from datetime import datetime
 
 try:
     from openpyxl import load_workbook
@@ -98,7 +99,8 @@ def save_draft():
         'source_images', 'removed_source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
         'chat_history', 'image_keywords', 'selected_role', 'final_polisher_mode',
-        'raw_final_article', 'raw_spoken_script', 'final_polish_applied'
+        'raw_final_article', 'raw_spoken_script', 'final_polish_applied',
+        'article_versions'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -114,6 +116,8 @@ def load_draft():
                 draft_data = json.load(f)
             for k, v in draft_data.items():
                 st.session_state[k] = v
+            if "article_versions" not in st.session_state or not isinstance(st.session_state.article_versions, list):
+                st.session_state.article_versions = []
             return True
         except Exception as e:
             print(f"草稿读取失败: {e}")
@@ -751,6 +755,8 @@ def init_state():
         st.session_state.pending_completion_notice = None
     if 'notification_counter' not in st.session_state:
         st.session_state.notification_counter = 0
+    if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
+        st.session_state.article_versions = []
 
 init_state()
 
@@ -765,6 +771,43 @@ def set_final_assets(article_text, script_text=""):
     st.session_state.spoken_script = script_text or ""
     st.session_state.final_polish_applied = False
     save_draft()
+
+
+def record_article_version(content, version_type, source_step, note="", model_name=""):
+    normalized_content = (content or "").strip()
+    if not normalized_content:
+        return False
+
+    if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
+        st.session_state.article_versions = []
+
+    existing_versions = st.session_state.article_versions
+    if existing_versions:
+        last_content = (existing_versions[-1].get("content") or "").strip()
+        if last_content == normalized_content:
+            return False
+
+    version_entry = {
+        "id": len(existing_versions) + 1,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version_type": version_type,
+        "source_step": source_step,
+        "note": note,
+        "role": st.session_state.get("selected_role", ""),
+        "model": model_name or "",
+        "content": normalized_content
+    }
+    existing_versions.append(version_entry)
+    return True
+
+def format_article_version_label(version):
+    version_id = version.get("id", "?")
+    version_type = version.get("version_type", "Unnamed")
+    source_step = version.get("source_step", "Unknown Step")
+    created_at = version.get("created_at", "Unknown Time")
+    note = version.get("note", "")
+    note_suffix = f" | {note}" if note else ""
+    return f"V{version_id} | {version_type} | {source_step} | {created_at}{note_suffix}"
 
 def play_completion_sound(message):
     st.toast(f"🔔 {message}")
@@ -1444,6 +1487,7 @@ if st.session_state.current_step == 1:
                         st.session_state.source_content = combined_content
                         st.session_state.source_images = extracted_imgs
                         st.session_state.removed_source_images = []
+                        st.session_state.article_versions = []
                         st.session_state.extraction_success = True
                         clear_image_selection_state()
                         save_draft()
@@ -1577,6 +1621,13 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
                         )
+                        record_article_version(
+                            st.session_state.draft_article,
+                            version_type="Auto Draft",
+                            source_step="Auto",
+                            note=f"Routed Role: {chosen_editor}",
+                            model_name=selected_model
+                        )
 
                         st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
                         reviewer_prompt = prompts_data["reviewer"]
@@ -1596,6 +1647,13 @@ if st.session_state.current_step == 1:
                         st.session_state.final_article = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=modification_prompt, user_content=content_to_modify
+                        )
+                        record_article_version(
+                            st.session_state.final_article,
+                            version_type="Auto Final",
+                            source_step="Auto",
+                            note="Auto workflow final",
+                            model_name=selected_model
                         )
 
                         if enable_script:
@@ -1660,6 +1718,13 @@ elif st.session_state.current_step == 2:
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
+                record_article_version(
+                    st.session_state.draft_article,
+                    version_type="Manual Draft",
+                    source_step="Step 02",
+                    note=f"Editor Role: {editor_role}",
+                    model_name=selected_model
+                )
                 notify_completion("文章初稿生成完成", defer_until_rerun=True)
                 go_to_step(3)
                 st.rerun()
@@ -1686,6 +1751,13 @@ elif st.session_state.current_step == 3:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
+                record_article_version(
+                    st.session_state.final_article,
+                    version_type="Fast Final",
+                    source_step="Step 03",
+                    note="Skipped strict review",
+                    model_name=selected_model
+                )
 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1745,6 +1817,13 @@ elif st.session_state.current_step == 4:
             spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.draft_article
+                record_article_version(
+                    st.session_state.final_article,
+                    version_type="Forced Final",
+                    source_step="Step 04",
+                    note="Ignored review feedback",
+                    model_name=selected_model
+                )
                 
                 if enable_script:
                     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1775,6 +1854,13 @@ elif st.session_state.current_step == 4:
                     model_name=selected_model, 
                     system_prompt=modification_prompt, 
                     user_content=content_to_modify
+                )
+                record_article_version(
+                    st.session_state.final_article,
+                    version_type="Reviewed Final",
+                    source_step="Step 04",
+                    note="Applied review feedback",
+                    model_name=selected_model
                 )
                 
                 if enable_script:
@@ -1825,6 +1911,13 @@ elif st.session_state.current_step == 5:
                         )
                         st.session_state.raw_final_article = raw_article
                         st.session_state.final_article = polished_article
+                        record_article_version(
+                            st.session_state.final_article,
+                            version_type="Tone Polished",
+                            source_step="Step 05",
+                            note=f"Polish Mode: {st.session_state.final_polisher_mode}",
+                            model_name=FINAL_POLISH_MODEL
+                        )
                         if st.session_state.raw_spoken_script:
                             st.session_state.spoken_script = call_llm(
                                 api_key=api_key,
@@ -1849,6 +1942,47 @@ elif st.session_state.current_step == 5:
 
         st.markdown("### 主稿面板")
         st.code(st.session_state.final_article, language="markdown")
+
+        with st.expander(f"Draft Version History ({len(st.session_state.article_versions)})", expanded=False):
+            if st.session_state.article_versions:
+                version_indices = list(range(len(st.session_state.article_versions) - 1, -1, -1))
+                selected_version_idx = st.selectbox(
+                    "Choose version to preview",
+                    version_indices,
+                    format_func=lambda idx: format_article_version_label(st.session_state.article_versions[idx]),
+                    key="article_version_selector"
+                )
+                selected_version = st.session_state.article_versions[selected_version_idx]
+                role_info = selected_version.get("role", "")
+                model_info = selected_version.get("model", "")
+                meta_parts = []
+                if role_info:
+                    meta_parts.append(f"Role: {role_info}")
+                if model_info:
+                    meta_parts.append(f"Model: {model_info}")
+                if meta_parts:
+                    st.caption(" | ".join(meta_parts))
+                st.code(selected_version.get("content", ""), language="markdown")
+
+                selected_version_id = selected_version.get("id", selected_version_idx + 1)
+                if st.button("Use this as current draft", key=f"use_article_version_{selected_version_id}", use_container_width=True):
+                    restored_article = selected_version.get("content", "")
+                    st.session_state.final_article = restored_article
+                    st.session_state.raw_final_article = restored_article
+                    st.session_state.final_polish_applied = False
+                    record_article_version(
+                        restored_article,
+                        version_type="Version Rollback",
+                        source_step="Step 05",
+                        note=f"Rollback to V{selected_version_id}",
+                        model_name=selected_model
+                    )
+                    save_draft()
+                    notify_completion("Switched to selected version", defer_until_rerun=True)
+                    st.rerun()
+            else:
+                st.caption("No versions recorded in this session yet.")
+
 
         if st.session_state.spoken_script:
             st.divider()
