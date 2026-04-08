@@ -97,7 +97,7 @@ def load_prompts():
         if not os.path.exists(candidate):
             continue
         try:
-            with open(candidate, "r", encoding="utf-8") as f:
+            with open(candidate, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
 
             editors = data.get("editors", {}) if isinstance(data, dict) else {}
@@ -1387,6 +1387,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
