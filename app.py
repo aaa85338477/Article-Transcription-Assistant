@@ -1,8 +1,9 @@
-import streamlit as st
+﻿import streamlit as st
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 import io
+from pathlib import Path
 import os
 from docx import Document
 from openai import OpenAI
@@ -11,6 +12,12 @@ import json
 from bs4 import BeautifulSoup
 import re
 import streamlit.components.v1 as components
+import base64
+try:
+    import pandas as pd
+except Exception:
+    pd = None
+
 
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
@@ -130,7 +137,7 @@ def save_draft():
         'current_step', 'article_url', 'video_url', 'source_content', 
         'source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords', 'selected_role', 'target_article_words'
+        'chat_history', 'image_keywords', 'selected_role', 'target_article_words', 'source_images_all', 'selected_source_image_ids'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -467,6 +474,178 @@ def get_content_from_url(url):
     else:
         return extract_article_content(url)
 
+
+MAX_UPLOAD_TEXT_CHARS = 18000
+MAX_UPLOAD_IMAGE_BYTES = 6 * 1024 * 1024
+SUPPORTED_UPLOAD_EXTENSIONS = [
+    "png", "jpg", "jpeg", "webp", "bmp", "gif",
+    "doc", "docx", "xlsx", "xls", "txt", "md", "csv", "log", "json"
+]
+
+
+def trim_uploaded_text(text, max_chars=MAX_UPLOAD_TEXT_CHARS):
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n\n[内容过长，已截断。仅保留前 {max_chars} 个字符用于分析。]"
+
+
+def decode_text_file_bytes(file_bytes):
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+        try:
+            return file_bytes.decode(encoding), None
+        except Exception:
+            continue
+    return None, "文本文件编码无法识别，请尝试转为 UTF-8 后重传。"
+
+
+def extract_text_from_docx_bytes(file_bytes):
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        blocks = []
+        for paragraph in doc.paragraphs:
+            paragraph_text = paragraph.text.strip()
+            if paragraph_text:
+                blocks.append(paragraph_text)
+
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text and cell.text.strip()]
+                if cells:
+                    blocks.append(" | ".join(cells))
+
+        if not blocks:
+            return None, "Word 文件没有可提取文本。"
+        return "\n".join(blocks), None
+    except Exception as exc:
+        return None, f"Word 解析失败: {str(exc)}"
+
+
+def extract_text_from_excel_bytes(file_bytes):
+    if pd is None:
+        return None, "当前环境未安装 pandas/openpyxl，暂时无法读取 Excel 文件。"
+
+    try:
+        workbook = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
+    except Exception as exc:
+        return None, f"Excel 解析失败: {str(exc)}"
+
+    sheet_blocks = []
+    for sheet_name, df in workbook.items():
+        try:
+            cleaned = df.dropna(how="all").fillna("")
+        except Exception:
+            cleaned = df
+
+        if cleaned is None or getattr(cleaned, "empty", False):
+            continue
+
+        try:
+            sheet_text = cleaned.astype(str).to_csv(index=False)
+        except Exception:
+            sheet_text = str(cleaned)
+
+        if sheet_text.strip():
+            sheet_blocks.append(f"[工作表: {sheet_name}]\n{sheet_text}")
+
+    if not sheet_blocks:
+        return None, "Excel 文件没有可提取内容。"
+    return "\n\n".join(sheet_blocks), None
+
+
+def image_bytes_to_data_url(file_bytes, mime_type):
+    safe_mime = mime_type if mime_type and mime_type.startswith("image/") else "image/png"
+    encoded = base64.b64encode(file_bytes).decode("utf-8")
+    return f"data:{safe_mime};base64,{encoded}"
+
+
+def get_image_preview_payload(image_ref):
+    if isinstance(image_ref, str) and image_ref.startswith("data:image"):
+        try:
+            _, encoded = image_ref.split(",", 1)
+            return base64.b64decode(encoded)
+        except Exception:
+            return None
+    return image_ref
+
+
+def extract_content_from_uploaded_files(uploaded_files):
+    if not uploaded_files:
+        return "", [], [], 0
+
+    text_blocks = []
+    image_refs = []
+    errors = []
+    success_count = 0
+
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    text_suffixes = {".txt", ".md", ".csv", ".log", ".json"}
+
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
+        file_name = uploaded_file.name or f"upload_{idx}"
+        suffix = Path(file_name).suffix.lower()
+
+        try:
+            file_bytes = uploaded_file.getvalue()
+        except Exception as exc:
+            errors.append(f"文件 {file_name} 读取失败: {str(exc)}")
+            continue
+
+        if not file_bytes:
+            errors.append(f"文件 {file_name} 为空，已跳过。")
+            continue
+
+        mime_type = getattr(uploaded_file, "type", "") or ""
+
+        if suffix in image_suffixes or mime_type.startswith("image/"):
+            if len(file_bytes) > MAX_UPLOAD_IMAGE_BYTES:
+                errors.append(f"图片 {file_name} 体积过大（>{MAX_UPLOAD_IMAGE_BYTES // (1024 * 1024)}MB），已跳过。")
+                continue
+
+            image_refs.append(image_bytes_to_data_url(file_bytes, mime_type))
+            text_blocks.append(f"【上传图片素材 {idx}】文件名: {file_name}\n该文件为图片素材，已作为视觉依据加入分析。")
+            success_count += 1
+            continue
+
+        extracted_text = None
+        extract_error = None
+
+        if suffix in text_suffixes:
+            extracted_text, extract_error = decode_text_file_bytes(file_bytes)
+        elif suffix == ".docx":
+            extracted_text, extract_error = extract_text_from_docx_bytes(file_bytes)
+        elif suffix == ".doc":
+            extract_error = "暂不支持 .doc 老格式，请另存为 .docx 后上传。"
+        elif suffix in {".xlsx", ".xls"}:
+            extracted_text, extract_error = extract_text_from_excel_bytes(file_bytes)
+        else:
+            extract_error = f"文件类型不支持: {file_name}"
+
+        if extract_error:
+            errors.append(f"文件 {file_name} 处理失败: {extract_error}")
+            continue
+
+        cleaned_text = trim_uploaded_text((extracted_text or "").strip())
+        if not cleaned_text:
+            errors.append(f"文件 {file_name} 未提取到有效内容。")
+            continue
+
+        text_blocks.append(f"【上传文件素材 {idx}】文件名: {file_name}\n{cleaned_text}")
+        success_count += 1
+
+    deduped_images = []
+    seen_images = set()
+    for item in image_refs:
+        if item in seen_images:
+            continue
+        seen_images.add(item)
+        deduped_images.append(item)
+
+    combined_text = "\n\n================\n\n".join(text_blocks)
+    return combined_text, deduped_images, errors, success_count
+
+
 # ==========================================
 # 3. 状态管理初始化
 # ==========================================
@@ -481,6 +660,10 @@ def init_state():
         st.session_state.source_content = ""
     if 'source_images' not in st.session_state:
         st.session_state.source_images = []
+    if 'source_images_all' not in st.session_state:
+        st.session_state.source_images_all = list(st.session_state.source_images)
+    if 'selected_source_image_ids' not in st.session_state:
+        st.session_state.selected_source_image_ids = list(range(len(st.session_state.source_images_all)))
     if 'extraction_success' not in st.session_state:
         st.session_state.extraction_success = False
     if 'draft_article' not in st.session_state:
@@ -501,11 +684,41 @@ def init_state():
         st.session_state.target_article_words = 3000
     st.session_state.target_article_words = get_target_article_words()
 
+
 init_state()
 
 def go_to_step(step):
     st.session_state.current_step = step
     save_draft()
+
+
+def sync_selected_source_images():
+    all_images = st.session_state.get("source_images_all", [])
+    if not isinstance(all_images, list):
+        all_images = []
+
+    raw_selected = st.session_state.get("selected_source_image_ids", list(range(len(all_images))))
+    normalized_selected = []
+    seen_ids = set()
+
+    for item in raw_selected:
+        try:
+            idx = int(item)
+        except Exception:
+            continue
+        if idx < 0 or idx >= len(all_images):
+            continue
+        if idx in seen_ids:
+            continue
+        seen_ids.add(idx)
+        normalized_selected.append(idx)
+
+    st.session_state.source_images_all = all_images
+    st.session_state.selected_source_image_ids = normalized_selected
+    st.session_state.source_images = [all_images[idx] for idx in normalized_selected]
+
+
+sync_selected_source_images()
 
 
 def play_step_completion_sound():
@@ -1032,17 +1245,33 @@ if st.session_state.current_step == 1:
             )
 
     with st.container(border=True):
+        render_section_intro("文件资料上传", "支持上传本地图片、Word、Excel、TXT 等文件作为分析依据。", "Files")
+        uploaded_source_files = st.file_uploader(
+            "上传资料文件（支持图片、Word、Excel、TXT，可多选）",
+            type=SUPPORTED_UPLOAD_EXTENSIONS,
+            accept_multiple_files=True,
+            key="source_files_uploader"
+        )
+        if uploaded_source_files:
+            file_names = [file.name for file in uploaded_source_files]
+            preview_names = "、".join(file_names[:6])
+            if len(file_names) > 6:
+                preview_names += f" 等 {len(file_names)} 个文件"
+            st.caption(f"已选择 {len(file_names)} 个文件：{preview_names}")
+
+    with st.container(border=True):
         render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
         st.markdown("<p class='toolbar-note'>建议先把主题相近的文章和视频放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
         if st.button("开始批量提取内容", type="primary", use_container_width=True):
             article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
             video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
+            uploaded_file_count = len(uploaded_source_files) if uploaded_source_files else 0
 
-            if not article_urls and not video_urls:
-                st.warning("请至少输入一个链接！")
+            if not article_urls and not video_urls and uploaded_file_count == 0:
+                st.warning("请至少输入链接或上传一个文件！")
             else:
-                total_urls = len(article_urls) + len(video_urls)
-                with st.spinner(f"启动全息解析引擎，正在批量获取 {total_urls} 个素材..."):
+                total_sources = len(article_urls) + len(video_urls) + uploaded_file_count
+                with st.spinner(f"启动全息解析引擎，正在批量获取 {total_sources} 个素材..."):
                     combined_content = ""
                     extracted_imgs = []
                     errors = []
@@ -1065,36 +1294,77 @@ if st.session_state.current_step == 1:
                         else:
                             errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
 
-                    extracted_imgs = extracted_imgs[:15]
+                    uploaded_content, uploaded_imgs, uploaded_errors, uploaded_success_count = extract_content_from_uploaded_files(uploaded_source_files)
+                    if uploaded_content:
+                        combined_content += uploaded_content + "\n\n================\n\n"
+                    if uploaded_imgs:
+                        extracted_imgs.extend(uploaded_imgs)
+                    if uploaded_errors:
+                        errors.extend(uploaded_errors)
+                    success_count += uploaded_success_count
 
-                    if combined_content:
+                    deduped_imgs = []
+                    seen_imgs = set()
+                    for image_item in extracted_imgs:
+                        if image_item in seen_imgs:
+                            continue
+                        seen_imgs.add(image_item)
+                        deduped_imgs.append(image_item)
+                    extracted_imgs = deduped_imgs[:15]
+
+                    if combined_content.strip():
                         st.session_state.article_url = article_url_input
                         st.session_state.video_url = video_url_input
                         st.session_state.source_content = combined_content
-                        st.session_state.source_images = extracted_imgs
+                        st.session_state.source_images_all = extracted_imgs
+                        st.session_state.selected_source_image_ids = list(range(len(extracted_imgs)))
+                        st.session_state.source_images = list(extracted_imgs)
+                        for stale_key in [k for k in list(st.session_state.keys()) if k.startswith("source_image_pick_")]:
+                            del st.session_state[stale_key]
                         st.session_state.extraction_success = True
                         notify_step_completed()
 
                         if errors:
-                            st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
+                            st.warning(f"部分内容提取成功 ({success_count}/{total_sources})，但有以下错误：\n" + "\n".join(errors))
                         else:
                             if len(extracted_imgs) > 0:
-                                st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材，并提取到 {len(extracted_imgs)} 张核心配图。")
+                                st.success(f"批量提取成功！共融合了 {success_count} 个素材，并提取到 {len(extracted_imgs)} 张核心配图。")
                             else:
-                                st.success(f"🎉 批量提取成功！共融合了 {success_count} 个素材。(无有效配图，走纯文本模式)")
+                                st.success(f"批量提取成功！共融合了 {success_count} 个素材。（无有效配图，走纯文本模式）")
                     else:
                         st.session_state.extraction_success = False
-                        st.error("❌ 所有链接提取均失败，请检查链接或网络状态。\n" + "\n".join(errors))
+                        st.error("所有素材提取均失败，请检查链接、上传文件内容或网络状态。\n" + "\n".join(errors))
 
     if st.session_state.extraction_success:
         with st.container(border=True):
             render_section_intro("聚合素材预览", "先快速检查抓取结果，再决定是走手动精调还是全自动驾驶。", "Preview")
-            if st.session_state.source_images:
-                st.markdown("#### 核心配图")
+            all_source_images = st.session_state.get("source_images_all", [])
+            if all_source_images:
+                st.markdown("#### 核心配图（勾选纳入 AI 分析）")
+                previous_selected_ids = set(st.session_state.get("selected_source_image_ids", []))
+                selected_ids = []
                 img_cols = st.columns(3)
-                for idx, img_url in enumerate(st.session_state.source_images):
+                for idx, img_url in enumerate(all_source_images):
                     with img_cols[idx % 3]:
-                        st.image(img_url, use_column_width=True)
+                        preview_image = get_image_preview_payload(img_url)
+                        if preview_image is not None:
+                            st.image(preview_image, use_column_width=True)
+                        checked = st.checkbox(
+                            f"图片 {idx + 1} 纳入分析",
+                            value=(idx in previous_selected_ids),
+                            key=f"source_image_pick_{idx}"
+                        )
+                        if checked:
+                            selected_ids.append(idx)
+
+                if selected_ids != st.session_state.get("selected_source_image_ids", []):
+                    st.session_state.selected_source_image_ids = selected_ids
+                    st.session_state.source_images = [all_source_images[i] for i in selected_ids]
+                    save_draft()
+
+                st.caption(f"当前已勾选 {len(st.session_state.source_images)} / {len(all_source_images)} 张图片进入分析。")
+                if len(st.session_state.source_images) == 0:
+                    st.info("当前未勾选任何图片，后续将按纯文本模式继续。")
                 st.divider()
 
             st.markdown("#### 合并后的文本正文")
@@ -1531,6 +1801,21 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
