@@ -197,11 +197,11 @@ def sanitize_editor_prompt(prompt_text):
     return cleaned_prompt.strip()
 
 def get_target_article_words():
-    raw_value = st.session_state.get("target_article_words", 3000)
+    raw_value = st.session_state.get("target_article_words", 1500)
     try:
         value = int(raw_value)
     except Exception:
-        value = 3000
+        value = 1500
     return max(200, min(5000, value))
 
 
@@ -663,7 +663,7 @@ def init_state():
     if 'source_images_all' not in st.session_state:
         st.session_state.source_images_all = list(st.session_state.source_images)
     if 'selected_source_image_ids' not in st.session_state:
-        st.session_state.selected_source_image_ids = list(range(len(st.session_state.source_images_all)))
+        st.session_state.selected_source_image_ids = []
     if 'extraction_success' not in st.session_state:
         st.session_state.extraction_success = False
     if 'draft_article' not in st.session_state:
@@ -681,7 +681,7 @@ def init_state():
     if 'pending_completion_sound' not in st.session_state:
         st.session_state.pending_completion_sound = False
     if 'target_article_words' not in st.session_state:
-        st.session_state.target_article_words = 3000
+        st.session_state.target_article_words = 1500
     st.session_state.target_article_words = get_target_article_words()
 
 
@@ -697,7 +697,7 @@ def sync_selected_source_images():
     if not isinstance(all_images, list):
         all_images = []
 
-    raw_selected = st.session_state.get("selected_source_image_ids", list(range(len(all_images))))
+    raw_selected = st.session_state.get("selected_source_image_ids", [])
     normalized_selected = []
     seen_ids = set()
 
@@ -1317,8 +1317,8 @@ if st.session_state.current_step == 1:
                         st.session_state.video_url = video_url_input
                         st.session_state.source_content = combined_content
                         st.session_state.source_images_all = extracted_imgs
-                        st.session_state.selected_source_image_ids = list(range(len(extracted_imgs)))
-                        st.session_state.source_images = list(extracted_imgs)
+                        st.session_state.selected_source_image_ids = []
+                        st.session_state.source_images = []
                         for stale_key in [k for k in list(st.session_state.keys()) if k.startswith("source_image_pick_")]:
                             del st.session_state[stale_key]
                         st.session_state.extraction_success = True
@@ -1801,6 +1801,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
