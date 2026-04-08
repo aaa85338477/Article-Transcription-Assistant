@@ -448,21 +448,29 @@ def play_step_completion_sound():
                 const AudioContextRef = window.AudioContext || window.webkitAudioContext;
                 if (!AudioContextRef) return;
                 const ctx = new AudioContextRef();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = "triangle";
-                osc.frequency.setValueAtTime(880, ctx.currentTime);
-                osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 1.0);
-                gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.22, ctx.currentTime + 0.02);
-                gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.0);
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start(ctx.currentTime);
-                osc.stop(ctx.currentTime + 1.02);
+                const playTone = (startOffset, duration, startFreq, endFreq, peakGain) => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    const startAt = ctx.currentTime + startOffset;
+                    const endAt = startAt + duration;
+                    osc.type = "triangle";
+                    osc.frequency.setValueAtTime(startFreq, startAt);
+                    osc.frequency.exponentialRampToValueAtTime(endFreq, endAt);
+                    gain.gain.setValueAtTime(0.0001, startAt);
+                    gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.03);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(startAt);
+                    osc.stop(endAt + 0.02);
+                };
+
+                // 双音提示：前短后长，更有提醒感，总时长约 2 秒
+                playTone(0.00, 0.35, 1120, 900, 0.22);
+                playTone(0.55, 1.40, 900, 620, 0.25);
                 setTimeout(() => {
                     try { ctx.close(); } catch (e) {}
-                }, 1200);
+                }, 2300);
             } catch (e) {}
         })();
         </script>
@@ -1443,6 +1451,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
