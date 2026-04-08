@@ -955,11 +955,36 @@ def init_source_result(url, source_type=None):
         "attempt_logs": [],
         "success": False,
         "error_reason": "",
-        "confidence": "low"
+        "confidence": "low",
+        "error_code": "",
+        "browser_unavailable": False
     }
 
 def append_attempt_log(result, message):
     result["attempt_logs"].append(message)
+
+PLAYWRIGHT_BROWSER_MISSING_CODE = "playwright_browser_missing"
+
+def is_browser_runtime_unavailable(error_message):
+    lowered = (error_message or "").lower()
+    markers = [
+        "playwright is not installed",
+        "executable doesn't exist",
+        "please run the following command to download new browsers",
+        "chrome-headless-shell",
+        "chromium_headless_shell"
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def get_browser_unavailable_message(capture_screenshots=False):
+    if capture_screenshots:
+        return "截图兜底未启用（部署环境缺少 Chromium）"
+    return "浏览器渲染当前不可用"
+
+
+def get_browser_unavailable_summary():
+    return "常规正文抓取失败，且当前环境未启用浏览器渲染组件"
 
 def looks_like_generic_block(text, html_text=""):
     lowered = f"{text or ''}\n{html_text or ''}".lower()
@@ -1117,7 +1142,14 @@ def extract_with_reader_proxy(url, source_type="article"):
 
 def run_browser_capture(url, capture_screenshots=False):
     if sync_playwright is None:
-        return {"html": "", "title": "", "screenshots": [], "error": "Playwright is not installed."}
+        return {
+            "html": "",
+            "title": "",
+            "screenshots": [],
+            "error": get_browser_unavailable_message(capture_screenshots),
+            "error_code": PLAYWRIGHT_BROWSER_MISSING_CODE,
+            "browser_unavailable": True
+        }
 
     try:
         with sync_playwright() as playwright:
@@ -1156,9 +1188,33 @@ def run_browser_capture(url, capture_screenshots=False):
             html_text = page.content()
             title = page.title()
             browser.close()
-            return {"html": html_text, "title": title, "screenshots": screenshots, "error": ""}
+            return {
+                "html": html_text,
+                "title": title,
+                "screenshots": screenshots,
+                "error": "",
+                "error_code": "",
+                "browser_unavailable": False
+            }
     except Exception as e:
-        return {"html": "", "title": "", "screenshots": [], "error": f"Browser render failed: {str(e)}"}
+        raw_error = str(e)
+        if is_browser_runtime_unavailable(raw_error):
+            return {
+                "html": "",
+                "title": "",
+                "screenshots": [],
+                "error": get_browser_unavailable_message(capture_screenshots),
+                "error_code": PLAYWRIGHT_BROWSER_MISSING_CODE,
+                "browser_unavailable": True
+            }
+        return {
+            "html": "",
+            "title": "",
+            "screenshots": [],
+            "error": f"Browser render failed: {raw_error}",
+            "error_code": "browser_render_failed",
+            "browser_unavailable": False
+        }
 
 def extract_with_browser_render(url, source_type="article"):
     result = init_source_result(url, source_type=source_type)
@@ -1166,7 +1222,9 @@ def extract_with_browser_render(url, source_type="article"):
     browser_payload = run_browser_capture(url, capture_screenshots=False)
     if browser_payload["error"]:
         result["error_reason"] = browser_payload["error"]
-        append_attempt_log(result, browser_payload["error"])
+        result["error_code"] = browser_payload.get("error_code", "")
+        result["browser_unavailable"] = browser_payload.get("browser_unavailable", False)
+        append_attempt_log(result, "Browser render unavailable" if result["browser_unavailable"] else browser_payload["error"])
         return result
 
     text, images, extracted_title = extract_article_from_html(url, browser_payload["html"])
@@ -1188,7 +1246,9 @@ def extract_with_screenshot_fallback(url, source_type="article"):
     browser_payload = run_browser_capture(url, capture_screenshots=True)
     if browser_payload["error"]:
         result["error_reason"] = browser_payload["error"]
-        append_attempt_log(result, browser_payload["error"])
+        result["error_code"] = browser_payload.get("error_code", "")
+        result["browser_unavailable"] = browser_payload.get("browser_unavailable", False)
+        append_attempt_log(result, "Screenshot fallback unavailable" if result["browser_unavailable"] else browser_payload["error"])
         return result
 
     result["title"] = browser_payload["title"] or urlparse(url).netloc
@@ -1266,15 +1326,24 @@ def get_content_from_url(url):
 
     last_result = init_source_result(url, source_type=source_type)
     route_logs = []
+    browser_unavailable = False
     for strategy in strategies:
         last_result = strategy(url)
-        route_status = "success" if last_result.get("success") else "failed"
+        route_status = "成功" if last_result.get("success") else "失败"
         route_logs.append(f"{last_result.get('strategy_used', 'unknown')} {route_status}")
         if last_result.get("error_reason") and not last_result.get("success"):
             route_logs.append(last_result["error_reason"])
         if last_result.get("success"):
             last_result["attempt_logs"] = route_logs
             return last_result
+        if last_result.get("browser_unavailable"):
+            browser_unavailable = True
+            break
+
+    if browser_unavailable:
+        last_result["user_error_summary"] = get_browser_unavailable_summary()
+        last_result["error_code"] = PLAYWRIGHT_BROWSER_MISSING_CODE
+
     last_result["attempt_logs"] = route_logs
     return last_result
 def init_state():
