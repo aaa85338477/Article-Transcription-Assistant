@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
@@ -130,7 +130,7 @@ def save_draft():
         'current_step', 'article_url', 'video_url', 'source_content', 
         'source_images', 'extraction_success', 'draft_article', 
         'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords', 'selected_role'
+        'chat_history', 'image_keywords', 'selected_role', 'target_article_words'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -158,6 +158,72 @@ def clear_draft():
             os.remove(DRAFT_FILE)
         except:
             pass
+
+
+def sanitize_editor_prompt(prompt_text):
+    if not isinstance(prompt_text, str):
+        return ""
+    cleaned_lines = []
+    for line in prompt_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append(line)
+            continue
+
+        has_digit = any(ch.isdigit() for ch in stripped)
+        should_remove = (
+            "\u76ee\u6807\u5b57\u6570" in stripped
+            or "\u5b57\u6570\u8981\u6c42" in stripped
+            or "\u603b\u5b57\u6570" in stripped
+            or ("\u63a7\u5236\u5728" in stripped and "\u5b57" in stripped and has_digit)
+            or ("\u4e0d\u8d85" in stripped and "\u5b57" in stripped and has_digit)
+            or ("\u4e0d\u8d85\u8fc7" in stripped and "\u5b57" in stripped and has_digit)
+            or ("\u4e25\u7981\u8d85\u8fc7" in stripped and "\u5b57" in stripped and has_digit)
+            or ("\u6574\u4f53\u4e0d\u8d85" in stripped and "\u5b57" in stripped and has_digit)
+        )
+        if should_remove:
+            continue
+        cleaned_lines.append(line)
+    cleaned_prompt = "\n".join(cleaned_lines)
+    while "\n\n\n" in cleaned_prompt:
+        cleaned_prompt = cleaned_prompt.replace("\n\n\n", "\n\n")
+    return cleaned_prompt.strip()
+
+def get_target_article_words():
+    raw_value = st.session_state.get("target_article_words", 3000)
+    try:
+        value = int(raw_value)
+    except Exception:
+        value = 3000
+    return max(200, min(5000, value))
+
+
+def build_target_length_instruction():
+    target_words = get_target_article_words()
+    return (
+        f"【本轮全局字数要求（最高优先级）】\n"
+        f"本次目标字数：约 {target_words} 字（允许 ±10% 浮动）。\n"
+        "若角色提示中存在固定字数要求，请忽略并以本轮全局目标为准。"
+    )
+
+
+def build_editor_system_prompt(editor_prompt, global_instruction):
+    prompt_parts = [
+        sanitize_editor_prompt(editor_prompt),
+        build_target_length_instruction(),
+        global_instruction.strip() if isinstance(global_instruction, str) else ""
+    ]
+    return "\n\n".join([part for part in prompt_parts if part])
+
+
+def build_modification_system_prompt(global_instruction):
+    base_prompt = "你是一位专业文字编辑。请根据审稿意见全面修改初稿，直接输出最终成稿，不要额外解释。"
+    prompt_parts = [
+        base_prompt,
+        build_target_length_instruction(),
+        global_instruction.strip() if isinstance(global_instruction, str) else ""
+    ]
+    return "\n\n".join([part for part in prompt_parts if part])
 
 # ==========================================
 # 1. API 与外部推送函数
@@ -431,6 +497,9 @@ def init_state():
         st.session_state.image_keywords = ""
     if 'pending_completion_sound' not in st.session_state:
         st.session_state.pending_completion_sound = False
+    if 'target_article_words' not in st.session_state:
+        st.session_state.target_article_words = 3000
+    st.session_state.target_article_words = get_target_article_words()
 
 init_state()
 
@@ -1034,6 +1103,7 @@ if st.session_state.current_step == 1:
 
         with st.container(border=True):
             render_section_intro("选择工作流模式", "手动精调适合逐步把关，全自动驾驶适合快速得到高完成度定稿。", "Workflow")
+            st.caption(f"🧮 当前全局目标字数：约 {get_target_article_words()} 字")
             col_flow1, col_flow2 = st.columns(2)
 
             with col_flow1:
@@ -1071,7 +1141,7 @@ if st.session_state.current_step == 1:
                         st.write("✍️ 编辑正在奋笔疾书，生成初稿中...")
                         editor_prompt = prompts_data["editors"][chosen_editor]
                         global_instruction = prompts_data.get("global_instruction", "")
-                        final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
+                        final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
 
                         draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
                         st.session_state.draft_article = call_llm(
@@ -1091,7 +1161,7 @@ if st.session_state.current_step == 1:
                         )
 
                         st.write("✨ 接收修改意见，正在进行最终打磨...")
-                        modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
+                        modification_prompt = build_modification_system_prompt(global_instruction)
                         content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
 
                         st.session_state.final_article = call_llm(
@@ -1118,7 +1188,7 @@ if st.session_state.current_step == 1:
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
     render_section_intro("初稿生成", "选择合适的编辑角色，确认当前模型与写作规范，然后输出首版文章。", "Step 02")
-    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     editor_options = list(prompts_data["editors"].keys())
     if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
@@ -1128,6 +1198,16 @@ elif st.session_state.current_step == 2:
     
     editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
     st.session_state.selected_role = editor_role 
+
+    target_article_words = st.slider(
+        "🧮 全局目标字数（200-5000）",
+        min_value=200,
+        max_value=5000,
+        value=get_target_article_words(),
+        step=100,
+        help="本轮稿件统一使用该字数目标；若角色 Prompt 里有固定字数要求，会自动被全局目标覆盖。"
+    )
+    st.session_state.target_article_words = target_article_words
     
     editor_prompt = st.text_area(
         "✍️ 编辑 Prompt (支持临时微调)", 
@@ -1145,7 +1225,7 @@ elif st.session_state.current_step == 2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
             with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
-                final_editor_system_prompt = f"{editor_prompt}\n\n{global_instruction}"
+                final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
                 
                 if st.session_state.source_images:
                     editor_user_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
@@ -1167,7 +1247,7 @@ elif st.session_state.current_step == 2:
 # --- Step 3 (手动模式) ---
 elif st.session_state.current_step == 3:
     render_section_intro("严格审稿", "主编从事实、逻辑和风格三个维度核查初稿，确保对外可发布。", "Step 03")
-    render_context_strip([f"当前模型：{selected_model}", f"当前角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     with st.expander("📝 查看当前初稿内容 (鼠标移至右上角可一键复制)", expanded=True):
         st.code(st.session_state.draft_article, language="markdown")
@@ -1229,7 +1309,7 @@ elif st.session_state.current_step == 3:
 # --- Step 4 (手动模式) ---
 elif st.session_state.current_step == 4:
     render_section_intro("定稿修订", "根据主编反馈完成最后一轮修改，并同步决定是否生成脚本。", "Step 04")
-    render_context_strip([f"当前模型：{selected_model}", f"当前角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     st.info("**主编审稿意见 (鼠标移至下方框内右上角可复制)：**")
     st.code(st.session_state.review_feedback, language="markdown")
@@ -1263,7 +1343,7 @@ elif st.session_state.current_step == 4:
             spinner_msg = f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "编辑正在根据主编意见修改文章..."
             with st.spinner(spinner_msg):
                 global_instruction = prompts_data.get("global_instruction", "")
-                modification_prompt = f"你是一位专业的文字编辑。请根据以下【审稿意见】，对【初稿】进行全面修改。直接输出修改后的最终成稿，不要包含任何多余的解释说明。\n\n{global_instruction}"
+                modification_prompt = build_modification_system_prompt(global_instruction)
                 
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
                 
