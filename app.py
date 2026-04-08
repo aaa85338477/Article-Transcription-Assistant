@@ -22,6 +22,11 @@ try:
 except Exception:
     load_workbook = None
 
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
+
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
 # ==========================================
@@ -100,7 +105,7 @@ def save_draft():
         'review_feedback', 'final_article', 'spoken_script', 
         'chat_history', 'image_keywords', 'selected_role', 'final_polisher_mode',
         'raw_final_article', 'raw_spoken_script', 'final_polish_applied',
-        'article_versions'
+        'article_versions', 'source_materials'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -118,6 +123,8 @@ def load_draft():
                 st.session_state[k] = v
             if "article_versions" not in st.session_state or not isinstance(st.session_state.article_versions, list):
                 st.session_state.article_versions = []
+            if "source_materials" not in st.session_state or not isinstance(st.session_state.source_materials, list):
+                st.session_state.source_materials = []
             return True
         except Exception as e:
             print(f"草稿读取失败: {e}")
@@ -160,8 +167,118 @@ def render_image_preview_card(image_url, title, badge_text, badge_class=""):
 def uploaded_file_to_data_url(uploaded_file):
     file_bytes = uploaded_file.getvalue()
     mime_type = uploaded_file.type or "image/png"
+    return bytes_to_data_url(file_bytes, mime_type)
+
+def bytes_to_data_url(file_bytes, mime_type="image/png"):
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
+
+STRATEGY_LABELS_ZH = {
+    "direct_html": "直连网页正文",
+    "reader_proxy": "代理阅读兜底",
+    "browser_render": "浏览器渲染抓取",
+    "screenshot_fallback": "截图兜底",
+    "reddit_adapter": "Reddit 专用适配",
+    "youtube_transcript": "YouTube 字幕提取",
+    "file_upload_image": "上传图片素材",
+    "file_upload_text": "上传文本文件",
+    "file_upload_docx": "上传 Word 文件",
+    "file_upload_xlsx": "上传 Excel 文件",
+    "file_upload_csv": "上传 CSV 文件",
+    "file_upload_unsupported": "文件类型不支持",
+    "file_upload_error": "文件解析异常",
+    "unknown": "未知策略"
+}
+
+CONFIDENCE_LABELS_ZH = {
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+    "unknown": "未知"
+}
+
+def localize_strategy_name(strategy_used):
+    return STRATEGY_LABELS_ZH.get(strategy_used, strategy_used or "未知策略")
+
+def localize_confidence(confidence):
+    return CONFIDENCE_LABELS_ZH.get(confidence, confidence or "未知")
+
+def localize_attempt_log(log_text):
+    if not log_text:
+        return "未记录抓取过程。"
+
+    localized = log_text
+    replacements = [
+        ("Direct HTML status", "直连网页状态"),
+        ("Direct HTML content quality too low", "直连网页正文质量偏低"),
+        ("Direct HTML failed:", "直连网页失败："),
+        ("Direct HTML exception", "直连网页触发异常"),
+        ("Reader proxy status", "代理阅读状态"),
+        ("Reader proxy content quality too low", "代理阅读内容质量偏低"),
+        ("Reader proxy failed:", "代理阅读失败："),
+        ("Reader proxy exception", "代理阅读触发异常"),
+        ("Browser render failed:", "浏览器渲染失败："),
+        ("Browser render completed", "浏览器渲染完成"),
+        ("Browser render content quality too low", "浏览器渲染后的正文质量偏低"),
+        ("Screenshot fallback captured", "截图兜底已捕获"),
+        ("images", "张截图"),
+        ("success", "成功"),
+        ("failed:", "失败："),
+        ("returned empty content", "返回内容为空"),
+        ("Playwright is not installed.", "运行环境未安装 Playwright。"),
+        ("No screenshots captured", "未成功生成截图"),
+    ]
+    for old_text, new_text in replacements:
+        localized = localized.replace(old_text, new_text)
+    for strategy_key, strategy_label in STRATEGY_LABELS_ZH.items():
+        localized = localized.replace(strategy_key, strategy_label)
+    return localized
+
+def summarize_attempt_logs(attempt_logs):
+    if not attempt_logs:
+        return "未记录抓取过程。"
+    return " → ".join(localize_attempt_log(log) for log in attempt_logs[:3])
+
+def render_source_material_card(material):
+    source_label = html.escape(material.get("source_label") or material.get("source_url") or "未知来源")
+    source_url = html.escape(material.get("source_url") or "")
+    strategy_used = html.escape(localize_strategy_name(material.get("strategy_used") or "unknown"))
+    confidence = html.escape(localize_confidence(material.get("confidence") or "unknown"))
+    status_text = "抓取成功" if material.get("success") else "抓取失败"
+    status_class = "success" if material.get("success") else "failed"
+    title = html.escape(material.get("title") or "未识别标题")
+    log_text = html.escape(summarize_attempt_logs(material.get("attempt_logs") or []))
+    text_length = material.get("text_length", 0)
+    image_count = material.get("image_count", 0)
+    screenshot_count = material.get("screenshot_count", 0)
+    error_reason = html.escape(localize_attempt_log(material.get("error_reason") or ""))
+
+    url_markup = f'<div class="source-card-url">{source_url}</div>' if source_url else ""
+    error_markup = f'<div class="source-card-error">{error_reason}</div>' if error_reason else ""
+    st.markdown(
+        f"""
+        <div class="source-card">
+            <div class="source-card-head">
+                <div>
+                    <div class="source-card-label">{source_label}</div>
+                    <div class="source-card-title">{title}</div>
+                    {url_markup}
+                </div>
+                <span class="source-card-status {status_class}">{status_text}</span>
+            </div>
+            <div class="source-card-metrics">
+                <span class="source-card-chip">抓取策略：{strategy_used}</span>
+                <span class="source-card-chip">可信度：{confidence}</span>
+                <span class="source-card-chip">文本长度：{text_length}</span>
+                <span class="source-card-chip">图片数量：{image_count}</span>
+                <span class="source-card-chip">截图数量：{screenshot_count}</span>
+            </div>
+            <div class="source-card-log">{log_text}</div>
+            {error_markup}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 def decode_uploaded_text(file_bytes):
     for encoding in ["utf-8-sig", "utf-8", "gb18030", "utf-16"]:
@@ -285,6 +402,102 @@ def build_uploaded_file_material(uploaded_files):
 
     combined_text = "\n\n================\n\n".join(uploaded_text_blocks)
     return combined_text, uploaded_images, success_count, errors
+
+def build_uploaded_file_material_v2(uploaded_files):
+    uploaded_images = []
+    uploaded_text_blocks = []
+    errors = []
+    success_count = 0
+    source_materials = []
+    image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+    text_exts = {".txt", ".md"}
+    excel_exts = {".xlsx"}
+    csv_exts = {".csv"}
+    doc_exts = {".docx"}
+
+    def build_file_material(idx, file_name, strategy_used, success, text_length=0, image_count=0, error_reason=""):
+        return {
+            "source_label": f"上传文件 {idx}",
+            "source_url": file_name,
+            "source_type": "file",
+            "title": file_name,
+            "strategy_used": strategy_used,
+            "attempt_logs": [strategy_used],
+            "success": success,
+            "error_reason": error_reason,
+            "confidence": "high" if success else "low",
+            "text_length": text_length,
+            "image_count": image_count,
+            "screenshot_count": 0
+        }
+
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
+        file_name = uploaded_file.name or f"uploaded_file_{idx}"
+        suffix = os.path.splitext(file_name)[1].lower()
+        file_bytes = uploaded_file.getvalue()
+        mime_type = (uploaded_file.type or "").lower()
+
+        try:
+            if mime_type.startswith("image/") or suffix in image_exts:
+                data_url = uploaded_file_to_data_url(uploaded_file)
+                uploaded_images.append(data_url)
+                uploaded_text_blocks.append(
+                    f"[上传图片素材 {idx}] 文件名：{file_name}\n说明：请将这张图片视为截图或图像信息源，直接从中提取文本、标题、图表、评论与页面上下文。"
+                )
+                source_materials.append(build_file_material(idx, file_name, "file_upload_image", True, image_count=1))
+                success_count += 1
+            elif suffix in text_exts:
+                decoded_text = decode_uploaded_text(file_bytes)
+                if decoded_text and decoded_text.strip():
+                    cleaned_text = decoded_text.strip()
+                    uploaded_text_blocks.append(f"[上传文本素材 {idx}] 文件名：{file_name}\n{cleaned_text}")
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_text", True, text_length=len(cleaned_text)))
+                    success_count += 1
+                else:
+                    error_message = f"文件 {file_name} 为空，或无法正确解码。"
+                    errors.append(error_message)
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_text", False, error_reason=error_message))
+            elif suffix in doc_exts:
+                doc_text = extract_text_from_docx_bytes(file_bytes)
+                if doc_text:
+                    uploaded_text_blocks.append(f"[上传 Word 素材 {idx}] 文件名：{file_name}\n{doc_text}")
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_docx", True, text_length=len(doc_text)))
+                    success_count += 1
+                else:
+                    error_message = f"Word 文件 {file_name} 中没有可提取的文本内容。"
+                    errors.append(error_message)
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_docx", False, error_reason=error_message))
+            elif suffix in excel_exts:
+                excel_text = extract_text_from_excel_bytes(file_bytes)
+                if excel_text:
+                    uploaded_text_blocks.append(f"[上传 Excel 素材 {idx}] 文件名：{file_name}\n{excel_text}")
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_xlsx", True, text_length=len(excel_text)))
+                    success_count += 1
+                else:
+                    error_message = f"Excel 文件 {file_name} 中没有可提取的内容。"
+                    errors.append(error_message)
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_xlsx", False, error_reason=error_message))
+            elif suffix in csv_exts:
+                csv_text = extract_text_from_csv_bytes(file_bytes)
+                if csv_text:
+                    uploaded_text_blocks.append(f"[上传 CSV 素材 {idx}] 文件名：{file_name}\n{csv_text}")
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_csv", True, text_length=len(csv_text)))
+                    success_count += 1
+                else:
+                    error_message = f"CSV 文件 {file_name} 中没有可提取的内容。"
+                    errors.append(error_message)
+                    source_materials.append(build_file_material(idx, file_name, "file_upload_csv", False, error_reason=error_message))
+            else:
+                error_message = f"文件 {file_name} 暂不支持，请上传图片、txt、md、docx、xlsx 或 csv。"
+                errors.append(error_message)
+                source_materials.append(build_file_material(idx, file_name, "file_upload_unsupported", False, error_reason=error_message))
+        except Exception as e:
+            error_message = f"文件 {file_name} 解析失败：{str(e)}"
+            errors.append(error_message)
+            source_materials.append(build_file_material(idx, file_name, "file_upload_error", False, error_reason=error_message))
+
+    combined_text = "\n\n================\n\n".join(uploaded_text_blocks)
+    return combined_text, uploaded_images, success_count, errors, source_materials
 
 
 
@@ -705,15 +918,365 @@ def extract_article_content(url):
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
 
-def get_content_from_url(url):
-    parsed_url = urlparse(url)
-    netloc = parsed_url.netloc.lower()
+GENERIC_BLOCK_MARKERS = [
+    "access denied",
+    "forbidden",
+    "enable javascript",
+    "please verify you are human",
+    "captcha",
+    "blocked by network security",
+    "request blocked",
+    "temporarily unavailable"
+]
+
+def normalize_source_url(url):
+    parsed = urlparse(url)
+    return parsed._replace(fragment="").geturl()
+
+def infer_source_type(url):
+    netloc = urlparse(url).netloc.lower()
     if "youtube.com" in netloc or "youtu.be" in netloc:
-        return extract_youtube_transcript(url)
-    elif "reddit.com" in netloc or "redd.it" in netloc:
-        return extract_reddit_content(url)
+        return "video"
+    if "reddit.com" in netloc or "redd.it" in netloc:
+        return "reddit"
+    return "article"
+
+def init_source_result(url, source_type=None):
+    source_type = source_type or infer_source_type(url)
+    return {
+        "source_url": url,
+        "normalized_url": normalize_source_url(url),
+        "source_type": source_type,
+        "title": "",
+        "text": "",
+        "images": [],
+        "screenshots": [],
+        "strategy_used": "",
+        "attempt_logs": [],
+        "success": False,
+        "error_reason": "",
+        "confidence": "low"
+    }
+
+def append_attempt_log(result, message):
+    result["attempt_logs"].append(message)
+
+def looks_like_generic_block(text, html_text=""):
+    lowered = f"{text or ''}\n{html_text or ''}".lower()
+    return any(marker in lowered for marker in GENERIC_BLOCK_MARKERS)
+
+def is_low_quality_text(text, source_type="article"):
+    cleaned = (text or "").strip()
+    threshold = 400
+    if source_type in ("reddit", "video"):
+        threshold = 120
+    return len(cleaned) < threshold
+
+def extract_title_from_html(html_text):
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+        if soup.title and soup.title.text:
+            return soup.title.text.strip()
+        og_title = soup.find("meta", attrs={"property": "og:title"})
+        if og_title and og_title.get("content"):
+            return og_title["content"].strip()
+    except Exception:
+        return ""
+    return ""
+
+def extract_article_from_html(url, html_text):
+    text = trafilatura.extract(html_text)
+    soup = BeautifulSoup(html_text, 'html.parser')
+
+    noise_tags = ['aside', 'nav', 'footer', 'header']
+    for noise in soup.find_all(noise_tags):
+        noise.decompose()
+
+    noise_keywords = ['author', 'related', 'comment', 'share', 'widget', 'sidebar', 'ad-container', 'popup', 'newsletter']
+    for noise in soup.find_all(attrs={'class': lambda c: c and any(k in str(c).lower() for k in noise_keywords)}):
+        noise.decompose()
+    for noise in soup.find_all(attrs={'id': lambda i: i and any(k in str(i).lower() for k in noise_keywords)}):
+        noise.decompose()
+
+    main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
+    title = extract_title_from_html(html_text)
+    images = []
+    for img in main_content.find_all('img'):
+        try:
+            html_w = int(img.get('width', 0))
+            html_h = int(img.get('height', 0))
+        except Exception:
+            html_w, html_h = 0, 0
+
+        src = None
+        srcset = img.get('data-srcset') or img.get('srcset')
+        if srcset:
+            sources = []
+            for item in srcset.split(','):
+                parts = item.strip().split()
+                if len(parts) == 2 and parts[1].endswith('w') and parts[1][:-1].isdigit():
+                    sources.append((parts[0], int(parts[1][:-1])))
+            if sources:
+                sources.sort(key=lambda pair: pair[1], reverse=True)
+                src = sources[0][0]
+
+        if not src:
+            for attr in ['data-original', 'data-lazy-src', 'data-src', 'src']:
+                value = img.get(attr)
+                if value:
+                    if isinstance(value, list):
+                        value = value[0]
+                    value = str(value).strip()
+                    if not value.startswith('data:image'):
+                        src = value
+                        break
+
+        if not src:
+            continue
+
+        if src.startswith('//'):
+            src = 'https:' + src
+        elif src.startswith('/'):
+            parsed_url = urlparse(url)
+            src = f"{parsed_url.scheme}://{parsed_url.netloc}{src}"
+        elif not src.startswith('http'):
+            continue
+
+        src_lower = src.lower()
+        junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'avatar']
+        if any(junk in src_lower for junk in junk_keywords):
+            continue
+
+        if html_w < 300 and html_h < 300:
+            match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
+            if match:
+                mw, mh = int(match.group(1)), int(match.group(2))
+                if mw <= 300 or mh <= 300:
+                    continue
+
+        if src not in images:
+            images.append(src)
+            if len(images) >= 8:
+                break
+
+    if not text:
+        paragraphs = soup.find_all('p')
+        text = '\n'.join([p.get_text() for p in paragraphs])
+
+    return (text or "").strip(), images, title
+
+def extract_with_direct_html(url, source_type="article"):
+    result = init_source_result(url, source_type=source_type)
+    result["strategy_used"] = "direct_html"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        append_attempt_log(result, f"Direct HTML status {response.status_code}")
+        if response.status_code >= 400:
+            result["error_reason"] = f"HTTP {response.status_code}"
+            return result
+
+        text, images, title = extract_article_from_html(url, response.text)
+        result["title"] = title
+        result["text"] = text
+        result["images"] = images
+        if looks_like_generic_block(text, response.text) or is_low_quality_text(text, source_type=source_type):
+            result["error_reason"] = "Direct HTML content quality too low"
+            return result
+
+        result["success"] = True
+        result["confidence"] = "high"
+        return result
+    except Exception as e:
+        result["error_reason"] = f"Direct HTML failed: {str(e)}"
+        append_attempt_log(result, "Direct HTML exception")
+        return result
+
+def extract_with_reader_proxy(url, source_type="article"):
+    result = init_source_result(url, source_type=source_type)
+    result["strategy_used"] = "reader_proxy"
+    try:
+        response = requests.get(f"https://r.jina.ai/{url}", headers={"Accept": "text/plain"}, timeout=20)
+        append_attempt_log(result, f"Reader proxy status {response.status_code}")
+        response.raise_for_status()
+        result["title"] = urlparse(url).netloc
+        result["text"] = response.text.strip()
+        if looks_like_generic_block(result["text"]) or is_low_quality_text(result["text"], source_type=source_type):
+            result["error_reason"] = "Reader proxy content quality too low"
+            return result
+
+        result["success"] = True
+        result["confidence"] = "medium"
+        return result
+    except Exception as e:
+        result["error_reason"] = f"Reader proxy failed: {str(e)}"
+        append_attempt_log(result, "Reader proxy exception")
+        return result
+
+def run_browser_capture(url, capture_screenshots=False):
+    if sync_playwright is None:
+        return {"html": "", "title": "", "screenshots": [], "error": "Playwright is not installed."}
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1024})
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1200)
+
+            total_height = page.evaluate("() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 1200)")
+            page.evaluate("() => window.scrollTo(0, 0)")
+            page.wait_for_timeout(250)
+
+            screenshots = []
+            if capture_screenshots:
+                viewport_height = (page.viewport_size or {}).get("height", 1024)
+                section_count = min(5, max(1, int(total_height / max(viewport_height, 1)) + 1))
+                max_scroll = max(int(total_height - viewport_height), 0)
+                positions = []
+                for idx in range(section_count):
+                    if section_count == 1:
+                        positions.append(0)
+                    else:
+                        positions.append(int((max_scroll / (section_count - 1)) * idx))
+                for position in positions:
+                    page.evaluate(f"() => window.scrollTo(0, {position})")
+                    page.wait_for_timeout(350)
+                    screenshot_bytes = page.screenshot(type="png", full_page=False)
+                    screenshots.append(bytes_to_data_url(screenshot_bytes, "image/png"))
+                page.evaluate("() => window.scrollTo(0, 0)")
+                page.wait_for_timeout(250)
+
+            html_text = page.content()
+            title = page.title()
+            browser.close()
+            return {"html": html_text, "title": title, "screenshots": screenshots, "error": ""}
+    except Exception as e:
+        return {"html": "", "title": "", "screenshots": [], "error": f"Browser render failed: {str(e)}"}
+
+def extract_with_browser_render(url, source_type="article"):
+    result = init_source_result(url, source_type=source_type)
+    result["strategy_used"] = "browser_render"
+    browser_payload = run_browser_capture(url, capture_screenshots=False)
+    if browser_payload["error"]:
+        result["error_reason"] = browser_payload["error"]
+        append_attempt_log(result, browser_payload["error"])
+        return result
+
+    text, images, extracted_title = extract_article_from_html(url, browser_payload["html"])
+    result["title"] = extracted_title or browser_payload["title"]
+    result["text"] = text
+    result["images"] = images
+    append_attempt_log(result, "Browser render completed")
+    if looks_like_generic_block(text, browser_payload["html"]) or is_low_quality_text(text, source_type=source_type):
+        result["error_reason"] = "Browser render content quality too low"
+        return result
+
+    result["success"] = True
+    result["confidence"] = "medium"
+    return result
+
+def extract_with_screenshot_fallback(url, source_type="article"):
+    result = init_source_result(url, source_type=source_type)
+    result["strategy_used"] = "screenshot_fallback"
+    browser_payload = run_browser_capture(url, capture_screenshots=True)
+    if browser_payload["error"]:
+        result["error_reason"] = browser_payload["error"]
+        append_attempt_log(result, browser_payload["error"])
+        return result
+
+    result["title"] = browser_payload["title"] or urlparse(url).netloc
+    result["screenshots"] = browser_payload["screenshots"]
+    result["text"] = (
+        f"[截图兜底素材]\n来源链接：{url}\n"
+        f"页面标题：{result['title']}\n"
+        "本次正文抽取结果不稳定，请以下方附带截图作为后续分析的主要依据。"
+    )
+    append_attempt_log(result, f"Screenshot fallback captured {len(result['screenshots'])} images")
+    if result["screenshots"]:
+        result["success"] = True
+        result["confidence"] = "low"
+        return result
+
+    result["error_reason"] = "No screenshots captured"
+    return result
+
+def wrap_legacy_extractor(url, source_type, strategy_used, extractor):
+    result = init_source_result(url, source_type=source_type)
+    result["strategy_used"] = strategy_used
+    try:
+        text, images, error = extractor(url)
+        result["text"] = text or ""
+        result["images"] = images or []
+        result["title"] = urlparse(url).netloc
+        if text:
+            result["success"] = True
+            result["confidence"] = "high" if strategy_used == "youtube_transcript" else "medium"
+            append_attempt_log(result, f"{strategy_used} success")
+        else:
+            result["error_reason"] = error or f"{strategy_used} returned empty content"
+            append_attempt_log(result, result["error_reason"])
+        return result
+    except Exception as e:
+        result["error_reason"] = f"{strategy_used} failed: {str(e)}"
+        append_attempt_log(result, result["error_reason"])
+        return result
+
+def summarize_source_result(result, source_label=None):
+    return {
+        "source_label": source_label or urlparse(result.get("source_url", "")).netloc or "来源",
+        "source_url": result.get("source_url", ""),
+        "source_type": result.get("source_type", "article"),
+        "title": result.get("title", ""),
+        "strategy_used": result.get("strategy_used", ""),
+        "attempt_logs": result.get("attempt_logs", []),
+        "success": result.get("success", False),
+        "error_reason": result.get("error_reason", ""),
+        "confidence": result.get("confidence", "low"),
+        "text_length": len((result.get("text") or "").strip()),
+        "image_count": len(result.get("images") or []),
+        "screenshot_count": len(result.get("screenshots") or [])
+    }
+
+def get_content_from_url(url):
+    source_type = infer_source_type(url)
+    if source_type == "video":
+        return wrap_legacy_extractor(url, "video", "youtube_transcript", extract_youtube_transcript)
+
+    if source_type == "reddit":
+        strategies = [
+            lambda target_url: wrap_legacy_extractor(target_url, "reddit", "reddit_adapter", extract_reddit_content),
+            lambda target_url: extract_with_reader_proxy(target_url, source_type="reddit"),
+            lambda target_url: extract_with_browser_render(target_url, source_type="reddit"),
+            lambda target_url: extract_with_screenshot_fallback(target_url, source_type="reddit")
+        ]
     else:
-        return extract_article_content(url)
+        strategies = [
+            lambda target_url: extract_with_direct_html(target_url, source_type="article"),
+            lambda target_url: extract_with_reader_proxy(target_url, source_type="article"),
+            lambda target_url: extract_with_browser_render(target_url, source_type="article"),
+            lambda target_url: extract_with_screenshot_fallback(target_url, source_type="article")
+        ]
+
+    last_result = init_source_result(url, source_type=source_type)
+    route_logs = []
+    for strategy in strategies:
+        last_result = strategy(url)
+        route_status = "success" if last_result.get("success") else "failed"
+        route_logs.append(f"{last_result.get('strategy_used', 'unknown')} {route_status}")
+        if last_result.get("error_reason") and not last_result.get("success"):
+            route_logs.append(last_result["error_reason"])
+        if last_result.get("success"):
+            last_result["attempt_logs"] = route_logs
+            return last_result
+    last_result["attempt_logs"] = route_logs
+    return last_result
 def init_state():
     if 'current_step' not in st.session_state:
         st.session_state.current_step = 1
@@ -725,6 +1288,8 @@ def init_state():
         st.session_state.source_content = ""
     if 'source_images' not in st.session_state:
         st.session_state.source_images = []
+    if 'source_materials' not in st.session_state:
+        st.session_state.source_materials = []
     if 'removed_source_images' not in st.session_state:
         st.session_state.removed_source_images = []
     if 'extraction_success' not in st.session_state:
@@ -1060,6 +1625,82 @@ def inject_ui_theme():
             background: rgba(31, 111, 95, 0.06);
         }
         .toolbar-note { color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; }
+        .source-card {
+            margin-bottom: 0.85rem;
+            padding: 0.95rem 1rem;
+            border-radius: 18px;
+            border: 1px solid rgba(41, 59, 51, 0.12);
+            background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(247,250,248,0.92));
+            box-shadow: 0 10px 24px rgba(22, 33, 28, 0.06);
+        }
+        .source-card-head {
+            display: flex;
+            align-items: start;
+            justify-content: space-between;
+            gap: 0.8rem;
+            margin-bottom: 0.7rem;
+        }
+        .source-card-label {
+            color: var(--brand-strong);
+            font-size: 0.77rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .source-card-title {
+            margin-top: 0.22rem;
+            color: var(--text);
+            font-size: 0.96rem;
+            font-weight: 700;
+            line-height: 1.5;
+        }
+        .source-card-url {
+            margin-top: 0.28rem;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            word-break: break-all;
+        }
+        .source-card-status {
+            padding: 0.25rem 0.64rem;
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .source-card-status.success {
+            background: rgba(31, 138, 85, 0.12);
+            color: #1f6f5f;
+        }
+        .source-card-status.failed {
+            background: rgba(184, 67, 54, 0.12);
+            color: #a23b31;
+        }
+        .source-card-metrics {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            margin-bottom: 0.65rem;
+        }
+        .source-card-chip {
+            display: inline-flex;
+            padding: 0.3rem 0.58rem;
+            border-radius: 999px;
+            background: rgba(31, 111, 95, 0.08);
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+        .source-card-log {
+            color: var(--text);
+            font-size: 0.83rem;
+            line-height: 1.55;
+        }
+        .source-card-error {
+            margin-top: 0.55rem;
+            color: #a23b31;
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
         .image-preview-card {
             margin-bottom: 0.65rem;
             padding: 0.7rem;
@@ -1447,26 +2088,34 @@ if st.session_state.current_step == 1:
                     extracted_imgs = []
                     errors = []
                     success_count = 0
+                    source_materials = []
 
                     for idx, a_url in enumerate(article_urls):
-                        art_content, art_imgs, art_err = get_content_from_url(a_url)
-                        if art_content:
-                            combined_content += f"【文章素材 {idx+1}】来源于: {a_url}\n{art_content}\n\n================\n\n"
-                            extracted_imgs.extend(art_imgs)
+                        article_result = get_content_from_url(a_url)
+                        source_materials.append(summarize_source_result(article_result, source_label=f"文章素材 {idx+1}"))
+                        article_text = article_result.get("text", "")
+                        article_images = (article_result.get("images") or []) + (article_result.get("screenshots") or [])
+                        if article_text or article_images:
+                            combined_content += f"[文章素材 {idx+1}] 来源：{a_url}\n{article_text}\n\n================\n\n"
+                            extracted_imgs.extend(article_images)
                             success_count += 1
                         else:
-                            errors.append(f"文章 {idx+1} 提取失败: {art_err}")
+                            errors.append(f"文章素材 {idx+1} 提取失败：{article_result.get('error_reason', '未知错误')}")
 
                     for idx, v_url in enumerate(video_urls):
-                        vid_content, vid_imgs, vid_err = get_content_from_url(v_url)
-                        if vid_content:
-                            combined_content += f"【视频素材 {idx+1}】来源于: {v_url}\n{vid_content}\n\n================\n\n"
+                        video_result = get_content_from_url(v_url)
+                        source_materials.append(summarize_source_result(video_result, source_label=f"视频素材 {idx+1}"))
+                        video_text = video_result.get("text", "")
+                        video_images = (video_result.get("images") or []) + (video_result.get("screenshots") or [])
+                        if video_text or video_images:
+                            combined_content += f"[视频素材 {idx+1}] 来源：{v_url}\n{video_text}\n\n================\n\n"
+                            extracted_imgs.extend(video_images)
                             success_count += 1
                         else:
-                            errors.append(f"视频 {idx+1} 提取失败: {vid_err}")
+                            errors.append(f"视频素材 {idx+1} 提取失败：{video_result.get('error_reason', '未知错误')}")
 
                     if uploaded_source_files:
-                        uploaded_content, uploaded_images, uploaded_success_count, uploaded_errors = build_uploaded_file_material(uploaded_source_files)
+                        uploaded_content, uploaded_images, uploaded_success_count, uploaded_errors, uploaded_materials = build_uploaded_file_material_v2(uploaded_source_files)
                         if uploaded_content:
                             if combined_content:
                                 combined_content += f"{uploaded_content}\n\n================\n\n"
@@ -1475,6 +2124,7 @@ if st.session_state.current_step == 1:
                         extracted_imgs = uploaded_images + extracted_imgs
                         success_count += uploaded_success_count
                         errors.extend(uploaded_errors)
+                        source_materials.extend(uploaded_materials)
 
                     extracted_imgs = extracted_imgs[:15]
 
@@ -1486,6 +2136,7 @@ if st.session_state.current_step == 1:
                         st.session_state.video_url = video_url_input
                         st.session_state.source_content = combined_content
                         st.session_state.source_images = extracted_imgs
+                        st.session_state.source_materials = source_materials
                         st.session_state.removed_source_images = []
                         st.session_state.article_versions = []
                         st.session_state.extraction_success = True
@@ -1504,13 +2155,30 @@ if st.session_state.current_step == 1:
                                 notify_completion(f"素材提取完成，已融合 {success_count} 个素材")
                     else:
                         st.session_state.extraction_success = False
+                        st.session_state.source_materials = source_materials
                         st.error("❌ 所有素材提取均失败，请检查链接、上传文件内容或网络状态。\n" + "\n".join(errors))
+    if (not st.session_state.extraction_success) and st.session_state.source_materials:
+        with st.container(border=True):
+            render_section_intro("来源抓取记录", "先查看每条来源用了哪种抓取方式，再决定是否重试、补传文件或改用截图素材。", "日志")
+            source_cols = st.columns(2)
+            for idx, material in enumerate(st.session_state.source_materials):
+                with source_cols[idx % 2]:
+                    render_source_material_card(material)
+
     if st.session_state.extraction_success:
         with st.container(border=True):
             render_section_intro("聚合素材预览", "先快速检查抓取结果，并手动移除会干扰分析的图片。", "Preview")
             active_image_count = len(st.session_state.source_images)
             removed_image_count = len(st.session_state.removed_source_images)
             st.caption(f"当前参与分析图片：{active_image_count} 张｜已移除：{removed_image_count} 张")
+
+            if st.session_state.source_materials:
+                st.markdown("#### 来源抓取概览")
+                source_cols = st.columns(2)
+                for idx, material in enumerate(st.session_state.source_materials):
+                    with source_cols[idx % 2]:
+                        render_source_material_card(material)
+                st.divider()
 
             if st.session_state.source_images:
                 st.markdown("#### 当前参与分析的图片")
