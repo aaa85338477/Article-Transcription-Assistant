@@ -10,6 +10,7 @@ import requests
 import json
 from bs4 import BeautifulSoup
 import re
+import streamlit.components.v1 as components
 
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
@@ -428,12 +429,57 @@ def init_state():
         st.session_state.chat_history = []
     if 'image_keywords' not in st.session_state:
         st.session_state.image_keywords = ""
+    if 'pending_completion_sound' not in st.session_state:
+        st.session_state.pending_completion_sound = False
 
 init_state()
 
 def go_to_step(step):
     st.session_state.current_step = step
     save_draft()
+
+
+def play_step_completion_sound():
+    components.html(
+        """
+        <script>
+        (function () {
+            try {
+                const AudioContextRef = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextRef) return;
+                const ctx = new AudioContextRef();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = "triangle";
+                osc.frequency.setValueAtTime(880, ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 1.0);
+                gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.22, ctx.currentTime + 0.02);
+                gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.0);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(ctx.currentTime);
+                osc.stop(ctx.currentTime + 1.02);
+                setTimeout(() => {
+                    try { ctx.close(); } catch (e) {}
+                }, 1200);
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+def notify_step_completed(defer_until_rerun=False):
+    if defer_until_rerun:
+        st.session_state.pending_completion_sound = True
+    else:
+        play_step_completion_sound()
+
+def render_pending_completion_sound():
+    if st.session_state.get("pending_completion_sound"):
+        st.session_state.pending_completion_sound = False
+        play_step_completion_sound()
 
 def get_script_sys_prompt(duration_str):
     duration_map = {
@@ -745,6 +791,7 @@ st.set_page_config(page_title="公众号文章生成助手", page_icon="🕹️"
 inject_ui_theme()
 
 prompts_data = load_prompts()
+render_pending_completion_sound()
 
 with st.sidebar:
     st.markdown("## 控制面板")
@@ -949,6 +996,7 @@ if st.session_state.current_step == 1:
                         st.session_state.source_content = combined_content
                         st.session_state.source_images = extracted_imgs
                         st.session_state.extraction_success = True
+                        notify_step_completed()
 
                         if errors:
                             st.warning(f"部分内容提取成功 ({success_count}/{total_urls})，但有以下错误：\n" + "\n".join(errors))
@@ -1056,6 +1104,7 @@ if st.session_state.current_step == 1:
 
                         status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
 
+                    notify_step_completed(defer_until_rerun=True)
                     go_to_step(5)
                     st.rerun()
 # --- Step 2 (手动模式) ---
@@ -1103,6 +1152,7 @@ elif st.session_state.current_step == 2:
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
+                notify_step_completed(defer_until_rerun=True)
                 go_to_step(3)
                 st.rerun()
 
@@ -1139,6 +1189,7 @@ elif st.session_state.current_step == 3:
                 else:
                     st.session_state.spoken_script = ""
                     
+                notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -1163,6 +1214,7 @@ elif st.session_state.current_step == 3:
                     user_content=combined_content,
                     image_urls=st.session_state.source_images
                 )
+                notify_step_completed(defer_until_rerun=True)
                 go_to_step(4)
                 st.rerun()
 
@@ -1195,6 +1247,7 @@ elif st.session_state.current_step == 4:
                 else:
                     st.session_state.spoken_script = ""
                     
+                notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
@@ -1224,6 +1277,7 @@ elif st.session_state.current_step == 4:
                 else:
                     st.session_state.spoken_script = ""
                 
+                notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
 
@@ -1269,6 +1323,7 @@ elif st.session_state.current_step == 5:
                     user_content=keyword_prompt
                 )
                 save_draft()
+                notify_step_completed()
                 
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
@@ -1307,6 +1362,7 @@ elif st.session_state.current_step == 5:
                     success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                     if success:
                         st.success("🎉 飞书推送成功！")
+                        notify_step_completed()
                     else:
                         st.error(f"❌ 推送失败：{msg}")
                             
