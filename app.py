@@ -27,13 +27,50 @@ PROMPTS_PATH_CANDIDATES = [
 
 PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
 DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
+PROMPTS_LOAD_REPORT = ""
 
 
-def find_first_existing_path(paths):
-    for path in paths:
-        if os.path.exists(path):
-            return path
-    return None
+def get_prompt_file_candidates():
+    candidates = []
+    env_prompt_path = os.environ.get("PROMPTS_FILE", "").strip()
+    if env_prompt_path:
+        candidates.append(env_prompt_path)
+
+    candidates.extend(PROMPTS_PATH_CANDIDATES)
+
+    roots = [
+        APP_DIR,
+        os.getcwd(),
+        os.path.dirname(APP_DIR),
+        os.path.dirname(os.path.dirname(APP_DIR)),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        for name in ("prompts.json", "prompt.json", "Prompt.json"):
+            candidates.append(os.path.join(root, name))
+
+    try:
+        app_depth = APP_DIR.rstrip(os.sep).count(os.sep)
+        for walk_root, _, files in os.walk(APP_DIR):
+            current_depth = walk_root.rstrip(os.sep).count(os.sep) - app_depth
+            if current_depth > 2:
+                continue
+            for file_name in files:
+                if file_name.lower() in {"prompts.json", "prompt.json"}:
+                    candidates.append(os.path.join(walk_root, file_name))
+    except Exception:
+        pass
+
+    unique_candidates = []
+    seen = set()
+    for path in candidates:
+        normalized = os.path.abspath(path)
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_candidates.append(normalized)
+    return unique_candidates
+
 DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
 2. 禁用伪高级“黑话”：严禁滥用带双引号的互联网/营销词汇（如“赋能”、“底层逻辑”、“打法”、“组合拳”、“降维打击”）。遇到专业概念，请用人话直白解释，不要故作高深。
@@ -51,30 +88,42 @@ def load_prompts():
         "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉...",
         "global_instruction": DEFAULT_GLOBAL_PROMPT
     }
-    
-    global PROMPTS_FILE
 
-    existing_prompt_path = find_first_existing_path(PROMPTS_PATH_CANDIDATES)
-    if existing_prompt_path:
-        PROMPTS_FILE = existing_prompt_path
+    global PROMPTS_FILE
+    global PROMPTS_LOAD_REPORT
+
+    parse_errors = []
+    for candidate in get_prompt_file_candidates():
+        if not os.path.exists(candidate):
+            continue
         try:
-            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+            with open(candidate, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "global_instruction" not in data:
-                    data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
-                    save_prompts(data)
-                return data
+
+            editors = data.get("editors", {}) if isinstance(data, dict) else {}
+            if not isinstance(editors, dict) or len(editors) == 0:
+                raise ValueError("缺少 editors 配置或 editors 为空")
+
+            if "global_instruction" not in data:
+                data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
+
+            PROMPTS_FILE = candidate
+            PROMPTS_LOAD_REPORT = f"loaded:{PROMPTS_FILE}:editors={len(editors)}"
+            return data
         except Exception as e:
-            print(f"提示词文件读取失败（{PROMPTS_FILE}）：{e}")
-            return default_data
+            parse_errors.append(f"{candidate} -> {str(e)}")
 
     PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
+    PROMPTS_LOAD_REPORT = "fallback_default"
+    if parse_errors:
+        PROMPTS_LOAD_REPORT += " | " + " || ".join(parse_errors[:3])
+
     save_prompts(default_data)
     return default_data
+
 def save_prompts(data):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-
 def save_draft():
     keys_to_save = [
         'current_step', 'article_url', 'video_url', 'source_content', 
@@ -700,6 +749,10 @@ prompts_data = load_prompts()
 with st.sidebar:
     st.markdown("## 控制面板")
     st.caption("管理模型、脚本生成策略与写作 Prompt，所有改动都会直接作用到当前工作流。")
+    st.caption(f"Prompt 文件：{PROMPTS_FILE}")
+    if PROMPTS_LOAD_REPORT.startswith("fallback_default"):
+        st.warning("未读取到有效 prompts 配置，当前使用默认角色。请确认部署目录中的 prompts.json。")
+        st.caption(PROMPTS_LOAD_REPORT)
     st.header("⚙️ 引擎设置")
     api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
     
