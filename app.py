@@ -14,9 +14,26 @@ import re
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
 # ==========================================
-PROMPTS_FILE = "prompts.json"
-DRAFT_FILE = "draft_state.json"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+PROMPTS_PATH_CANDIDATES = [
+    os.path.join(APP_DIR, "prompts.json"),
+    os.path.join(APP_DIR, "prompt.json"),
+    os.path.join(APP_DIR, "Prompt.json"),
+    "prompts.json",
+    "prompt.json",
+    "Prompt.json",
+]
+
+PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
+DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
+
+
+def find_first_existing_path(paths):
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
 DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
 2. 禁用伪高级“黑话”：严禁滥用带双引号的互联网/营销词汇（如“赋能”、“底层逻辑”、“打法”、“组合拳”、“降维打击”）。遇到专业概念，请用人话直白解释，不要故作高深。
@@ -35,7 +52,11 @@ def load_prompts():
         "global_instruction": DEFAULT_GLOBAL_PROMPT
     }
     
-    if os.path.exists(PROMPTS_FILE):
+    global PROMPTS_FILE
+
+    existing_prompt_path = find_first_existing_path(PROMPTS_PATH_CANDIDATES)
+    if existing_prompt_path:
+        PROMPTS_FILE = existing_prompt_path
         try:
             with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -43,12 +64,13 @@ def load_prompts():
                     data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
                     save_prompts(data)
                 return data
-        except Exception:
-            pass
-            
+        except Exception as e:
+            print(f"提示词文件读取失败（{PROMPTS_FILE}）：{e}")
+            return default_data
+
+    PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
     save_prompts(default_data)
     return default_data
-
 def save_prompts(data):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
@@ -1312,8 +1334,8 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
-                save_draft()
-            st.rerun()
+
+
 
 
 
