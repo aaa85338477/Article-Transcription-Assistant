@@ -7,7 +7,6 @@
 ## 核心能力
 
 - 抓取网页文章正文，并自动提取核心配图
-- 支持多策略抓取：直连 HTML、Reader Proxy、浏览器渲染与截图兜底
 - 抓取 YouTube 字幕，遇到常规字幕接口受限时自动尝试备用解析
 - 支持多编辑角色写稿，例如发行主编、研发主编、游戏快讯编辑、客观转录编辑
 - 支持主编审稿和根据审稿意见自动改稿
@@ -41,12 +40,6 @@
 pip install -r requirements.txt
 ```
 
-如果你希望启用浏览器渲染与自动截图兜底，还需要安装 Chromium：
-
-```bash
-playwright install chromium
-```
-
 2. 启动应用：
 
 ```bash
@@ -61,8 +54,7 @@ streamlit run app.py
 
 - 输入文章链接
 - 可选输入一个 YouTube 视频链接
-- 系统会自动按多策略尝试抓取正文、图片和必要时的页面截图
-- Step 1 会展示每条来源实际使用的抓取策略和抓取日志摘要
+- 系统会自动聚合网页正文、视频字幕和图片素材
 
 ### 2. 选择模式
 
@@ -108,7 +100,6 @@ streamlit run app.py
 - `openai`：调用兼容 OpenAI SDK 的模型接口
 - `python-docx`：导出 Word 文档
 - `requests`：网页抓取与飞书推送
-- `playwright`：浏览器渲染与截图兜底
 
 ## 注意事项
 
@@ -117,7 +108,6 @@ streamlit run app.py
 - 页面中的角色配置会写回 `prompts.json`
 - 工作流草稿会保存到运行目录下的 `draft_state.json`
 - 如果网页正文提取失败，程序会回退到更简单的提取方式
-- 对复杂网页会按顺序尝试直连抓取、Reader Proxy、浏览器渲染和截图兜底
 - 如果需要结合图片做分析，建议选择支持视觉能力的模型
 
 ## 适用场景
