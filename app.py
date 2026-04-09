@@ -807,29 +807,44 @@ def play_step_completion_sound():
                 const AudioContextRef = window.AudioContext || window.webkitAudioContext;
                 if (!AudioContextRef) return;
                 const ctx = new AudioContextRef();
-                const playTone = (startOffset, duration, startFreq, endFreq, peakGain) => {
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
+                const playChime = (startOffset, freq, duration, peakGain) => {
                     const startAt = ctx.currentTime + startOffset;
                     const endAt = startAt + duration;
-                    osc.type = "triangle";
-                    osc.frequency.setValueAtTime(startFreq, startAt);
-                    osc.frequency.exponentialRampToValueAtTime(endFreq, endAt);
-                    gain.gain.setValueAtTime(0.0001, startAt);
-                    gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.03);
-                    gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    osc.start(startAt);
-                    osc.stop(endAt + 0.02);
+                    const mainOsc = ctx.createOscillator();
+                    const harmonicOsc = ctx.createOscillator();
+                    const mainGain = ctx.createGain();
+                    const harmonicGain = ctx.createGain();
+                    const masterGain = ctx.createGain();
+
+                    mainOsc.type = "sine";
+                    harmonicOsc.type = "sine";
+                    mainOsc.frequency.setValueAtTime(freq, startAt);
+                    harmonicOsc.frequency.setValueAtTime(freq * 2, startAt);
+
+                    harmonicGain.gain.setValueAtTime(0.32, startAt);
+                    masterGain.gain.setValueAtTime(0.0001, startAt);
+                    masterGain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.012);
+                    masterGain.gain.exponentialRampToValueAtTime(peakGain * 0.48, startAt + 0.06);
+                    masterGain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+
+                    mainOsc.connect(mainGain);
+                    harmonicOsc.connect(harmonicGain);
+                    mainGain.connect(masterGain);
+                    harmonicGain.connect(masterGain);
+                    masterGain.connect(ctx.destination);
+
+                    mainOsc.start(startAt);
+                    harmonicOsc.start(startAt);
+                    mainOsc.stop(endAt + 0.02);
+                    harmonicOsc.stop(endAt + 0.02);
                 };
 
-                // 双音提示：前短后长，更有提醒感，总时长约 2 秒
-                playTone(0.00, 0.35, 1120, 900, 0.22);
-                playTone(0.55, 1.40, 900, 620, 0.25);
+                // iOS 风格：清脆、短促、偏高频的双音提示
+                playChime(0.00, 1318.5, 0.18, 0.11);
+                playChime(0.13, 1760.0, 0.24, 0.10);
                 setTimeout(() => {
                     try { ctx.close(); } catch (e) {}
-                }, 2300);
+                }, 700);
             } catch (e) {}
         })();
         </script>
@@ -1922,6 +1937,9 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
 
 
 
