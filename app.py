@@ -5,6 +5,7 @@ from urllib.parse import urlparse, parse_qs
 import io
 from pathlib import Path
 import os
+import html as html_lib
 from docx import Document
 from openai import OpenAI
 import requests
@@ -852,6 +853,110 @@ def play_step_completion_sound():
         height=0,
     )
 
+
+def normalize_copy_text(text):
+    normalized = (text or "")
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.replace("\u2028", "\n").replace("\u2029", "\n")
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def markdown_to_editor_html(markdown_text):
+    normalized = normalize_copy_text(markdown_text)
+    if not normalized:
+        return "<p></p>"
+
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", normalized) if item.strip()]
+    if not paragraphs:
+        return "<p></p>"
+
+    html_parts = []
+    for paragraph in paragraphs:
+        escaped = html_lib.escape(paragraph)
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+        escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
+        escaped = escaped.replace("\n", "<br/>")
+        html_parts.append(f"<p>{escaped}</p>")
+    return "".join(html_parts)
+
+
+def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制（保留段落）"):
+    plain_text = normalize_copy_text(text)
+    if not plain_text:
+        return
+
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(copy_key))
+    safe_label = html_lib.escape(label)
+    plain_text_b64 = base64.b64encode(plain_text.encode("utf-8")).decode("ascii")
+    html_text_b64 = base64.b64encode(markdown_to_editor_html(plain_text).encode("utf-8")).decode("ascii")
+
+    components.html(
+        f"""
+        <div style="display:flex;align-items:center;gap:10px;margin:6px 0 0 0;">
+          <button id="copy-btn-{safe_key}" style="border:1px solid #d9d9df;background:#ffffff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">
+            {safe_label}
+          </button>
+          <span id="copy-status-{safe_key}" style="font-size:12px;color:#667085;"></span>
+        </div>
+        <script>
+        (function () {{
+            const plainBase64 = "{plain_text_b64}";
+            const htmlBase64 = "{html_text_b64}";
+            const btn = document.getElementById("copy-btn-{safe_key}");
+            const status = document.getElementById("copy-status-{safe_key}");
+
+            function decodeBase64Utf8(input) {{
+                const binary = window.atob(input);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i += 1) {{
+                    bytes[i] = binary.charCodeAt(i);
+                }}
+                if (window.TextDecoder) {{
+                    return new TextDecoder().decode(bytes);
+                }}
+                let encoded = "";
+                for (let i = 0; i < bytes.length; i += 1) {{
+                    encoded += "%" + bytes[i].toString(16).padStart(2, "0");
+                }}
+                return decodeURIComponent(encoded);
+            }}
+
+            async function copyRichText() {{
+                const plainText = decodeBase64Utf8(plainBase64).replace(/\\n/g, "\\r\\n");
+                const htmlText = decodeBase64Utf8(htmlBase64);
+                try {{
+                    if (navigator.clipboard && window.ClipboardItem) {{
+                        const payload = new ClipboardItem({{
+                            "text/plain": new Blob([plainText], {{ type: "text/plain" }}),
+                            "text/html": new Blob([htmlText], {{ type: "text/html" }})
+                        }});
+                        await navigator.clipboard.write([payload]);
+                    }} else if (navigator.clipboard && navigator.clipboard.writeText) {{
+                        await navigator.clipboard.writeText(plainText);
+                    }} else {{
+                        const ta = document.createElement("textarea");
+                        ta.value = plainText;
+                        ta.style.position = "fixed";
+                        ta.style.left = "-9999px";
+                        document.body.appendChild(ta);
+                        ta.focus();
+                        ta.select();
+                        document.execCommand("copy");
+                        document.body.removeChild(ta);
+                    }}
+                    status.textContent = "已复制，可直接粘贴到富文本编辑器。";
+                }} catch (err) {{
+                    status.textContent = "复制失败，请手动 Ctrl+C。";
+                }}
+            }}
+
+            btn.addEventListener("click", copyRichText);
+        }})();
+        </script>
+        """,
+        height=56,
+    )
 def notify_step_completed(defer_until_rerun=False):
     if defer_until_rerun:
         st.session_state.pending_completion_sound = True
@@ -1616,6 +1721,7 @@ elif st.session_state.current_step == 3:
     
     with st.expander("📝 查看当前初稿内容 (鼠标移至右上角可一键复制)", expanded=True):
         st.code(st.session_state.draft_article, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.draft_article, "draft_article_step3")
     
     st.divider()
     
@@ -1678,6 +1784,7 @@ elif st.session_state.current_step == 4:
     
     st.info("**主编审稿意见 (鼠标移至下方框内右上角可复制)：**")
     st.code(st.session_state.review_feedback, language="markdown")
+    render_editor_friendly_copy_button(st.session_state.review_feedback, "review_feedback_step4")
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1780,17 +1887,20 @@ elif st.session_state.current_step == 5:
 
                 with st.expander("查看选中版本全文", expanded=False):
                     st.code(selected_version.get("content", ""), language="markdown")
+                    render_editor_friendly_copy_button(selected_version.get("content", ""), f"version_{selected_version_id}")
         else:
             st.info("暂无版本记录。生成初稿或定稿后会自动写入版本时间线。")
 
         st.divider()
         st.markdown("### 主稿面板（当前定稿）")
         st.code(st.session_state.final_article, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.final_article, "final_article_step5")
         
         if st.session_state.spoken_script:
             st.divider()
             st.markdown(f"### 分镜脚本 · {script_duration}")
             st.code(st.session_state.spoken_script, language="markdown")
+            render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step5")
         
         st.divider()
         st.markdown("### 智能配图助手")
@@ -1822,6 +1932,7 @@ elif st.session_state.current_step == 5:
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
             st.code(st.session_state.image_keywords, language="markdown")
+            render_editor_friendly_copy_button(st.session_state.image_keywords, "image_keywords_step5")
             
         st.divider()
 
@@ -1937,6 +2048,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
