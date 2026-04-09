@@ -1657,7 +1657,7 @@ if st.session_state.current_step == 1:
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
     render_section_intro("初稿生成", "选择合适的编辑角色，确认当前模型与写作规范，然后输出首版文章。", "Step 02")
-    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    context_strip_placeholder = st.empty()
     
     editor_options = list(prompts_data["editors"].keys())
     if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
@@ -1677,6 +1677,8 @@ elif st.session_state.current_step == 2:
         help="本轮稿件统一使用该字数目标；若角色 Prompt 里有固定字数要求，会自动被全局目标覆盖。"
     )
     st.session_state.target_article_words = target_article_words
+    with context_strip_placeholder.container():
+        render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     editor_prompt = st.text_area(
         "✍️ 编辑 Prompt (支持临时微调)", 
