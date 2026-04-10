@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
@@ -136,10 +136,13 @@ def save_prompts(data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 def save_draft():
     keys_to_save = [
-        'current_step', 'article_url', 'video_url', 'source_content', 
-        'source_images', 'extraction_success', 'draft_article', 
-        'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords', 'selected_role', 'target_article_words', 'source_images_all', 'selected_source_image_ids', 'article_versions', 'active_article_version_id'
+        'current_step', 'article_url', 'video_url', 'source_content',
+        'source_images', 'extraction_success', 'draft_article',
+        'review_feedback', 'modified_article', 'final_article', 'spoken_script',
+        'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
+        'source_images_all', 'selected_source_image_ids', 'article_versions',
+        'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
+        'de_ai_prompt_template'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -250,10 +253,96 @@ def build_modification_system_prompt(global_instruction):
     ]
     return "\n\n".join([part for part in prompt_parts if part])
 
+DE_AI_MODELS = ["deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
+ROLE_AUDIENCE_MAP = {
+    "发行主编": "游戏行业从业者",
+    "研发主编": "游戏圈同行和硬核玩家",
+    "游戏快讯编辑": "行业从业者",
+    "客观转录编辑": "公众读者",
+    "游戏行业评论人": "游戏行业从业者",
+}
+ROLE_JARGON_MAP = {
+    "发行主编": "ROI、LTV、买量",
+    "研发主编": "核心循环、技术债、管线",
+    "游戏快讯编辑": "版号、上线档期、发行节奏",
+    "客观转录编辑": "留存、变现、本地化",
+    "游戏行业评论人": "ROI、洗量、跑路",
+}
+ROLE_TONE_MAP = {
+    "发行主编": "冷酷清醒",
+    "研发主编": "毒舌但专业",
+    "游戏快讯编辑": "克制冷静",
+    "客观转录编辑": "娓娓道来",
+    "游戏行业评论人": "一针见血",
+}
+
+
+def infer_role_persona(role_name, editor_prompt):
+    prompt_text = (editor_prompt or "").strip()
+    first_line = prompt_text.splitlines()[0].strip() if prompt_text else ""
+    if first_line.startswith("# Role:"):
+        persona = first_line.split(":", 1)[1].strip()
+        if persona:
+            return persona
+    return role_name or "10年经验的资深行业作者"
+
+
+def infer_article_topic(source_content):
+    clean_text = " ".join((source_content or "").split())
+    if not clean_text:
+        return "当前游戏行业主题"
+    return clean_text[:40] + ("..." if len(clean_text) > 40 else "")
+
+
+def build_de_ai_prompt_template(role_name, editor_prompt, source_content):
+    persona = infer_role_persona(role_name, editor_prompt)
+    topic = infer_article_topic(source_content)
+    audience = ROLE_AUDIENCE_MAP.get(role_name, "从业者")
+    jargon = ROLE_JARGON_MAP.get(role_name, "ROI、买量、留存")
+    tone = ROLE_TONE_MAP.get(role_name, "冷酷清醒")
+    return f"""# Role: {persona}
+
+# Context
+我有一篇关于【{topic}】的草稿。这篇文章的核心骨架和信息增量是好的，但目前的文本带有严重的“AI 生成味”：结构八股、过渡词生硬、用词存在假大空的翻译腔，缺乏真正【{audience}】在交流时的真实感和血肉感。
+
+# Task
+请你完全代入【填写上述设定的 Role】的视角，对以下【草稿原文】进行彻底的去 AI 化重写。
+你需要保留原文的全部核心信息、数据和逻辑推演，但必须完全摧毁现有的文本外壳，用人类专家的自然口吻重新表达。
+
+# 🚫 核心约束：反 AI 审查清单（优先级最高，必须严格遵守）
+1. 词汇黑名单：绝对禁止使用“毫无疑问”、“不仅...而且”、“在这个充满...的时代”、“一场名为...的”、“总而言之”、“不可否认”、“至关重要”、“双刃剑”、“随着...的发展”、“综上所述”等AI高频陈词滥调。
+2. 结构粉碎：禁止使用“一、二、三”或“首先、其次、最后”等死板的枚举结构推进文章。必须使用情绪递进、场景带入或逻辑转折来做段落过渡。
+3. 拒绝“绝对客观”：放弃 AI 惯用的“虽然A有缺点，但B也有不足”的端水句式。你的语气要有主观色彩、有锋芒，甚至可以带点行业人的自嘲或无奈。
+4. 节奏控制：禁止全篇使用长度相似的陈述句。强制要求长短句结合。情绪宣泄和抛出观点时用短句（甚至单句成段），拆解复杂逻辑时用长句。
+5. 行业语境注入：自然地（切忌堆砌）使用【{jargon}】等词汇，营造“圈内人对话”的真实感。
+
+# Style & Tone
+* 语气词：{tone}
+* 排版格式：适合移动端阅读，多留白，避免大段密集的文字墙。
+
+# 【草稿原文】
+[在此粘贴草稿内容]
+
+请直接输出重写后的最终成文，不要输出任何如“好的”、“这就为您重写”等解释性或过渡性的废话。"""
+
+
+def generate_script_for_current_article(api_key, base_url, model_name, script_duration):
+    if not st.session_state.get("final_article"):
+        st.session_state.spoken_script = ""
+        return
+    script_sys_prompt = get_script_sys_prompt(script_duration)
+    st.session_state.spoken_script = call_llm(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=model_name,
+        system_prompt=script_sys_prompt,
+        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+    )
+
 # ==========================================
 # 1. API 与外部推送函数
 # ==========================================
-def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None):
+def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None, temperature=None):
     if not api_key:
         st.error("⚠️ 请先在左侧边栏输入 API Key！")
         st.stop()
@@ -287,7 +376,7 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         response = client.chat.completions.create(
             model=model_name,
             messages=messages,
-            temperature=0.3 
+            temperature=0.3 if temperature is None else temperature
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -688,10 +777,18 @@ def init_state():
         st.session_state.draft_article = ""
     if 'review_feedback' not in st.session_state:
         st.session_state.review_feedback = ""
+    if 'modified_article' not in st.session_state:
+        st.session_state.modified_article = ""
     if 'final_article' not in st.session_state:
         st.session_state.final_article = ""
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
+    if 'de_ai_model' not in st.session_state:
+        st.session_state.de_ai_model = "deepseek-v3-2-exp"
+    if 'de_ai_temperature' not in st.session_state:
+        st.session_state.de_ai_temperature = 0.75
+    if 'de_ai_prompt_template' not in st.session_state:
+        st.session_state.de_ai_prompt_template = ""
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'image_keywords' not in st.session_state:
@@ -1676,7 +1773,7 @@ if st.session_state.current_step == 1:
                         status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
 
                     notify_step_completed(defer_until_rerun=True)
-                    go_to_step(5)
+                    go_to_step(6)
                     st.rerun()
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
@@ -1766,21 +1863,12 @@ elif st.session_state.current_step == 3:
             go_to_step(2)
             st.rerun()
     with col2:
-        if st.button("⏭️ 完美，跳过审查直接定稿"):
-            spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
-            with st.spinner(spinner_msg):
-                st.session_state.final_article = st.session_state.draft_article
-                append_article_version(st.session_state.final_article, "跳过审查定稿", role=st.session_state.get("selected_role", ""), model=selected_model)                
-                if enable_script:
-                    script_sys_prompt = get_script_sys_prompt(script_duration)
-                    st.session_state.spoken_script = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=script_sys_prompt,
-                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                    )
-                else:
-                    st.session_state.spoken_script = ""
-                    
+        if st.button("⏭️ 完美，跳过审查进入去AI味"):
+            with st.spinner("正在跳过审查，并将初稿送入去 AI 味步骤..."):
+                st.session_state.modified_article = st.session_state.draft_article
+                st.session_state.final_article = ""
+                st.session_state.spoken_script = ""
+                append_article_version(st.session_state.modified_article, "跳过审查修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
@@ -1812,72 +1900,137 @@ elif st.session_state.current_step == 3:
 
 # --- Step 4 (手动模式) ---
 elif st.session_state.current_step == 4:
-    render_section_intro("定稿修订", "根据主编反馈完成最后一轮修改，并同步决定是否生成脚本。", "Step 04")
+    render_section_intro("修改稿确认", "根据主编反馈完成最后一轮修改，先产出修改稿，再决定是否进入去 AI 味步骤。", "Step 04")
     render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
-    
+
     st.info("**主编审稿意见 (鼠标移至下方框内右上角可复制)：**")
     st.code(st.session_state.review_feedback, language="markdown")
     render_editor_friendly_copy_button(st.session_state.review_feedback, "review_feedback_step4")
-    
+
+    if st.session_state.modified_article:
+        st.divider()
+        st.markdown("### 当前修改稿预览")
+        st.code(st.session_state.modified_article, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step4")
+
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🔄 意见太水，重新审查"):
             go_to_step(3)
             st.rerun()
     with col2:
-        if st.button("⏭️ 忽略意见，强行定稿"):
-            spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
-            with st.spinner(spinner_msg):
-                st.session_state.final_article = st.session_state.draft_article
-                append_article_version(st.session_state.final_article, "忽略意见定稿", role=st.session_state.get("selected_role", ""), model=selected_model)                
-                if enable_script:
-                    script_sys_prompt = get_script_sys_prompt(script_duration)
-                    st.session_state.spoken_script = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=script_sys_prompt,
-                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                    )
-                else:
-                    st.session_state.spoken_script = ""
-                    
+        if st.button("⏭️ 忽略意见，沿用初稿"):
+            with st.spinner("正在跳过修改，准备进入去 AI 味步骤..."):
+                st.session_state.modified_article = st.session_state.draft_article
+                st.session_state.final_article = ""
+                st.session_state.spoken_script = ""
+                append_article_version(st.session_state.modified_article, "忽略意见修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
-        if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
-            spinner_msg = f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "编辑正在根据主编意见修改文章..."
-            with st.spinner(spinner_msg):
+        if st.button(f"✨ 使用 {selected_model} 接受意见并生成修改稿"):
+            with st.spinner("编辑正在根据主编意见生成修改稿..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 modification_prompt = build_modification_system_prompt(global_instruction)
-                
+
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
-                
-                st.session_state.final_article = call_llm(
-                    api_key=api_key, 
+
+                st.session_state.modified_article = call_llm(
+                    api_key=api_key,
                     base_url=current_base_url,
-                    model_name=selected_model, 
-                    system_prompt=modification_prompt, 
+                    model_name=selected_model,
+                    system_prompt=modification_prompt,
                     user_content=content_to_modify
                 )
-                append_article_version(st.session_state.final_article, "接受审稿定稿", role=st.session_state.get("selected_role", ""), model=selected_model)
-                
-                if enable_script:
-                    script_sys_prompt = get_script_sys_prompt(script_duration)
-                    st.session_state.spoken_script = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=script_sys_prompt,
-                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                    )
-                else:
-                    st.session_state.spoken_script = ""
-                
+                st.session_state.final_article = ""
+                st.session_state.spoken_script = ""
+                append_article_version(st.session_state.modified_article, "接受审稿修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
 
-# --- Step 5：终极版分栏 UI ---
+# --- Step 5 (手动模式) ---
 elif st.session_state.current_step == 5:
-    render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 05")
+    render_section_intro("去 AI 味", "在定稿前选择专用模型，把修改稿重写得更像真人专家输出。", "Step 05")
+    render_context_strip([f"修改稿来源模型：{selected_model}", f"专用模型：{st.session_state.get('de_ai_model', DE_AI_MODELS[0])}", f"Temperature：{st.session_state.get('de_ai_temperature', 0.75):.2f}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+
+    current_role = st.session_state.get("selected_role", "")
+    current_editor_prompt = prompts_data["editors"].get(current_role, "") if current_role in prompts_data["editors"] else ""
+    st.session_state.de_ai_prompt_template = build_de_ai_prompt_template(current_role, current_editor_prompt, st.session_state.get("source_content", ""))
+
+    st.markdown("### 当前修改稿")
+    st.code(st.session_state.modified_article, language="markdown")
+    render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step5")
+
+    with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
+        st.text_area(
+            "去 AI 味 Prompt 模板",
+            value=st.session_state.de_ai_prompt_template,
+            height=360,
+            disabled=True,
+            key="de_ai_prompt_template_preview"
+        )
+
+    col_model, col_temp = st.columns([1.2, 1])
+    with col_model:
+        st.selectbox(
+            "去 AI 味专用大模型",
+            DE_AI_MODELS,
+            key="de_ai_model",
+            on_change=save_draft
+        )
+    with col_temp:
+        st.slider(
+            "Temperature",
+            min_value=0.70,
+            max_value=0.85,
+            step=0.05,
+            key="de_ai_temperature",
+            on_change=save_draft
+        )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🔙 返回修改稿步骤"):
+            go_to_step(4)
+            st.rerun()
+    with col2:
+        if st.button("⏭️ 跳过去 AI 味，直接定稿"):
+            spinner_msg = f"正在将修改稿设为定稿，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "正在将修改稿设为定稿..."
+            with st.spinner(spinner_msg):
+                st.session_state.final_article = st.session_state.modified_article
+                append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
+                if enable_script:
+                    generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                else:
+                    st.session_state.spoken_script = ""
+                notify_step_completed(defer_until_rerun=True)
+                go_to_step(6)
+                st.rerun()
+    with col3:
+        if st.button(f"✨ 使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写"):
+            spinner_msg = f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味，并生成【{script_duration}口播及分镜脚本】..." if enable_script else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写..."
+            with st.spinner(spinner_msg):
+                st.session_state.final_article = call_llm(
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    model_name=st.session_state.get('de_ai_model', DE_AI_MODELS[0]),
+                    system_prompt=st.session_state.de_ai_prompt_template,
+                    user_content=st.session_state.modified_article,
+                    temperature=st.session_state.get('de_ai_temperature', 0.75)
+                )
+                append_article_version(st.session_state.final_article, "去AI味定稿", role=current_role, model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]))
+                if enable_script:
+                    generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                else:
+                    st.session_state.spoken_script = ""
+                notify_step_completed(defer_until_rerun=True)
+                go_to_step(6)
+                st.rerun()
+# --- Step 6：终极版分栏 UI ---
+elif st.session_state.current_step == 6:
+    render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
     render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
     
     st.markdown("<p class='toolbar-note'>主稿、分镜脚本、搜图和分发操作统一留在左侧主工作区；右侧专门用于精修、追问和追溯原文依据。</p>", unsafe_allow_html=True)
@@ -1927,13 +2080,13 @@ elif st.session_state.current_step == 5:
         st.divider()
         st.markdown("### 主稿面板（当前定稿）")
         st.code(st.session_state.final_article, language="markdown")
-        render_editor_friendly_copy_button(st.session_state.final_article, "final_article_step5")
+        render_editor_friendly_copy_button(st.session_state.final_article, "final_article_step6")
         
         if st.session_state.spoken_script:
             st.divider()
             st.markdown(f"### 分镜脚本 · {script_duration}")
             st.code(st.session_state.spoken_script, language="markdown")
-            render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step5")
+            render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step6")
         
         st.divider()
         st.markdown("### 智能配图助手")
@@ -1965,7 +2118,7 @@ elif st.session_state.current_step == 5:
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
             st.code(st.session_state.image_keywords, language="markdown")
-            render_editor_friendly_copy_button(st.session_state.image_keywords, "image_keywords_step5")
+            render_editor_friendly_copy_button(st.session_state.image_keywords, "image_keywords_step6")
             
         st.divider()
 
