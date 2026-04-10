@@ -138,7 +138,7 @@ def save_draft():
     keys_to_save = [
         'current_step', 'article_url', 'video_url', 'source_content',
         'source_images', 'extraction_success', 'draft_article',
-        'review_feedback', 'modified_article', 'final_article', 'spoken_script',
+        'review_feedback', 'modified_article', 'final_article', 'highlighted_article', 'spoken_script',
         'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
         'source_images_all', 'selected_source_image_ids', 'article_versions',
         'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
@@ -320,11 +320,100 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content):
 * 语气词：{tone}
 * 排版格式：适合移动端阅读，多留白，避免大段密集的文字墙。
 
+# Output Protocol
+请严格按照以下格式输出，顺序不能变：
+【纯净定稿】
+这里输出不含任何HTML、颜色、解释或额外标题的最终成文。
+
+【高亮阅读版】
+这里输出基于同一份定稿制作的阅读增强版，只允许做包裹式标注，不能改写信息或增删内容。
+高亮规则只有两类：
+- 学习点 / 方法论 / 正向启发：用 <strong><span class="highlight-positive">...</span></strong>
+- 避坑点 / 风险提醒 / 反例警示：用 <strong><span class="highlight-risk">...</span></strong>
+额外约束：
+- 只允许使用 <p>、<strong>、<span class="highlight-positive">、<span class="highlight-risk"> 这四类标签
+- 禁止输出任何其他HTML标签、内联样式、脚本、解释性前言
+- 每段最多 1-2 处高亮
+- 不要整段上色
+- 没有明显价值就不要高亮
+
 # 【草稿原文】
-[在此粘贴草稿内容]
+[在此粘贴草稿内容]"""
 
-请直接输出重写后的最终成文，不要输出任何如“好的”、“这就为您重写”等解释性或过渡性的废话。"""
 
+def parse_de_ai_dual_output(response_text):
+    clean_text = (response_text or "").strip()
+    if not clean_text:
+        return "", ""
+
+    pure_marker = "【纯净定稿】"
+    highlight_marker = "【高亮阅读版】"
+
+    if pure_marker not in clean_text:
+        return clean_text, ""
+
+    pure_part = clean_text.split(pure_marker, 1)[1]
+    if highlight_marker in pure_part:
+        pure_text, highlighted_text = pure_part.split(highlight_marker, 1)
+        return pure_text.strip(), highlighted_text.strip()
+
+    return pure_part.strip(), ""
+
+
+def sanitize_highlighted_article(html_text):
+    clean_text = (html_text or "").strip()
+    if not clean_text:
+        return ""
+
+    clean_text = clean_text.replace("<script", "&lt;script")
+    clean_text = clean_text.replace("</script>", "&lt;/script&gt;")
+    clean_text = clean_text.replace("<style", "&lt;style")
+    clean_text = clean_text.replace("</style>", "&lt;/style&gt;")
+    clean_text = clean_text.replace("onerror=", "data-onerror=")
+    clean_text = clean_text.replace("onclick=", "data-onclick=")
+    clean_text = clean_text.replace("onload=", "data-onload=")
+    return clean_text
+
+
+def render_highlighted_article_panel(html_text):
+    if not (html_text or "").strip():
+        st.info("当前版本未生成高亮阅读视图。")
+        return
+
+    st.markdown(
+        """
+        <style>
+        .highlight-article {
+            padding: 1.15rem 1.2rem;
+            border: 1px solid rgba(22, 33, 28, 0.08);
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.74);
+            box-shadow: 0 18px 40px rgba(22, 33, 28, 0.06);
+            line-height: 1.9;
+            color: #16211c;
+        }
+        .highlight-article p {
+            margin: 0 0 1rem;
+        }
+        .highlight-article .highlight-positive {
+            display: inline;
+            padding: 0.05rem 0.32rem;
+            border-radius: 0.4rem;
+            background: rgba(54, 111, 214, 0.15);
+            color: #1f57b8;
+        }
+        .highlight-article .highlight-risk {
+            display: inline;
+            padding: 0.05rem 0.32rem;
+            border-radius: 0.4rem;
+            background: rgba(214, 76, 76, 0.14);
+            color: #b3261e;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<div class="highlight-article">{sanitize_highlighted_article(html_text)}</div>', unsafe_allow_html=True)
 
 def generate_script_for_current_article(api_key, base_url, model_name, script_duration):
     if not st.session_state.get("final_article"):
@@ -781,6 +870,8 @@ def init_state():
         st.session_state.modified_article = ""
     if 'final_article' not in st.session_state:
         st.session_state.final_article = ""
+    if 'highlighted_article' not in st.session_state:
+        st.session_state.highlighted_article = ""
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
     if 'de_ai_model' not in st.session_state:
@@ -1923,6 +2014,7 @@ elif st.session_state.current_step == 4:
             with st.spinner("正在跳过修改，准备进入去 AI 味步骤..."):
                 st.session_state.modified_article = st.session_state.draft_article
                 st.session_state.final_article = ""
+                st.session_state.highlighted_article = ""
                 st.session_state.spoken_script = ""
                 append_article_version(st.session_state.modified_article, "忽略意见修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
@@ -1944,6 +2036,7 @@ elif st.session_state.current_step == 4:
                     user_content=content_to_modify
                 )
                 st.session_state.final_article = ""
+                st.session_state.highlighted_article = ""
                 st.session_state.spoken_script = ""
                 append_article_version(st.session_state.modified_article, "接受审稿修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
@@ -2000,6 +2093,7 @@ elif st.session_state.current_step == 5:
             spinner_msg = f"正在将修改稿设为定稿，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "正在将修改稿设为定稿..."
             with st.spinner(spinner_msg):
                 st.session_state.final_article = st.session_state.modified_article
+                st.session_state.highlighted_article = ""
                 append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
@@ -2012,7 +2106,7 @@ elif st.session_state.current_step == 5:
         if st.button(f"✨ 使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写"):
             spinner_msg = f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味，并生成【{script_duration}口播及分镜脚本】..." if enable_script else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写..."
             with st.spinner(spinner_msg):
-                st.session_state.final_article = call_llm(
+                de_ai_response = call_llm(
                     api_key=api_key,
                     base_url=current_base_url,
                     model_name=st.session_state.get('de_ai_model', DE_AI_MODELS[0]),
@@ -2020,11 +2114,16 @@ elif st.session_state.current_step == 5:
                     user_content=st.session_state.modified_article,
                     temperature=st.session_state.get('de_ai_temperature', 0.75)
                 )
+                pure_article, highlighted_article = parse_de_ai_dual_output(de_ai_response)
+                st.session_state.final_article = pure_article or (de_ai_response or "").strip()
+                st.session_state.highlighted_article = highlighted_article
                 append_article_version(st.session_state.final_article, "去AI味定稿", role=current_role, model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]))
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
                 else:
                     st.session_state.spoken_script = ""
+                if not highlighted_article:
+                    st.warning("高亮版生成失败，本次仅保留纯净定稿。")
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
                 st.rerun()
@@ -2066,6 +2165,7 @@ elif st.session_state.current_step == 6:
                 st.caption(f"当前阶段：{selected_version.get('stage', '未命名')}｜角色：{selected_version.get('role', '未记录')}｜模型：{selected_version.get('model', '未记录')}")
                 if st.button("将此版本设为当前定稿", key="use_selected_version_as_final", use_container_width=True):
                     st.session_state.final_article = selected_version.get("content", "")
+                    st.session_state.highlighted_article = ""
                     st.session_state.active_article_version_id = selected_version_id
                     save_draft()
                     notify_step_completed()
@@ -2081,6 +2181,10 @@ elif st.session_state.current_step == 6:
         st.markdown("### 主稿面板（当前定稿）")
         st.code(st.session_state.final_article, language="markdown")
         render_editor_friendly_copy_button(st.session_state.final_article, "final_article_step6")
+
+        st.divider()
+        st.markdown("### 高亮阅读版")
+        render_highlighted_article_panel(st.session_state.get("highlighted_article", ""))
         
         if st.session_state.spoken_script:
             st.divider()
