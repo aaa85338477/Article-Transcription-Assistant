@@ -206,6 +206,16 @@ def get_target_article_words():
         value = 1500
     return max(200, min(5000, value))
 
+def sync_target_article_words():
+    raw_value = st.session_state.get("target_article_words_slider", get_target_article_words())
+    try:
+        value = int(raw_value)
+    except Exception:
+        value = 1500
+    st.session_state.target_article_words = max(200, min(5000, value))
+    save_draft()
+
+
 
 def build_target_length_instruction():
     target_words = get_target_article_words()
@@ -684,11 +694,14 @@ def init_state():
         st.session_state.pending_completion_sound = False
     if 'target_article_words' not in st.session_state:
         st.session_state.target_article_words = 1500
+    if 'target_article_words_slider' not in st.session_state:
+        st.session_state.target_article_words_slider = get_target_article_words()
     if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
         st.session_state.article_versions = []
     if 'active_article_version_id' not in st.session_state:
         st.session_state.active_article_version_id = None
     st.session_state.target_article_words = get_target_article_words()
+    st.session_state.target_article_words_slider = get_target_article_words()
 
 
 init_state()
@@ -1668,12 +1681,15 @@ elif st.session_state.current_step == 2:
     editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
     st.session_state.selected_role = editor_role 
 
+    if st.session_state.get("target_article_words_slider") != get_target_article_words():
+        st.session_state.target_article_words_slider = get_target_article_words()
     st.slider(
         "🧮 全局目标字数（200-5000）",
         min_value=200,
         max_value=5000,
         step=100,
-        key="target_article_words",
+        key="target_article_words_slider",
+        on_change=sync_target_article_words,
         help="本轮稿件统一使用该字数目标；若角色 Prompt 里有固定字数要求，会自动被全局目标覆盖。"
     )
     with context_strip_placeholder.container():
