@@ -215,6 +215,12 @@ def sync_target_article_words():
     st.session_state.target_article_words = max(200, min(5000, value))
     save_draft()
 
+def sync_selected_role():
+    selected_role = st.session_state.get("selected_role_widget", "")
+    if isinstance(selected_role, str) and selected_role.strip():
+        st.session_state.selected_role = selected_role
+        save_draft()
+
 
 
 def build_target_length_instruction():
@@ -694,6 +700,8 @@ def init_state():
         st.session_state.pending_completion_sound = False
     if 'target_article_words' not in st.session_state:
         st.session_state.target_article_words = 1500
+    if 'selected_role_widget' not in st.session_state:
+        st.session_state.selected_role_widget = st.session_state.get('selected_role', '')
     if 'target_article_words_slider' not in st.session_state:
         st.session_state.target_article_words_slider = get_target_article_words()
     if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
@@ -702,6 +710,9 @@ def init_state():
         st.session_state.active_article_version_id = None
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
+    current_role = st.session_state.get('selected_role', '')
+    if isinstance(current_role, str) and current_role.strip():
+        st.session_state.selected_role_widget = current_role
 
 
 init_state()
@@ -1676,11 +1687,16 @@ elif st.session_state.current_step == 2:
     if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
         st.session_state.selected_role = editor_options[0]
         
-    default_idx = editor_options.index(st.session_state.selected_role)
+    if st.session_state.get("selected_role_widget") not in editor_options:
+        st.session_state.selected_role_widget = st.session_state.selected_role
     
-    editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
-    st.session_state.selected_role = editor_role 
-
+    st.selectbox(
+        "选择【编辑】视角",
+        editor_options,
+        key="selected_role_widget",
+        on_change=sync_selected_role
+    )
+    editor_role = st.session_state.selected_role
     if st.session_state.get("target_article_words_slider") != get_target_article_words():
         st.session_state.target_article_words_slider = get_target_article_words()
     st.slider(
