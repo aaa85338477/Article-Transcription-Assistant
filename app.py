@@ -1668,15 +1668,14 @@ elif st.session_state.current_step == 2:
     editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
     st.session_state.selected_role = editor_role 
 
-    target_article_words = st.slider(
+    st.slider(
         "🧮 全局目标字数（200-5000）",
         min_value=200,
         max_value=5000,
-        value=get_target_article_words(),
         step=100,
+        key="target_article_words",
         help="本轮稿件统一使用该字数目标；若角色 Prompt 里有固定字数要求，会自动被全局目标覆盖。"
     )
-    st.session_state.target_article_words = target_article_words
     with context_strip_placeholder.container():
         render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
