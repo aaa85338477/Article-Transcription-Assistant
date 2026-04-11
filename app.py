@@ -1011,8 +1011,21 @@ def bootstrap_article_versions():
 bootstrap_article_versions()
 
 
+def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
+    iframe_html = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;'>" + html_content + "</body></html>"
+    iframe_src = "data:text/html;base64," + base64.b64encode(iframe_html.encode("utf-8")).decode("ascii")
+    components.iframe(iframe_src, height=height, width=width, scrolling=scrolling)
+
+
+def render_responsive_image(image_payload):
+    try:
+        st.image(image_payload, width="stretch")
+    except TypeError:
+        st.image(image_payload, use_container_width=True)
+
+
 def play_step_completion_sound():
-    components.html(
+    render_html_iframe(
         """
         <script>
         (function () {
@@ -1103,7 +1116,7 @@ def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制�
     plain_text_b64 = base64.b64encode(plain_text.encode("utf-8")).decode("ascii")
     html_text_b64 = base64.b64encode(markdown_to_editor_html(plain_text).encode("utf-8")).decode("ascii")
 
-    components.html(
+    render_html_iframe(
         f"""
         <div style="display:flex;align-items:center;gap:10px;margin:6px 0 0 0;">
           <button id="copy-btn-{safe_key}" style="border:1px solid #d9d9df;background:#ffffff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">
@@ -1757,7 +1770,7 @@ if st.session_state.current_step == 1:
                     with img_cols[idx % 3]:
                         preview_image = get_image_preview_payload(img_url)
                         if preview_image is not None:
-                            st.image(preview_image, use_column_width=True)
+                            render_responsive_image(preview_image)
                         checked = st.checkbox(
                             f"图片 {idx + 1} 纳入分析",
                             value=(idx in previous_selected_ids),
