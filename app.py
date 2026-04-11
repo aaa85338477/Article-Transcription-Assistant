@@ -1111,7 +1111,7 @@ recover_ai_progress_if_needed()
 def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
     iframe_html = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;'>" + html_content + "</body></html>"
     iframe_src = "data:text/html;base64," + base64.b64encode(iframe_html.encode("utf-8")).decode("ascii")
-    components.iframe(iframe_src, height=height, width=width, scrolling=scrolling)
+    st.iframe(iframe_src, height=height, width=width, scrolling=scrolling)
 
 
 def render_responsive_image(image_payload):
