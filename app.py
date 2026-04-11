@@ -1,10 +1,11 @@
-﻿import streamlit as st
+import streamlit as st
 import trafilatura
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 import io
 from pathlib import Path
 import os
+import html as html_lib
 from docx import Document
 from openai import OpenAI
 import requests
@@ -13,6 +14,7 @@ from bs4 import BeautifulSoup
 import re
 import streamlit.components.v1 as components
 import base64
+from datetime import datetime
 try:
     import pandas as pd
 except Exception:
@@ -134,10 +136,13 @@ def save_prompts(data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 def save_draft():
     keys_to_save = [
-        'current_step', 'article_url', 'video_url', 'source_content', 
-        'source_images', 'extraction_success', 'draft_article', 
-        'review_feedback', 'final_article', 'spoken_script', 
-        'chat_history', 'image_keywords', 'selected_role', 'target_article_words', 'source_images_all', 'selected_source_image_ids'
+        'current_step', 'article_url', 'video_url', 'source_content',
+        'source_images', 'extraction_success', 'draft_article',
+        'review_feedback', 'modified_article', 'final_article', 'highlighted_article', 'spoken_script',
+        'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
+        'source_images_all', 'selected_source_image_ids', 'article_versions',
+        'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
+        'de_ai_prompt_template'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -204,6 +209,22 @@ def get_target_article_words():
         value = 1500
     return max(200, min(5000, value))
 
+def sync_target_article_words():
+    raw_value = st.session_state.get("target_article_words_slider", get_target_article_words())
+    try:
+        value = int(raw_value)
+    except Exception:
+        value = 1500
+    st.session_state.target_article_words = max(200, min(5000, value))
+    save_draft()
+
+def sync_selected_role():
+    selected_role = st.session_state.get("selected_role_widget", "")
+    if isinstance(selected_role, str) and selected_role.strip():
+        st.session_state.selected_role = selected_role
+        save_draft()
+
+
 
 def build_target_length_instruction():
     target_words = get_target_article_words()
@@ -232,10 +253,185 @@ def build_modification_system_prompt(global_instruction):
     ]
     return "\n\n".join([part for part in prompt_parts if part])
 
+DE_AI_MODELS = ["deepseek-v3-1-terminus", "deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
+ROLE_AUDIENCE_MAP = {
+    "发行主编": "游戏行业从业者",
+    "研发主编": "游戏圈同行和硬核玩家",
+    "游戏快讯编辑": "行业从业者",
+    "客观转录编辑": "公众读者",
+    "游戏行业评论人": "游戏行业从业者",
+}
+ROLE_JARGON_MAP = {
+    "发行主编": "ROI、LTV、买量",
+    "研发主编": "核心循环、技术债、管线",
+    "游戏快讯编辑": "版号、上线档期、发行节奏",
+    "客观转录编辑": "留存、变现、本地化",
+    "游戏行业评论人": "ROI、洗量、跑路",
+}
+ROLE_TONE_MAP = {
+    "发行主编": "冷酷清醒",
+    "研发主编": "毒舌但专业",
+    "游戏快讯编辑": "克制冷静",
+    "客观转录编辑": "娓娓道来",
+    "游戏行业评论人": "一针见血",
+}
+
+
+def infer_role_persona(role_name, editor_prompt):
+    prompt_text = (editor_prompt or "").strip()
+    first_line = prompt_text.splitlines()[0].strip() if prompt_text else ""
+    if first_line.startswith("# Role:"):
+        persona = first_line.split(":", 1)[1].strip()
+        if persona:
+            return persona
+    return role_name or "10年经验的资深行业作者"
+
+
+def infer_article_topic(source_content):
+    clean_text = " ".join((source_content or "").split())
+    if not clean_text:
+        return "当前游戏行业主题"
+    return clean_text[:40] + ("..." if len(clean_text) > 40 else "")
+
+
+def build_de_ai_prompt_template(role_name, editor_prompt, source_content):
+    persona = infer_role_persona(role_name, editor_prompt)
+    topic = infer_article_topic(source_content)
+    audience = ROLE_AUDIENCE_MAP.get(role_name, "从业者")
+    jargon = ROLE_JARGON_MAP.get(role_name, "ROI、买量、留存")
+    tone = ROLE_TONE_MAP.get(role_name, "冷酷清醒")
+    return f"""# Role: {persona}
+
+# Context
+我有一篇关于【{topic}】的草稿。这篇文章的核心骨架和信息增量是好的，但目前的文本带有严重的“AI 生成味”：结构八股、过渡词生硬、用词存在假大空的翻译腔，缺乏真正【{audience}】在交流时的真实感和血肉感。
+
+# Task
+请你完全代入【填写上述设定的 Role】的视角，对以下【草稿原文】进行彻底的去 AI 化重写。
+你需要保留原文的全部核心信息、数据和逻辑推演，但必须完全摧毁现有的文本外壳，用人类专家的自然口吻重新表达。
+
+# 🚫 核心约束：反 AI 审查清单（优先级最高，必须严格遵守）
+1. 词汇黑名单：绝对禁止使用“毫无疑问”、“不仅...而且”、“在这个充满...的时代”、“一场名为...的”、“总而言之”、“不可否认”、“至关重要”、“双刃剑”、“随着...的发展”、“综上所述”等AI高频陈词滥调。
+2. 结构粉碎：禁止使用“一、二、三”或“首先、其次、最后”等死板的枚举结构推进文章。必须使用情绪递进、场景带入或逻辑转折来做段落过渡。
+3. 拒绝“绝对客观”：放弃 AI 惯用的“虽然A有缺点，但B也有不足”的端水句式。你的语气要有主观色彩、有锋芒，甚至可以带点行业人的自嘲或无奈。
+4. 节奏控制：禁止全篇使用长度相似的陈述句。强制要求长短句结合。情绪宣泄和抛出观点时用短句（甚至单句成段），拆解复杂逻辑时用长句。
+5. 行业语境注入：自然地（切忌堆砌）使用【{jargon}】等词汇，营造“圈内人对话”的真实感。
+
+# Style & Tone
+* 语气词：{tone}
+* 排版格式：适合移动端阅读，多留白，避免大段密集的文字墙。
+
+# Output Protocol
+请严格按照以下格式输出，顺序不能变：
+【纯净定稿】
+这里输出不含任何HTML、颜色、解释或额外标题的最终成文。
+
+【高亮阅读版】
+这里输出基于同一份定稿制作的阅读增强版，只允许做包裹式标注，不能改写信息或增删内容。
+高亮规则只有两类：
+- 学习点 / 方法论 / 正向启发：用 <strong><span class="highlight-positive">...</span></strong>
+- 避坑点 / 风险提醒 / 反例警示：用 <strong><span class="highlight-risk">...</span></strong>
+额外约束：
+- 只允许使用 <p>、<strong>、<span class="highlight-positive">、<span class="highlight-risk"> 这四类标签
+- 禁止输出任何其他HTML标签、内联样式、脚本、解释性前言
+- 每段最多 1-2 处高亮
+- 不要整段上色
+- 没有明显价值就不要高亮
+
+# 【草稿原文】
+[在此粘贴草稿内容]"""
+
+
+def parse_de_ai_dual_output(response_text):
+    clean_text = (response_text or "").strip()
+    if not clean_text:
+        return "", ""
+
+    pure_marker = "【纯净定稿】"
+    highlight_marker = "【高亮阅读版】"
+
+    if pure_marker not in clean_text:
+        return clean_text, ""
+
+    pure_part = clean_text.split(pure_marker, 1)[1]
+    if highlight_marker in pure_part:
+        pure_text, highlighted_text = pure_part.split(highlight_marker, 1)
+        return pure_text.strip(), highlighted_text.strip()
+
+    return pure_part.strip(), ""
+
+
+def sanitize_highlighted_article(html_text):
+    clean_text = (html_text or "").strip()
+    if not clean_text:
+        return ""
+
+    clean_text = clean_text.replace("<script", "&lt;script")
+    clean_text = clean_text.replace("</script>", "&lt;/script&gt;")
+    clean_text = clean_text.replace("<style", "&lt;style")
+    clean_text = clean_text.replace("</style>", "&lt;/style&gt;")
+    clean_text = clean_text.replace("onerror=", "data-onerror=")
+    clean_text = clean_text.replace("onclick=", "data-onclick=")
+    clean_text = clean_text.replace("onload=", "data-onload=")
+    return clean_text
+
+
+def render_highlighted_article_panel(html_text):
+    if not (html_text or "").strip():
+        st.info("当前版本未生成高亮阅读视图。")
+        return
+
+    st.markdown(
+        """
+        <style>
+        .highlight-article {
+            padding: 1.15rem 1.2rem;
+            border: 1px solid rgba(22, 33, 28, 0.08);
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.74);
+            box-shadow: 0 18px 40px rgba(22, 33, 28, 0.06);
+            line-height: 1.9;
+            color: #16211c;
+        }
+        .highlight-article p {
+            margin: 0 0 1rem;
+        }
+        .highlight-article .highlight-positive {
+            display: inline;
+            padding: 0.05rem 0.32rem;
+            border-radius: 0.4rem;
+            background: rgba(54, 111, 214, 0.15);
+            color: #1f57b8;
+        }
+        .highlight-article .highlight-risk {
+            display: inline;
+            padding: 0.05rem 0.32rem;
+            border-radius: 0.4rem;
+            background: rgba(214, 76, 76, 0.14);
+            color: #b3261e;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<div class="highlight-article">{sanitize_highlighted_article(html_text)}</div>', unsafe_allow_html=True)
+
+def generate_script_for_current_article(api_key, base_url, model_name, script_duration):
+    if not st.session_state.get("final_article"):
+        st.session_state.spoken_script = ""
+        return
+    script_sys_prompt = get_script_sys_prompt(script_duration)
+    st.session_state.spoken_script = call_llm(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=model_name,
+        system_prompt=script_sys_prompt,
+        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+    )
+
 # ==========================================
 # 1. API 与外部推送函数
 # ==========================================
-def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None):
+def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None, temperature=None):
     if not api_key:
         st.error("⚠️ 请先在左侧边栏输入 API Key！")
         st.stop()
@@ -269,7 +465,7 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         response = client.chat.completions.create(
             model=model_name,
             messages=messages,
-            temperature=0.3 
+            temperature=0.3 if temperature is None else temperature
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -670,10 +866,20 @@ def init_state():
         st.session_state.draft_article = ""
     if 'review_feedback' not in st.session_state:
         st.session_state.review_feedback = ""
+    if 'modified_article' not in st.session_state:
+        st.session_state.modified_article = ""
     if 'final_article' not in st.session_state:
         st.session_state.final_article = ""
+    if 'highlighted_article' not in st.session_state:
+        st.session_state.highlighted_article = ""
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
+    if 'de_ai_model' not in st.session_state:
+        st.session_state.de_ai_model = "deepseek-v3-1-terminus"
+    if 'de_ai_temperature' not in st.session_state:
+        st.session_state.de_ai_temperature = 0.75
+    if 'de_ai_prompt_template' not in st.session_state:
+        st.session_state.de_ai_prompt_template = ""
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'image_keywords' not in st.session_state:
@@ -682,7 +888,19 @@ def init_state():
         st.session_state.pending_completion_sound = False
     if 'target_article_words' not in st.session_state:
         st.session_state.target_article_words = 1500
+    if 'selected_role_widget' not in st.session_state:
+        st.session_state.selected_role_widget = st.session_state.get('selected_role', '')
+    if 'target_article_words_slider' not in st.session_state:
+        st.session_state.target_article_words_slider = get_target_article_words()
+    if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
+        st.session_state.article_versions = []
+    if 'active_article_version_id' not in st.session_state:
+        st.session_state.active_article_version_id = None
     st.session_state.target_article_words = get_target_article_words()
+    st.session_state.target_article_words_slider = get_target_article_words()
+    current_role = st.session_state.get('selected_role', '')
+    if isinstance(current_role, str) and current_role.strip():
+        st.session_state.selected_role_widget = current_role
 
 
 init_state()
@@ -721,8 +939,93 @@ def sync_selected_source_images():
 sync_selected_source_images()
 
 
+def ensure_article_version_state():
+    if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
+        st.session_state.article_versions = []
+    if 'active_article_version_id' not in st.session_state:
+        st.session_state.active_article_version_id = None
+
+
+def get_article_version_by_id(version_id):
+    ensure_article_version_state()
+    for version_item in st.session_state.article_versions:
+        if version_item.get("id") == version_id:
+            return version_item
+    return None
+
+
+def append_article_version(content, stage, role=None, model=None, parent_id=None):
+    ensure_article_version_state()
+    clean_content = (content or "").strip()
+    if not clean_content:
+        return None
+
+    versions = st.session_state.article_versions
+    if versions:
+        last_version = versions[-1]
+        if last_version.get("stage") == stage and (last_version.get("content") or "").strip() == clean_content:
+            st.session_state.active_article_version_id = last_version.get("id")
+            return last_version.get("id")
+
+    version_id = f"V{len(versions) + 1:03d}"
+    resolved_parent_id = parent_id if parent_id else st.session_state.get("active_article_version_id")
+    version_item = {
+        "id": version_id,
+        "stage": stage,
+        "content": clean_content,
+        "role": role if role is not None else st.session_state.get("selected_role", ""),
+        "model": model if model is not None else "",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "word_count": len(clean_content),
+        "parent_id": resolved_parent_id,
+    }
+
+    versions.append(version_item)
+    if len(versions) > 30:
+        versions = versions[-30:]
+    st.session_state.article_versions = versions
+    st.session_state.active_article_version_id = version_id
+    return version_id
+
+
+def bootstrap_article_versions():
+    ensure_article_version_state()
+    versions = st.session_state.article_versions
+
+    if versions:
+        active_id = st.session_state.get("active_article_version_id")
+        if not active_id or not any(item.get("id") == active_id for item in versions):
+            st.session_state.active_article_version_id = versions[-1].get("id")
+        return
+
+    final_text = (st.session_state.get("final_article") or "").strip()
+    if final_text:
+        append_article_version(final_text, "历史恢复定稿", model="")
+        return
+
+    draft_text = (st.session_state.get("draft_article") or "").strip()
+    if draft_text:
+        append_article_version(draft_text, "历史恢复初稿", model="")
+
+
+bootstrap_article_versions()
+
+
+def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
+    iframe_html = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;'>" + html_content + "</body></html>"
+    iframe_src = "data:text/html;base64," + base64.b64encode(iframe_html.encode("utf-8")).decode("ascii")
+    components.iframe(iframe_src, height=height, width=width, scrolling=scrolling)
+
+
+def render_responsive_image(image_payload):
+    try:
+        st.image(image_payload, width="stretch")
+    except TypeError:
+        st.image(image_payload, use_container_width=True)
+
+
 def play_step_completion_sound():
-    components.html(
+    render_html_iframe(
         """
         <script>
         (function () {
@@ -730,29 +1033,44 @@ def play_step_completion_sound():
                 const AudioContextRef = window.AudioContext || window.webkitAudioContext;
                 if (!AudioContextRef) return;
                 const ctx = new AudioContextRef();
-                const playTone = (startOffset, duration, startFreq, endFreq, peakGain) => {
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
+                const playChime = (startOffset, freq, duration, peakGain) => {
                     const startAt = ctx.currentTime + startOffset;
                     const endAt = startAt + duration;
-                    osc.type = "triangle";
-                    osc.frequency.setValueAtTime(startFreq, startAt);
-                    osc.frequency.exponentialRampToValueAtTime(endFreq, endAt);
-                    gain.gain.setValueAtTime(0.0001, startAt);
-                    gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.03);
-                    gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    osc.start(startAt);
-                    osc.stop(endAt + 0.02);
+                    const mainOsc = ctx.createOscillator();
+                    const harmonicOsc = ctx.createOscillator();
+                    const mainGain = ctx.createGain();
+                    const harmonicGain = ctx.createGain();
+                    const masterGain = ctx.createGain();
+
+                    mainOsc.type = "sine";
+                    harmonicOsc.type = "sine";
+                    mainOsc.frequency.setValueAtTime(freq, startAt);
+                    harmonicOsc.frequency.setValueAtTime(freq * 2, startAt);
+
+                    harmonicGain.gain.setValueAtTime(0.32, startAt);
+                    masterGain.gain.setValueAtTime(0.0001, startAt);
+                    masterGain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.012);
+                    masterGain.gain.exponentialRampToValueAtTime(peakGain * 0.48, startAt + 0.06);
+                    masterGain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+
+                    mainOsc.connect(mainGain);
+                    harmonicOsc.connect(harmonicGain);
+                    mainGain.connect(masterGain);
+                    harmonicGain.connect(masterGain);
+                    masterGain.connect(ctx.destination);
+
+                    mainOsc.start(startAt);
+                    harmonicOsc.start(startAt);
+                    mainOsc.stop(endAt + 0.02);
+                    harmonicOsc.stop(endAt + 0.02);
                 };
 
-                // 双音提示：前短后长，更有提醒感，总时长约 2 秒
-                playTone(0.00, 0.35, 1120, 900, 0.22);
-                playTone(0.55, 1.40, 900, 620, 0.25);
+                // iOS 风格：清脆、短促、偏高频的双音提示
+                playChime(0.00, 1318.5, 0.18, 0.11);
+                playChime(0.13, 1760.0, 0.24, 0.10);
                 setTimeout(() => {
                     try { ctx.close(); } catch (e) {}
-                }, 2300);
+                }, 700);
             } catch (e) {}
         })();
         </script>
@@ -760,6 +1078,110 @@ def play_step_completion_sound():
         height=0,
     )
 
+
+def normalize_copy_text(text):
+    normalized = (text or "")
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.replace("\u2028", "\n").replace("\u2029", "\n")
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def markdown_to_editor_html(markdown_text):
+    normalized = normalize_copy_text(markdown_text)
+    if not normalized:
+        return "<p></p>"
+
+    paragraphs = [item.strip() for item in re.split(r"\n{2,}", normalized) if item.strip()]
+    if not paragraphs:
+        return "<p></p>"
+
+    html_parts = []
+    for paragraph in paragraphs:
+        escaped = html_lib.escape(paragraph)
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+        escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
+        escaped = escaped.replace("\n", "<br/>")
+        html_parts.append(f"<p>{escaped}</p>")
+    return "".join(html_parts)
+
+
+def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制（保留段落）"):
+    plain_text = normalize_copy_text(text)
+    if not plain_text:
+        return
+
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(copy_key))
+    safe_label = html_lib.escape(label)
+    plain_text_b64 = base64.b64encode(plain_text.encode("utf-8")).decode("ascii")
+    html_text_b64 = base64.b64encode(markdown_to_editor_html(plain_text).encode("utf-8")).decode("ascii")
+
+    render_html_iframe(
+        f"""
+        <div style="display:flex;align-items:center;gap:10px;margin:6px 0 0 0;">
+          <button id="copy-btn-{safe_key}" style="border:1px solid #d9d9df;background:#ffffff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">
+            {safe_label}
+          </button>
+          <span id="copy-status-{safe_key}" style="font-size:12px;color:#667085;"></span>
+        </div>
+        <script>
+        (function () {{
+            const plainBase64 = "{plain_text_b64}";
+            const htmlBase64 = "{html_text_b64}";
+            const btn = document.getElementById("copy-btn-{safe_key}");
+            const status = document.getElementById("copy-status-{safe_key}");
+
+            function decodeBase64Utf8(input) {{
+                const binary = window.atob(input);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i += 1) {{
+                    bytes[i] = binary.charCodeAt(i);
+                }}
+                if (window.TextDecoder) {{
+                    return new TextDecoder().decode(bytes);
+                }}
+                let encoded = "";
+                for (let i = 0; i < bytes.length; i += 1) {{
+                    encoded += "%" + bytes[i].toString(16).padStart(2, "0");
+                }}
+                return decodeURIComponent(encoded);
+            }}
+
+            async function copyRichText() {{
+                const plainText = decodeBase64Utf8(plainBase64).replace(/\\n/g, "\\r\\n");
+                const htmlText = decodeBase64Utf8(htmlBase64);
+                try {{
+                    if (navigator.clipboard && window.ClipboardItem) {{
+                        const payload = new ClipboardItem({{
+                            "text/plain": new Blob([plainText], {{ type: "text/plain" }}),
+                            "text/html": new Blob([htmlText], {{ type: "text/html" }})
+                        }});
+                        await navigator.clipboard.write([payload]);
+                    }} else if (navigator.clipboard && navigator.clipboard.writeText) {{
+                        await navigator.clipboard.writeText(plainText);
+                    }} else {{
+                        const ta = document.createElement("textarea");
+                        ta.value = plainText;
+                        ta.style.position = "fixed";
+                        ta.style.left = "-9999px";
+                        document.body.appendChild(ta);
+                        ta.focus();
+                        ta.select();
+                        document.execCommand("copy");
+                        document.body.removeChild(ta);
+                    }}
+                    status.textContent = "已复制，可直接粘贴到富文本编辑器。";
+                }} catch (err) {{
+                    status.textContent = "复制失败，请手动 Ctrl+C。";
+                }}
+            }}
+
+            btn.addEventListener("click", copyRichText);
+        }})();
+        </script>
+        """,
+        height=56,
+    )
 def notify_step_completed(defer_until_rerun=False):
     if defer_until_rerun:
         st.session_state.pending_completion_sound = True
@@ -1348,7 +1770,7 @@ if st.session_state.current_step == 1:
                     with img_cols[idx % 3]:
                         preview_image = get_image_preview_payload(img_url)
                         if preview_image is not None:
-                            st.image(preview_image, use_column_width=True)
+                            render_responsive_image(preview_image)
                         checked = st.checkbox(
                             f"图片 {idx + 1} 纳入分析",
                             value=(idx in previous_selected_ids),
@@ -1418,6 +1840,7 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
                         )
+                        append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=chosen_editor, model=selected_model)
 
                         st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
                         reviewer_prompt = prompts_data["reviewer"]
@@ -1438,6 +1861,7 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
+                        append_article_version(st.session_state.final_article, "自动驾驶定稿", role=chosen_editor, model=selected_model)
 
                         if enable_script:
                             st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
@@ -1453,31 +1877,40 @@ if st.session_state.current_step == 1:
                         status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
 
                     notify_step_completed(defer_until_rerun=True)
-                    go_to_step(5)
+                    go_to_step(6)
                     st.rerun()
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
     render_section_intro("初稿生成", "选择合适的编辑角色，确认当前模型与写作规范，然后输出首版文章。", "Step 02")
-    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    context_strip_placeholder = st.empty()
     
     editor_options = list(prompts_data["editors"].keys())
     if 'selected_role' not in st.session_state or st.session_state.selected_role not in editor_options:
         st.session_state.selected_role = editor_options[0]
         
-    default_idx = editor_options.index(st.session_state.selected_role)
+    if st.session_state.get("selected_role_widget") not in editor_options:
+        st.session_state.selected_role_widget = st.session_state.selected_role
     
-    editor_role = st.selectbox("选择【编辑】视角", editor_options, index=default_idx)
-    st.session_state.selected_role = editor_role 
-
-    target_article_words = st.slider(
+    st.selectbox(
+        "选择【编辑】视角",
+        editor_options,
+        key="selected_role_widget",
+        on_change=sync_selected_role
+    )
+    editor_role = st.session_state.selected_role
+    if st.session_state.get("target_article_words_slider") != get_target_article_words():
+        st.session_state.target_article_words_slider = get_target_article_words()
+    st.slider(
         "🧮 全局目标字数（200-5000）",
         min_value=200,
         max_value=5000,
-        value=get_target_article_words(),
         step=100,
+        key="target_article_words_slider",
+        on_change=sync_target_article_words,
         help="本轮稿件统一使用该字数目标；若角色 Prompt 里有固定字数要求，会自动被全局目标覆盖。"
     )
-    st.session_state.target_article_words = target_article_words
+    with context_strip_placeholder.container():
+        render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     editor_prompt = st.text_area(
         "✍️ 编辑 Prompt (支持临时微调)", 
@@ -1510,6 +1943,7 @@ elif st.session_state.current_step == 2:
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
+                append_article_version(st.session_state.draft_article, "手动初稿", role=editor_role, model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(3)
                 st.rerun()
@@ -1521,6 +1955,7 @@ elif st.session_state.current_step == 3:
     
     with st.expander("📝 查看当前初稿内容 (鼠标移至右上角可一键复制)", expanded=True):
         st.code(st.session_state.draft_article, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.draft_article, "draft_article_step3")
     
     st.divider()
     
@@ -1532,21 +1967,12 @@ elif st.session_state.current_step == 3:
             go_to_step(2)
             st.rerun()
     with col2:
-        if st.button("⏭️ 完美，跳过审查直接定稿"):
-            spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
-            with st.spinner(spinner_msg):
-                st.session_state.final_article = st.session_state.draft_article
-                
-                if enable_script:
-                    script_sys_prompt = get_script_sys_prompt(script_duration)
-                    st.session_state.spoken_script = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=script_sys_prompt,
-                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                    )
-                else:
-                    st.session_state.spoken_script = ""
-                    
+        if st.button("⏭️ 完美，跳过审查进入去AI味"):
+            with st.spinner("正在跳过审查，并将初稿送入去 AI 味步骤..."):
+                st.session_state.modified_article = st.session_state.draft_article
+                st.session_state.final_article = ""
+                st.session_state.spoken_script = ""
+                append_article_version(st.session_state.modified_article, "跳过审查修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
@@ -1578,83 +2004,206 @@ elif st.session_state.current_step == 3:
 
 # --- Step 4 (手动模式) ---
 elif st.session_state.current_step == 4:
-    render_section_intro("定稿修订", "根据主编反馈完成最后一轮修改，并同步决定是否生成脚本。", "Step 04")
+    render_section_intro("修改稿确认", "根据主编反馈完成最后一轮修改，先产出修改稿，再决定是否进入去 AI 味步骤。", "Step 04")
     render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
-    
+
     st.info("**主编审稿意见 (鼠标移至下方框内右上角可复制)：**")
     st.code(st.session_state.review_feedback, language="markdown")
-    
+    render_editor_friendly_copy_button(st.session_state.review_feedback, "review_feedback_step4")
+
+    if st.session_state.modified_article:
+        st.divider()
+        st.markdown("### 当前修改稿预览")
+        st.code(st.session_state.modified_article, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step4")
+
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🔄 意见太水，重新审查"):
             go_to_step(3)
             st.rerun()
     with col2:
-        if st.button("⏭️ 忽略意见，强行定稿"):
-            spinner_msg = f"正在生成最终定稿与【{script_duration}口播及分镜脚本】..." if enable_script else "正在生成最终定稿..."
-            with st.spinner(spinner_msg):
-                st.session_state.final_article = st.session_state.draft_article
-                
-                if enable_script:
-                    script_sys_prompt = get_script_sys_prompt(script_duration)
-                    st.session_state.spoken_script = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=script_sys_prompt,
-                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                    )
-                else:
-                    st.session_state.spoken_script = ""
-                    
+        if st.button("⏭️ 忽略意见，沿用初稿"):
+            with st.spinner("正在跳过修改，准备进入去 AI 味步骤..."):
+                st.session_state.modified_article = st.session_state.draft_article
+                st.session_state.final_article = ""
+                st.session_state.highlighted_article = ""
+                st.session_state.spoken_script = ""
+                append_article_version(st.session_state.modified_article, "忽略意见修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
-        if st.button(f"✨ 使用 {selected_model} 接受意见并修改文章"):
-            spinner_msg = f"编辑正在修改文章，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "编辑正在根据主编意见修改文章..."
-            with st.spinner(spinner_msg):
+        if st.button(f"✨ 使用 {selected_model} 接受意见并生成修改稿"):
+            with st.spinner("编辑正在根据主编意见生成修改稿..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 modification_prompt = build_modification_system_prompt(global_instruction)
-                
+
                 content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
-                
-                st.session_state.final_article = call_llm(
-                    api_key=api_key, 
+
+                st.session_state.modified_article = call_llm(
+                    api_key=api_key,
                     base_url=current_base_url,
-                    model_name=selected_model, 
-                    system_prompt=modification_prompt, 
+                    model_name=selected_model,
+                    system_prompt=modification_prompt,
                     user_content=content_to_modify
                 )
-                
-                if enable_script:
-                    script_sys_prompt = get_script_sys_prompt(script_duration)
-                    st.session_state.spoken_script = call_llm(
-                        api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                        system_prompt=script_sys_prompt,
-                        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                    )
-                else:
-                    st.session_state.spoken_script = ""
-                
+                st.session_state.final_article = ""
+                st.session_state.highlighted_article = ""
+                st.session_state.spoken_script = ""
+                append_article_version(st.session_state.modified_article, "接受审稿修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
 
-# --- Step 5：终极版分栏 UI ---
+# --- Step 5 (手动模式) ---
 elif st.session_state.current_step == 5:
-    render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 05")
+    render_section_intro("去 AI 味", "在定稿前选择专用模型，把修改稿重写得更像真人专家输出。", "Step 05")
+    render_context_strip([f"修改稿来源模型：{selected_model}", f"专用模型：{st.session_state.get('de_ai_model', DE_AI_MODELS[0])}", f"Temperature：{st.session_state.get('de_ai_temperature', 0.75):.2f}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+
+    current_role = st.session_state.get("selected_role", "")
+    current_editor_prompt = prompts_data["editors"].get(current_role, "") if current_role in prompts_data["editors"] else ""
+    st.session_state.de_ai_prompt_template = build_de_ai_prompt_template(current_role, current_editor_prompt, st.session_state.get("source_content", ""))
+
+    st.markdown("### 当前修改稿")
+    st.code(st.session_state.modified_article, language="markdown")
+    render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step5")
+
+    with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
+        st.text_area(
+            "去 AI 味 Prompt 模板",
+            value=st.session_state.de_ai_prompt_template,
+            height=360,
+            disabled=True,
+            key="de_ai_prompt_template_preview"
+        )
+
+    col_model, col_temp = st.columns([1.2, 1])
+    with col_model:
+        st.selectbox(
+            "去 AI 味专用大模型",
+            DE_AI_MODELS,
+            key="de_ai_model",
+            on_change=save_draft
+        )
+    with col_temp:
+        st.slider(
+            "Temperature",
+            min_value=0.70,
+            max_value=0.85,
+            step=0.05,
+            key="de_ai_temperature",
+            on_change=save_draft
+        )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🔙 返回修改稿步骤"):
+            go_to_step(4)
+            st.rerun()
+    with col2:
+        if st.button("⏭️ 跳过去 AI 味，直接定稿"):
+            spinner_msg = f"正在将修改稿设为定稿，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "正在将修改稿设为定稿..."
+            with st.spinner(spinner_msg):
+                st.session_state.final_article = st.session_state.modified_article
+                st.session_state.highlighted_article = ""
+                append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
+                if enable_script:
+                    generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                else:
+                    st.session_state.spoken_script = ""
+                notify_step_completed(defer_until_rerun=True)
+                go_to_step(6)
+                st.rerun()
+    with col3:
+        if st.button(f"✨ 使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写"):
+            spinner_msg = f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味，并生成【{script_duration}口播及分镜脚本】..." if enable_script else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写..."
+            with st.spinner(spinner_msg):
+                de_ai_response = call_llm(
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    model_name=st.session_state.get('de_ai_model', DE_AI_MODELS[0]),
+                    system_prompt=st.session_state.de_ai_prompt_template,
+                    user_content=st.session_state.modified_article,
+                    temperature=st.session_state.get('de_ai_temperature', 0.75)
+                )
+                pure_article, highlighted_article = parse_de_ai_dual_output(de_ai_response)
+                st.session_state.final_article = pure_article or (de_ai_response or "").strip()
+                st.session_state.highlighted_article = highlighted_article
+                append_article_version(st.session_state.final_article, "去AI味定稿", role=current_role, model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]))
+                if enable_script:
+                    generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                else:
+                    st.session_state.spoken_script = ""
+                if not highlighted_article:
+                    st.warning("高亮版生成失败，本次仅保留纯净定稿。")
+                notify_step_completed(defer_until_rerun=True)
+                go_to_step(6)
+                st.rerun()
+# --- Step 6：终极版分栏 UI ---
+elif st.session_state.current_step == 6:
+    render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
     render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
     
     st.markdown("<p class='toolbar-note'>主稿、分镜脚本、搜图和分发操作统一留在左侧主工作区；右侧专门用于精修、追问和追溯原文依据。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.95])
     
     with left_col:
-        st.markdown("### 主稿面板")
+        st.markdown("### 稿件版本时间线")
+        versions = st.session_state.get("article_versions", [])
+        if versions:
+            version_map = {item.get("id"): item for item in versions if item.get("id")}
+            version_options = [item.get("id") for item in reversed(versions) if item.get("id")]
+            active_version_id = st.session_state.get("active_article_version_id")
+            default_version_index = version_options.index(active_version_id) if active_version_id in version_options else 0
+
+            def format_version_option(version_id):
+                version_item = version_map.get(version_id, {})
+                return f"{version_id} · {version_item.get('stage', '未命名阶段')} · {version_item.get('created_at', '')} · {version_item.get('word_count', 0)} 字"
+
+            selected_version_id = st.selectbox(
+                "选择版本节点",
+                options=version_options,
+                index=default_version_index,
+                format_func=format_version_option,
+                key="article_version_selector"
+            )
+            selected_version = version_map.get(selected_version_id)
+
+            if selected_version_id != st.session_state.get("active_article_version_id"):
+                st.session_state.active_article_version_id = selected_version_id
+                save_draft()
+
+            if selected_version:
+                st.caption(f"当前阶段：{selected_version.get('stage', '未命名')}｜角色：{selected_version.get('role', '未记录')}｜模型：{selected_version.get('model', '未记录')}")
+                if st.button("将此版本设为当前定稿", key="use_selected_version_as_final", use_container_width=True):
+                    st.session_state.final_article = selected_version.get("content", "")
+                    st.session_state.highlighted_article = ""
+                    st.session_state.active_article_version_id = selected_version_id
+                    save_draft()
+                    notify_step_completed()
+                    st.success(f"已切换到版本 {selected_version_id}")
+
+                with st.expander("查看选中版本全文", expanded=False):
+                    st.code(selected_version.get("content", ""), language="markdown")
+                    render_editor_friendly_copy_button(selected_version.get("content", ""), f"version_{selected_version_id}")
+        else:
+            st.info("暂无版本记录。生成初稿或定稿后会自动写入版本时间线。")
+
+        st.divider()
+        st.markdown("### 主稿面板（当前定稿）")
         st.code(st.session_state.final_article, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.final_article, "final_article_step6")
+
+        st.divider()
+        st.markdown("### 高亮阅读版")
+        render_highlighted_article_panel(st.session_state.get("highlighted_article", ""))
         
         if st.session_state.spoken_script:
             st.divider()
             st.markdown(f"### 分镜脚本 · {script_duration}")
             st.code(st.session_state.spoken_script, language="markdown")
+            render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step6")
         
         st.divider()
         st.markdown("### 智能配图助手")
@@ -1686,6 +2235,7 @@ elif st.session_state.current_step == 5:
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
             st.code(st.session_state.image_keywords, language="markdown")
+            render_editor_friendly_copy_button(st.session_state.image_keywords, "image_keywords_step6")
             
         st.divider()
 
@@ -1801,6 +2351,32 @@ elif st.session_state.current_step == 5:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
