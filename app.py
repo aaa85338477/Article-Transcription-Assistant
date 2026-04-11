@@ -142,7 +142,8 @@ def save_draft():
         'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
         'source_images_all', 'selected_source_image_ids', 'article_versions',
         'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
-        'de_ai_prompt_template'
+        'de_ai_prompt_template', 'pending_ai_stage', 'last_completed_ai_stage',
+        'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -467,9 +468,19 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
             messages=messages,
             temperature=0.3 if temperature is None else temperature
         )
-        return response.choices[0].message.content
+        if not getattr(response, "choices", None):
+            raise ValueError("Model returned no choices.")
+        message = response.choices[0].message if response.choices else None
+        content = normalize_llm_response_content(getattr(message, "content", None))
+        if not content.strip():
+            raise ValueError("Model returned an empty message body.")
+        st.session_state.last_ai_error = ""
+        return content
     except Exception as e:
-        st.error(f"API 调用失败: {str(e)}")
+        st.session_state.last_ai_error = str(e)
+        st.session_state.pending_ai_stage = ""
+        save_draft()
+        st.error(f"API call failed: {str(e)}")
         st.stop()
 
 def push_to_feishu(article_text, script_text=None):
@@ -896,6 +907,16 @@ def init_state():
         st.session_state.article_versions = []
     if 'active_article_version_id' not in st.session_state:
         st.session_state.active_article_version_id = None
+    if 'pending_ai_stage' not in st.session_state:
+        st.session_state.pending_ai_stage = ""
+    if 'last_completed_ai_stage' not in st.session_state:
+        st.session_state.last_completed_ai_stage = ""
+    if 'last_completed_ai_target_step' not in st.session_state:
+        st.session_state.last_completed_ai_target_step = 0
+    if 'last_ai_error' not in st.session_state:
+        st.session_state.last_ai_error = ""
+    if 'recovered_ai_notice' not in st.session_state:
+        st.session_state.recovered_ai_notice = ""
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -904,6 +925,81 @@ def init_state():
 
 
 init_state()
+
+
+def mark_ai_stage_started(stage_name):
+    st.session_state.pending_ai_stage = stage_name
+    st.session_state.last_ai_error = ""
+    save_draft()
+
+
+def checkpoint_ai_stage(stage_name, target_step=None):
+    st.session_state.pending_ai_stage = ""
+    st.session_state.last_completed_ai_stage = stage_name
+    st.session_state.last_completed_ai_target_step = target_step or 0
+    st.session_state.last_ai_error = ""
+    st.session_state.recovered_ai_notice = ""
+    save_draft()
+
+
+def clear_ai_stage_checkpoint():
+    st.session_state.pending_ai_stage = ""
+    st.session_state.last_completed_ai_stage = ""
+    st.session_state.last_completed_ai_target_step = 0
+    save_draft()
+
+
+def recover_ai_progress_if_needed():
+    target_step = st.session_state.get("last_completed_ai_target_step", 0) or 0
+    current_step = st.session_state.get("current_step", 1)
+    last_stage = st.session_state.get("last_completed_ai_stage", "")
+    if target_step and current_step < target_step:
+        st.session_state.current_step = target_step
+        st.session_state.recovered_ai_notice = f"AI 已完成「{format_ai_stage_name(last_stage)}」，已自动恢复到第 {target_step} 步。"
+        clear_ai_stage_checkpoint()
+        st.rerun()
+    if target_step and current_step >= target_step:
+        clear_ai_stage_checkpoint()
+
+
+def normalize_llm_response_content(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    parts.append(text_value)
+        return "\n".join(part for part in parts if part).strip()
+    return "" if content is None else str(content)
+
+
+def format_ai_stage_name(stage_name):
+    return {
+        "draft_generation": "写出稿",
+        "review_generation": "严格审稿",
+        "modification_generation": "修改稿件",
+        "de_ai_generation": "去 AI 味重写",
+    }.get(stage_name, stage_name or "AI 任务")
+
+
+def render_ai_progress_banner():
+    recovered_notice = st.session_state.get("recovered_ai_notice", "")
+    if recovered_notice:
+        st.success(recovered_notice)
+
+    pending_stage = st.session_state.get("pending_ai_stage", "")
+    if pending_stage:
+        st.info(f"AI 正在执行「{format_ai_stage_name(pending_stage)}」。如果页面短暂重载，系统会自动尝试续上流程。")
+
+    last_error = (st.session_state.get("last_ai_error", "") or "").strip()
+    if last_error:
+        st.warning(f"上一轮 AI 调用未完整收尾：{last_error}")
+
 
 def go_to_step(step):
     st.session_state.current_step = step
@@ -1009,6 +1105,7 @@ def bootstrap_article_versions():
 
 
 bootstrap_article_versions()
+recover_ai_progress_if_needed()
 
 
 def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
@@ -1621,6 +1718,7 @@ with st.sidebar:
 
 render_app_hero()
 render_stepper(st.session_state.current_step)
+render_ai_progress_banner()
 
 # --- Step 1 ---
 if st.session_state.current_step == 1:
@@ -1841,6 +1939,7 @@ if st.session_state.current_step == 1:
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
                         )
                         append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=chosen_editor, model=selected_model)
+                        save_draft()
 
                         st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
                         reviewer_prompt = prompts_data["reviewer"]
@@ -1853,6 +1952,7 @@ if st.session_state.current_step == 1:
                             system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
                         )
 
+                        save_draft()
                         st.write("✨ 接收修改意见，正在进行最终打磨...")
                         modification_prompt = build_modification_system_prompt(global_instruction)
                         content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
@@ -1862,6 +1962,7 @@ if st.session_state.current_step == 1:
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
                         append_article_version(st.session_state.final_article, "自动驾驶定稿", role=chosen_editor, model=selected_model)
+                        save_draft()
 
                         if enable_script:
                             st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
@@ -1926,6 +2027,7 @@ elif st.session_state.current_step == 2:
             st.rerun()
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
+            mark_ai_stage_started("draft_generation")
             with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
@@ -1944,6 +2046,8 @@ elif st.session_state.current_step == 2:
                     image_urls=st.session_state.source_images
                 )
                 append_article_version(st.session_state.draft_article, "手动初稿", role=editor_role, model=selected_model)
+                checkpoint_ai_stage("draft_generation", target_step=3)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(3)
                 st.rerun()
@@ -1978,6 +2082,7 @@ elif st.session_state.current_step == 3:
                 st.rerun()
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
+            mark_ai_stage_started("review_generation")
             with st.spinner("主编正在核对原文素材..."):
                 if st.session_state.source_images:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
@@ -1998,6 +2103,8 @@ elif st.session_state.current_step == 3:
                     user_content=combined_content,
                     image_urls=st.session_state.source_images
                 )
+                checkpoint_ai_stage("review_generation", target_step=4)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(4)
                 st.rerun()
@@ -2035,6 +2142,7 @@ elif st.session_state.current_step == 4:
                 st.rerun()
     with col3:
         if st.button(f"✨ 使用 {selected_model} 接受意见并生成修改稿"):
+            mark_ai_stage_started("modification_generation")
             with st.spinner("编辑正在根据主编意见生成修改稿..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 modification_prompt = build_modification_system_prompt(global_instruction)
@@ -2052,6 +2160,8 @@ elif st.session_state.current_step == 4:
                 st.session_state.highlighted_article = ""
                 st.session_state.spoken_script = ""
                 append_article_version(st.session_state.modified_article, "接受审稿修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
+                checkpoint_ai_stage("modification_generation", target_step=5)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
@@ -2110,6 +2220,7 @@ elif st.session_state.current_step == 5:
                 append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                    save_draft()
                 else:
                     st.session_state.spoken_script = ""
                 notify_step_completed(defer_until_rerun=True)
@@ -2117,6 +2228,7 @@ elif st.session_state.current_step == 5:
                 st.rerun()
     with col3:
         if st.button(f"✨ 使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写"):
+            mark_ai_stage_started("de_ai_generation")
             spinner_msg = f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味，并生成【{script_duration}口播及分镜脚本】..." if enable_script else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写..."
             with st.spinner(spinner_msg):
                 de_ai_response = call_llm(
@@ -2131,12 +2243,15 @@ elif st.session_state.current_step == 5:
                 st.session_state.final_article = pure_article or (de_ai_response or "").strip()
                 st.session_state.highlighted_article = highlighted_article
                 append_article_version(st.session_state.final_article, "去AI味定稿", role=current_role, model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]))
+                save_draft()
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
                 else:
                     st.session_state.spoken_script = ""
                 if not highlighted_article:
                     st.warning("高亮版生成失败，本次仅保留纯净定稿。")
+                checkpoint_ai_stage("de_ai_generation", target_step=6)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
                 st.rerun()
