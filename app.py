@@ -253,7 +253,7 @@ def build_modification_system_prompt(global_instruction):
     ]
     return "\n\n".join([part for part in prompt_parts if part])
 
-DE_AI_MODELS = ["deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
+DE_AI_MODELS = ["deepseek-v3-1-terminus", "deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
 ROLE_AUDIENCE_MAP = {
     "发行主编": "游戏行业从业者",
     "研发主编": "游戏圈同行和硬核玩家",
@@ -875,7 +875,7 @@ def init_state():
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
     if 'de_ai_model' not in st.session_state:
-        st.session_state.de_ai_model = "deepseek-v3-2-exp"
+        st.session_state.de_ai_model = "deepseek-v3-1-terminus"
     if 'de_ai_temperature' not in st.session_state:
         st.session_state.de_ai_temperature = 0.75
     if 'de_ai_prompt_template' not in st.session_state:
