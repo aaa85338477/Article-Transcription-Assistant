@@ -2283,6 +2283,8 @@ if st.session_state.current_step == 1:
                         for stale_key in [k for k in list(st.session_state.keys()) if k.startswith("source_image_pick_")]:
                             del st.session_state[stale_key]
                         st.session_state.extraction_success = True
+                        st.session_state.obsidian_retrieval_signature = ""
+                        run_obsidian_retrieval(force=True)
                         notify_step_completed()
 
                         if errors:
@@ -2294,6 +2296,7 @@ if st.session_state.current_step == 1:
                                 st.success(f"批量提取成功！共融合了 {success_count} 个素材。（无有效配图，走纯文本模式）")
                     else:
                         st.session_state.extraction_success = False
+                        reset_obsidian_context()
                         st.error("所有素材提取均失败，请检查链接、上传文件内容或网络状态。\n" + "\n".join(errors))
 
     if st.session_state.extraction_success:
@@ -2331,6 +2334,42 @@ if st.session_state.current_step == 1:
             st.markdown("#### 合并后的文本正文")
             preview_text = st.session_state.source_content[:1800] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1800 else st.session_state.source_content
             st.code(preview_text, language="markdown")
+
+        if st.session_state.get("obsidian_enabled"):
+            with st.container(border=True):
+                render_section_intro("Obsidian Research Brief", "Review matched notes and the generated brief before you choose a writing mode.", "Knowledge")
+                if st.button("Refresh Obsidian retrieval", key="refresh_obsidian_hits", use_container_width=True):
+                    run_obsidian_retrieval(force=True)
+                    st.rerun()
+
+                retrieval_error = (st.session_state.get("obsidian_retrieval_error", "") or "").strip()
+                if retrieval_error:
+                    st.warning(retrieval_error)
+
+                wiki_root_display = st.session_state.get("obsidian_wiki_root", "")
+                if wiki_root_display:
+                    st.caption(f"Wiki root: {wiki_root_display}")
+                indexed_at = st.session_state.get("obsidian_last_indexed_at", "")
+                if indexed_at:
+                    st.caption(f"Last indexed: {indexed_at}")
+
+                query_terms = st.session_state.get("obsidian_query_terms", []) or []
+                if query_terms:
+                    st.caption("Query terms: " + ", ".join(query_terms))
+
+                obsidian_hits = st.session_state.get("obsidian_hits", []) or []
+                if obsidian_hits and st.session_state.get("obsidian_show_hits", True):
+                    for idx, hit in enumerate(obsidian_hits, start=1):
+                        with st.expander(f"{idx}. {hit.get('title', '')} | {hit.get('category_label', '')}", expanded=(idx <= 2)):
+                            st.caption(f"{hit.get('path', '')} | {hit.get('modified_at', '')}")
+                            st.markdown(hit.get("reason", ""))
+                            st.code(hit.get("excerpt", ""), language="markdown")
+                elif st.session_state.get("obsidian_enabled") and not retrieval_error:
+                    st.info("No relevant Obsidian notes were matched for this source batch. The workflow will continue with source-only writing.")
+
+                if st.session_state.get("obsidian_research_brief"):
+                    st.markdown("#### Research brief preview")
+                    st.code(st.session_state.obsidian_research_brief, language="markdown")
 
         with st.container(border=True):
             render_section_intro("选择工作流模式", "手动精调适合逐步把关，全自动驾驶适合快速得到高完成度定稿。", "Workflow")
