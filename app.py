@@ -290,19 +290,41 @@ OBSIDIAN_CATEGORY_ORDER = [
 ]
 
 QUERY_STOPWORDS_EN = {
-    "about", "after", "again", "also", "among", "article", "because", "before",
-    "being", "between", "brief", "could", "content", "games", "gaming", "have",
-    "into", "just", "more", "most", "news", "report", "their", "there", "these",
-    "they", "this", "those", "video", "with", "would", "from", "that", "were",
-    "been", "than", "what", "when", "where", "which", "will", "your",
+    "about", "after", "again", "also", "among", "an", "and", "any", "are", "article",
+    "because", "before", "being", "between", "block", "brief", "can", "could", "content",
+    "does", "for", "from", "game", "games", "gaming", "have", "how", "into", "its",
+    "just", "more", "most", "news", "over", "report", "said", "same", "sort", "than",
+    "that", "the", "their", "there", "these", "they", "this", "those", "through", "under",
+    "using", "video", "were", "what", "when", "where", "which", "while", "will", "with",
+    "would", "your", "you",
 }
 
 QUERY_STOPWORDS_ZH = {
-    "游戏", "行业", "文章", "素材", "内容", "视频", "信息", "相关", "今天", "本次", "这次",
-    "这篇", "这个", "那个", "我们", "他们", "以及", "因为", "所以", "可以", "如果", "对于",
-    "关于", "通过", "进行", "表示", "认为", "显示", "其中", "已经", "可能",
+    "\u6e38\u620f", "\u884c\u4e1a", "\u6587\u7ae0", "\u7d20\u6750", "\u5185\u5bb9", "\u89c6\u9891", "\u4fe1\u606f", "\u76f8\u5173", "\u4eca\u5929", "\u672c\u6b21", "\u8fd9\u6b21",
+    "\u8fd9\u7bc7", "\u8fd9\u4e2a", "\u90a3\u4e2a", "\u6211\u4eec", "\u4ed6\u4eec", "\u4ee5\u53ca", "\u56e0\u4e3a", "\u6240\u4ee5", "\u53ef\u4ee5", "\u5982\u679c", "\u5bf9\u4e8e",
+    "\u5173\u4e8e", "\u901a\u8fc7", "\u8fdb\u884c", "\u8868\u793a", "\u8ba4\u4e3a", "\u663e\u793a", "\u5176\u4e2d", "\u5df2\u7ecf", "\u53ef\u80fd",
 }
 
+ENGLISH_SIGNAL_HINTS = {
+    "abtest", "arpdau", "battlepass", "battle-pass", "casual", "cpi", "cpp", "creative",
+    "event", "fail", "gacha", "hybridcasual", "hybrid-casual", "iap", "idle", "liveops",
+    "ltv", "market", "match3", "merge", "meta", "midcore", "monetization", "puzzle",
+    "retention", "revenue", "revive", "roi", "rpg", "season", "shop", "slg", "subgenre",
+    "ua", "webshop", "web-shop",
+}
+
+LOW_SIGNAL_DOC_FILENAMES = {"index.md", "log.md"}
+LOW_SIGNAL_DIRNAMES = {"07_attachments", "raw", "schema", "templates"}
+LOW_SIGNAL_SECTION_MARKERS = (
+    "suggested pages", "related pages", "related page", "related notes", "related sources", "see also",
+    "\u63a8\u8350\u9605\u8bfb", "\u76f8\u5173\u9875\u9762", "\u76f8\u5173\u9875", "\u76f8\u5173\u9605\u8bfb", "\u76f8\u5173\u6765\u6e90", "\u53c2\u89c1",
+)
+
+DEFINITION_SECTION_MARKERS = (
+    "definition", "overview", "summary", "core", "thesis", "framework", "signals", "metrics",
+    "\u5b9a\u4e49", "\u6982\u5ff5", "\u662f\u4ec0\u4e48", "\u6838\u5fc3", "\u7279\u5f81", "\u673a\u5236", "\u73a9\u6cd5", "\u6846\u67b6",
+    "\u7814\u7a76\u4e0e\u6307\u6807", "\u5173\u952e\u4e3b\u5f20", "\u603b\u89c8", "\u6458\u8981",
+)
 
 def reset_obsidian_context():
     st.session_state.obsidian_hits = []
@@ -359,75 +381,128 @@ def strip_markdown_frontmatter(text):
     return text
 
 
+def split_markdown_blocks(text):
+    return [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
+
+def strip_wikilink_markup(text):
+    return re.sub(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]", lambda match: match.group(2) or match.group(1), text or "")
+
+def is_low_signal_heading(line):
+    cleaned = re.sub(r"^[#>\-*\s]+", "", (line or "")).strip().casefold()
+    return any(marker in cleaned for marker in LOW_SIGNAL_SECTION_MARKERS)
+
+def is_pure_wikilink_block(block):
+    lines = [line.strip() for line in (block or "").splitlines() if line.strip()]
+    if not lines:
+        return True
+    joined = "\n".join(lines)
+    without_links = re.sub(r"\[\[[^\]]+\]\]", " ", joined)
+    without_markup = re.sub(r"[`*_>#\-|/:,\uFF0C\u3002.!?\uFF1F\uFF01\s\[\]\(\)]", "", without_links)
+    return len(without_markup) <= 12
+
+def clean_obsidian_content(text, *, preserve_glossary=False):
+    blocks = split_markdown_blocks(text)
+    if not blocks:
+        return ""
+    cleaned_blocks = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        first_line = lines[0]
+        if is_low_signal_heading(first_line):
+            continue
+        if is_pure_wikilink_block(block):
+            continue
+        if not preserve_glossary and block.count("[[") >= 3 and len(lines) <= 6:
+            continue
+        cleaned_blocks.append(block.strip())
+    if cleaned_blocks:
+        return "\n\n".join(cleaned_blocks)
+    return "\n\n".join(blocks[:2])
+
 def parse_obsidian_doc(path_obj, wiki_root):
     raw_text, read_error = read_markdown_file(path_obj)
     if read_error:
         return None, read_error
-
     clean_text = strip_markdown_frontmatter(raw_text).strip()
     if not clean_text:
         return None, ""
-
     title = path_obj.stem
     title_match = re.search(r"^\s*#\s+(.+?)\s*$", clean_text, flags=re.MULTILINE)
     if title_match:
         title = title_match.group(1).strip()
-
     relative_path = path_obj.resolve().relative_to(Path(wiki_root).resolve()).as_posix()
     parts = relative_path.split("/")
     category = parts[0] if parts else ""
     wikilinks = re.findall(r"\[\[([^\]]+)\]\]", clean_text)
+    rel_path_lower = relative_path.casefold()
+    is_glossary = rel_path_lower.endswith("00_overviews/terms-glossary.md")
+    clean_content = clean_obsidian_content(clean_text, preserve_glossary=is_glossary).strip() or clean_text
     return {
         "path": str(path_obj.resolve()),
         "relative_path": relative_path,
         "title": title,
         "category": category,
         "content": clean_text,
+        "clean_content": clean_content,
         "wikilinks": wikilinks,
+        "is_low_signal_doc": path_obj.name.casefold() in LOW_SIGNAL_DOC_FILENAMES,
         "modified_at": datetime.fromtimestamp(path_obj.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
     }, ""
-
 
 def load_obsidian_documents(wiki_root):
     root_path = Path(wiki_root)
     documents = []
     read_errors = []
     for path_obj in sorted(root_path.rglob("*.md")):
-        if not path_obj.is_file() or "07_attachments" in path_obj.parts:
+        lower_parts = {part.casefold() for part in path_obj.parts}
+        if not path_obj.is_file() or any(part in LOW_SIGNAL_DIRNAMES for part in lower_parts):
+            continue
+        if path_obj.name.casefold() in LOW_SIGNAL_DOC_FILENAMES:
             continue
         doc, read_error = parse_obsidian_doc(path_obj, wiki_root)
         if read_error:
             read_errors.append(read_error)
             continue
-        if doc:
+        if doc and not doc.get("is_low_signal_doc"):
             documents.append(doc)
     return documents, read_errors
-
 
 def normalize_query_token(token):
     cleaned = token.strip().strip("()[]{}<>.,!?;:'\"`")
     return cleaned.casefold()
 
-
 def extract_query_context(source_content):
     text = (source_content or "").strip()
     english_tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}", text)
-    chinese_tokens = re.findall(r"[一-鿿]{2,12}", text)
+    chinese_tokens = re.findall("[\u4E00-\u9FFF]{2,12}", text)
     score_map = {}
     order_map = {}
-    for idx, token in enumerate(english_tokens + chinese_tokens):
+
+    def bump(term, weight, order_idx):
+        score_map[term] = score_map.get(term, 0) + weight
+        order_map.setdefault(term, order_idx)
+
+    for idx, token in enumerate(english_tokens):
         normalized = normalize_query_token(token)
-        if not normalized:
+        if not normalized or normalized in QUERY_STOPWORDS_EN:
             continue
-        if normalized in QUERY_STOPWORDS_EN or normalized in QUERY_STOPWORDS_ZH:
+        if len(normalized) < 4 and normalized not in ENGLISH_SIGNAL_HINTS:
             continue
-        if len(normalized) <= 1:
+        weight = 3 if normalized in ENGLISH_SIGNAL_HINTS or any(ch.isdigit() for ch in normalized) or "-" in normalized or "+" in normalized else 1
+        bump(normalized, weight, idx)
+
+    offset = len(english_tokens)
+    for idx, token in enumerate(chinese_tokens, start=offset):
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_ZH:
             continue
-        score_map[normalized] = score_map.get(normalized, 0) + 1
-        order_map.setdefault(normalized, idx)
+        weight = 2 if len(normalized) >= 3 else 1
+        bump(normalized, weight, idx)
+
     ranked_terms = sorted(score_map.items(), key=lambda item: (-item[1], order_map.get(item[0], 0), item[0]))
     return {"keywords": [term for term, _ in ranked_terms[:24]], "raw_text": text}
-
 
 def load_terms_glossary(documents):
     glossary_map = {}
@@ -484,73 +559,184 @@ def get_obsidian_category_label(category):
     return OBSIDIAN_CATEGORY_LABELS.get(category, category or "Uncategorized")
 
 
-def extract_best_excerpt(content, matched_terms, max_chars):
-    blocks = [block.strip() for block in re.split(r"\n\s*\n", content or "") if block.strip()] or [(content or "").strip()]
+def count_wikilinks(text):
+    return len(re.findall(r"\[\[[^\]]+\]\]", text or ""))
+
+
+def is_definition_like_block(first_line, block, category):
+    first_line_clean = re.sub(r"^[#>\-*\s]+", "", (first_line or "")).strip().casefold()
+    block_clean = strip_wikilink_markup(block or "")
+    if any(marker in first_line_clean for marker in DEFINITION_SECTION_MARKERS):
+        return True
+    if category == "03_concepts":
+        if not first_line.startswith("#") and len(block_clean) >= 80 and count_wikilinks(block) <= 1:
+            return True
+        if re.search(r"\b(is|means|refers to|describes)\b", block_clean.casefold()):
+            return True
+        if any(marker in block_clean for marker in ("是指", "指的是", "通常指", "本质上", "核心在于")):
+            return True
+    return False
+
+
+def score_excerpt_block(block, matched_terms, category):
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    if not lines:
+        return -999
+    first_line = lines[0]
+    if is_low_signal_heading(first_line) or is_pure_wikilink_block(block):
+        return -999
+
+    lowered = block.casefold()
+    block_score = sum(14 for term in matched_terms[:6] if term in lowered)
+    wikilink_count = count_wikilinks(block)
+    prose_block = strip_wikilink_markup(block)
+
+    if wikilink_count == 0:
+        block_score += 4
+    elif wikilink_count == 1:
+        block_score += 1
+    else:
+        block_score -= min(6, wikilink_count)
+
+    if re.search(r"[。！？.!?]", prose_block):
+        block_score += 2
+    if first_line.startswith("#"):
+        block_score -= 2
+    if category == "03_concepts":
+        if is_definition_like_block(first_line, block, category):
+            block_score += 12
+        elif wikilink_count >= 2:
+            block_score -= 8
+    elif category == "00_overviews" and is_definition_like_block(first_line, block, category):
+        block_score += 6
+    elif category == "01_sources" and any(marker in first_line.casefold() for marker in ("key claims", "summary", "takeaways", "结论", "要点", "摘要", "关键主张")):
+        block_score += 8
+
+    return block_score
+
+
+def extract_best_excerpt(content, matched_terms, max_chars, *, category="", title=""):
+    blocks = split_markdown_blocks(content) or [(content or "").strip()]
     chosen_block = ""
     chosen_score = -1
+    fallback_block = ""
     for block in blocks:
-        lowered = block.casefold()
-        block_score = sum(12 for term in matched_terms[:6] if term in lowered) + min(len(block), max_chars) / 100.0
+        block = block.strip()
+        if not block:
+            continue
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        block_score = score_excerpt_block(block, matched_terms, category)
+        if block_score <= -999:
+            continue
+        if not fallback_block:
+            fallback_block = block
         if block_score > chosen_score:
             chosen_score = block_score
             chosen_block = block
-    chosen_block = chosen_block or (content or "").strip()
+
+    chosen_block = chosen_block or fallback_block
+    if not chosen_block:
+        return ""
+    chosen_block = strip_wikilink_markup(chosen_block)
+    chosen_block = re.sub(r"\n{3,}", "\n\n", chosen_block).strip()
+    if title and chosen_block.casefold().startswith(title.casefold()):
+        chosen_block = chosen_block[len(title):].lstrip(" :\uFF1A-\n") or chosen_block
     if len(chosen_block) > max_chars:
         chosen_block = chosen_block[:max_chars].rstrip() + "..."
     return chosen_block
 
 
 def score_obsidian_docs(query_context, documents, glossary_map):
-    query_terms = expand_query_terms(query_context.get("keywords", []), glossary_map)
+    base_terms = [normalize_query_token(term) for term in query_context.get("keywords", []) if normalize_query_token(term)]
+    base_term_set = set(base_terms)
+    query_terms = expand_query_terms(base_terms, glossary_map)
     scored_docs = []
     for doc in documents:
+        if doc.get("is_low_signal_doc"):
+            continue
         title_lower = doc.get("title", "").casefold()
-        content_lower = doc.get("content", "").casefold()
+        content_lower = doc.get("clean_content", doc.get("content", "")).casefold()
         path_lower = doc.get("relative_path", "").casefold()
         category = doc.get("category", "")
         score = OBSIDIAN_CATEGORY_WEIGHTS.get(category, 12)
-        matched_terms = []
+        title_matches = []
+        path_matches = []
+        content_matches = []
         for term in query_terms:
+            is_base_term = term in base_term_set
             if term in title_lower:
-                score += 12
-                matched_terms.append(term)
+                score += 18 if is_base_term else 12
+                title_matches.append(term)
             elif term in path_lower:
-                score += 6
-                matched_terms.append(term)
+                score += 9 if is_base_term else 6
+                path_matches.append(term)
             elif term in content_lower:
-                score += 4
-                matched_terms.append(term)
+                score += 5 if is_base_term else 3
+                content_matches.append(term)
         rel_path = doc.get("relative_path", "")
-        if rel_path.endswith("00_overviews/mobile-game-trends-2025.md") and matched_terms:
-            score += 8
-        if rel_path.endswith("00_overviews/terms-glossary.md") and matched_terms:
-            score += 4
-        unique_terms = []
+        rel_path_lower = rel_path.casefold()
+        matched_terms = []
         seen_terms = set()
-        for term in matched_terms:
+        for term in title_matches + path_matches + content_matches:
             if term in seen_terms:
                 continue
             seen_terms.add(term)
-            unique_terms.append(term)
-        if not unique_terms:
+            matched_terms.append(term)
+        if not matched_terms:
             continue
-        scored_docs.append({"doc": doc, "score": score, "matched_terms": unique_terms})
+        if not title_matches and not path_matches and len(set(content_matches)) < 2:
+            continue
+        if rel_path_lower.endswith("00_overviews/mobile-game-trends-2025.md") and matched_terms:
+            score += 8
+        if rel_path_lower.endswith("00_overviews/terms-glossary.md") and matched_terms:
+            score -= 28
+            if title_matches or path_matches:
+                score += 2
+            if len(set(content_matches)) < 3 and not title_matches and not path_matches:
+                continue
+            if any(term in ENGLISH_SIGNAL_HINTS for term in matched_terms[:6]):
+                score += 1
+        if category == "03_concepts" and title_matches:
+            score += 6
+        if title_matches:
+            score += 4
+        scored_docs.append({
+            "doc": doc,
+            "score": score,
+            "matched_terms": matched_terms,
+            "title_matches": title_matches,
+            "path_matches": path_matches,
+            "content_matches": content_matches,
+        })
     scored_docs.sort(key=lambda item: (-item["score"], OBSIDIAN_CATEGORY_ORDER.index(item["doc"].get("category")) if item["doc"].get("category") in OBSIDIAN_CATEGORY_ORDER else 999, item["doc"].get("title", "")))
     return scored_docs
 
-
 def build_obsidian_hits(scored_docs, max_hits, max_chars_per_hit):
     hits = []
-    for item in scored_docs[:max_hits]:
+    for item in scored_docs:
+        if len(hits) >= max_hits:
+            break
         doc = item["doc"]
         matched_terms = item.get("matched_terms", [])
+        excerpt = extract_best_excerpt(
+            doc.get("clean_content", doc.get("content", "")),
+            matched_terms,
+            max_chars_per_hit,
+            category=doc.get("category", ""),
+            title=doc.get("title", ""),
+        )
+        first_excerpt_line = excerpt.splitlines()[0] if excerpt.splitlines() else ""
+        if not excerpt or is_pure_wikilink_block(excerpt) or is_low_signal_heading(first_excerpt_line):
+            continue
         hits.append({
             "title": doc.get("title", ""),
             "path": doc.get("relative_path", ""),
             "category": doc.get("category", ""),
             "category_label": get_obsidian_category_label(doc.get("category", "")),
             "score": item.get("score", 0),
-            "excerpt": extract_best_excerpt(doc.get("content", ""), matched_terms, max_chars_per_hit),
+            "excerpt": excerpt,
             "reason": "Matched terms: " + ", ".join(matched_terms[:5]),
             "matched_terms": matched_terms,
             "modified_at": doc.get("modified_at", ""),
@@ -561,9 +747,20 @@ def build_obsidian_hits(scored_docs, max_hits, max_chars_per_hit):
 def build_research_brief(hits):
     if not hits:
         return ""
+
+    def is_glossary_hit(hit):
+        return hit.get("path", "").casefold().endswith("00_overviews/terms-glossary.md")
+
     grouped_hits = {}
     for hit in hits:
+        excerpt = hit.get("excerpt", "")
+        if not excerpt or is_pure_wikilink_block(excerpt):
+            continue
+        first_line = excerpt.splitlines()[0] if excerpt.splitlines() else ""
+        if is_low_signal_heading(first_line):
+            continue
         grouped_hits.setdefault(hit.get("category", ""), []).append(hit)
+
     brief_parts = [
         "[Knowledge usage note] The following context comes from the local Obsidian knowledge base. Use it only for background, concept definitions, historical cases, and analysis frameworks. If it conflicts with the current source material, the current source material wins."
     ]
@@ -572,15 +769,16 @@ def build_research_brief(hits):
         "05_analyses": "[Reusable analysis frameworks]",
         "03_concepts": "[Relevant concept definitions]",
         "01_sources": "[Relevant cases and source summaries]",
-        "02_entities": "[Relevant entities]",
-        "04_topics": "[Relevant topics]",
-        "06_queries": "[Relevant query notes]",
     }
-    for category in OBSIDIAN_CATEGORY_ORDER:
+    for category in ("00_overviews", "05_analyses", "03_concepts", "01_sources"):
         category_hits = grouped_hits.get(category, [])
         if not category_hits:
             continue
-        brief_parts.append(heading_map.get(category, f"[{get_obsidian_category_label(category)}]"))
+        if category == "00_overviews":
+            category_hits = sorted(category_hits, key=lambda hit: (is_glossary_hit(hit), -hit.get("score", 0), hit.get("title", "")))
+        else:
+            category_hits = sorted(category_hits, key=lambda hit: (-hit.get("score", 0), hit.get("title", "")))
+        brief_parts.append(heading_map[category])
         for hit in category_hits[:2]:
             line = f"- {hit.get('title', '')}: {hit.get('excerpt', '')}"
             if hit.get("matched_terms"):
@@ -1539,8 +1737,19 @@ run_obsidian_retrieval()
 def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
     iframe_html = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;'>" + html_content + "</body></html>"
     iframe_src = "data:text/html;base64," + base64.b64encode(iframe_html.encode("utf-8")).decode("ascii")
-    st.iframe(iframe_src, height=height, width=width, scrolling=scrolling)
-
+    iframe_renderer = getattr(components, "iframe", None)
+    if callable(iframe_renderer):
+        try:
+            iframe_renderer(iframe_src, height=height, width=width, scrolling=scrolling)
+            return
+        except Exception:
+            pass
+    html_renderer = getattr(components, "html", None)
+    if callable(html_renderer):
+        try:
+            html_renderer(iframe_html, height=height, width=width, scrolling=scrolling)
+        except Exception:
+            pass
 
 def render_responsive_image(image_payload):
     try:
