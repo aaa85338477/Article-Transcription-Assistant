@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 import re
 import streamlit.components.v1 as components
 import base64
+import hashlib
 from datetime import datetime
 try:
     import pandas as pd
@@ -143,7 +144,11 @@ def save_draft():
         'source_images_all', 'selected_source_image_ids', 'article_versions',
         'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
         'de_ai_prompt_template', 'pending_ai_stage', 'last_completed_ai_stage',
-        'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice'
+        'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice',
+        'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
+        'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
+        'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
+        'obsidian_last_indexed_at', 'obsidian_retrieval_signature'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -253,6 +258,406 @@ def build_modification_system_prompt(global_instruction):
         global_instruction.strip() if isinstance(global_instruction, str) else ""
     ]
     return "\n\n".join([part for part in prompt_parts if part])
+
+OBSIDIAN_CATEGORY_WEIGHTS = {
+    "00_overviews": 60,
+    "05_analyses": 50,
+    "03_concepts": 40,
+    "01_sources": 30,
+    "02_entities": 24,
+    "04_topics": 22,
+    "06_queries": 18,
+}
+
+OBSIDIAN_CATEGORY_LABELS = {
+    "00_overviews": "Overview",
+    "01_sources": "Source",
+    "02_entities": "Entity",
+    "03_concepts": "Concept",
+    "04_topics": "Topic",
+    "05_analyses": "Analysis",
+    "06_queries": "Query",
+}
+
+OBSIDIAN_CATEGORY_ORDER = [
+    "00_overviews",
+    "05_analyses",
+    "03_concepts",
+    "01_sources",
+    "02_entities",
+    "04_topics",
+    "06_queries",
+]
+
+QUERY_STOPWORDS_EN = {
+    "about", "after", "again", "also", "among", "article", "because", "before",
+    "being", "between", "brief", "could", "content", "games", "gaming", "have",
+    "into", "just", "more", "most", "news", "report", "their", "there", "these",
+    "they", "this", "those", "video", "with", "would", "from", "that", "were",
+    "been", "than", "what", "when", "where", "which", "will", "your",
+}
+
+QUERY_STOPWORDS_ZH = {
+    "游戏", "行业", "文章", "素材", "内容", "视频", "信息", "相关", "今天", "本次", "这次",
+    "这篇", "这个", "那个", "我们", "他们", "以及", "因为", "所以", "可以", "如果", "对于",
+    "关于", "通过", "进行", "表示", "认为", "显示", "其中", "已经", "可能",
+}
+
+
+def reset_obsidian_context():
+    st.session_state.obsidian_hits = []
+    st.session_state.obsidian_research_brief = ""
+    st.session_state.obsidian_retrieval_error = ""
+    st.session_state.obsidian_query_terms = []
+    st.session_state.obsidian_wiki_root = ""
+    st.session_state.obsidian_last_indexed_at = ""
+    st.session_state.obsidian_retrieval_signature = ""
+
+
+def resolve_obsidian_wiki_root(vault_path):
+    raw_path = (vault_path or "").strip()
+    if not raw_path:
+        return None, ""
+
+    base_path = Path(os.path.expandvars(raw_path)).expanduser()
+    candidate_paths = [
+        base_path / "LLM Wiki" / "wiki",
+        base_path / "wiki",
+        base_path,
+    ]
+    for candidate in candidate_paths:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        if resolved.name.lower() == "wiki":
+            return str(resolved), ""
+        if (resolved / "00_overviews").exists() or (resolved / "01_sources").exists():
+            return str(resolved), ""
+    return None, "No readable Obsidian wiki directory was found. Provide the vault root, the LLM Wiki folder, or the LLM Wiki/wiki folder."
+
+
+def read_markdown_file(path_obj):
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+        try:
+            with open(path_obj, "r", encoding=encoding) as f:
+                return f.read(), ""
+        except Exception:
+            continue
+    return "", f"Unsupported file encoding: {path_obj.name}"
+
+
+def strip_markdown_frontmatter(text):
+    if not isinstance(text, str):
+        return ""
+    if text.startswith("---"):
+        match = re.match(r"^---\s*\n.*?\n---\s*\n?", text, flags=re.DOTALL)
+        if match:
+            return text[match.end():]
+    return text
+
+
+def parse_obsidian_doc(path_obj, wiki_root):
+    raw_text, read_error = read_markdown_file(path_obj)
+    if read_error:
+        return None, read_error
+
+    clean_text = strip_markdown_frontmatter(raw_text).strip()
+    if not clean_text:
+        return None, ""
+
+    title = path_obj.stem
+    title_match = re.search(r"^\s*#\s+(.+?)\s*$", clean_text, flags=re.MULTILINE)
+    if title_match:
+        title = title_match.group(1).strip()
+
+    relative_path = path_obj.resolve().relative_to(Path(wiki_root).resolve()).as_posix()
+    parts = relative_path.split("/")
+    category = parts[0] if parts else ""
+    wikilinks = re.findall(r"\[\[([^\]]+)\]\]", clean_text)
+    return {
+        "path": str(path_obj.resolve()),
+        "relative_path": relative_path,
+        "title": title,
+        "category": category,
+        "content": clean_text,
+        "wikilinks": wikilinks,
+        "modified_at": datetime.fromtimestamp(path_obj.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+    }, ""
+
+
+def load_obsidian_documents(wiki_root):
+    root_path = Path(wiki_root)
+    documents = []
+    read_errors = []
+    for path_obj in sorted(root_path.rglob("*.md")):
+        if not path_obj.is_file() or "07_attachments" in path_obj.parts:
+            continue
+        doc, read_error = parse_obsidian_doc(path_obj, wiki_root)
+        if read_error:
+            read_errors.append(read_error)
+            continue
+        if doc:
+            documents.append(doc)
+    return documents, read_errors
+
+
+def normalize_query_token(token):
+    cleaned = token.strip().strip("()[]{}<>.,!?;:'\"`")
+    return cleaned.casefold()
+
+
+def extract_query_context(source_content):
+    text = (source_content or "").strip()
+    english_tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}", text)
+    chinese_tokens = re.findall(r"[一-鿿]{2,12}", text)
+    score_map = {}
+    order_map = {}
+    for idx, token in enumerate(english_tokens + chinese_tokens):
+        normalized = normalize_query_token(token)
+        if not normalized:
+            continue
+        if normalized in QUERY_STOPWORDS_EN or normalized in QUERY_STOPWORDS_ZH:
+            continue
+        if len(normalized) <= 1:
+            continue
+        score_map[normalized] = score_map.get(normalized, 0) + 1
+        order_map.setdefault(normalized, idx)
+    ranked_terms = sorted(score_map.items(), key=lambda item: (-item[1], order_map.get(item[0], 0), item[0]))
+    return {"keywords": [term for term, _ in ranked_terms[:24]], "raw_text": text}
+
+
+def load_terms_glossary(documents):
+    glossary_map = {}
+    glossary_doc = None
+    for doc in documents:
+        rel_path = doc.get("relative_path", "").casefold()
+        title = doc.get("title", "").casefold()
+        if rel_path.endswith("00_overviews/terms-glossary.md") or "terms-glossary" in title:
+            glossary_doc = doc
+            break
+    if not glossary_doc:
+        return glossary_map
+
+    for line in glossary_doc.get("content", "").splitlines():
+        cleaned = re.sub(r"[`*_>#\-|]", " ", line).strip()
+        if not cleaned:
+            continue
+        paren_match = re.search(r"(.+?)[\(（]([^\)）]{2,80})[\)）]", cleaned)
+        if paren_match:
+            left = normalize_query_token(paren_match.group(1))
+            right = normalize_query_token(paren_match.group(2))
+            if left and right and left != right:
+                glossary_map.setdefault(left, set()).add(right)
+                glossary_map.setdefault(right, set()).add(left)
+        if ":" in cleaned or "：" in cleaned:
+            left, right = re.split(r"[:：]", cleaned, maxsplit=1)
+            left_token = normalize_query_token(left)
+            right_tokens = [normalize_query_token(part) for part in re.split(r"[,，/、]", right)]
+            if left_token:
+                for token in right_tokens:
+                    if token and token != left_token:
+                        glossary_map.setdefault(left_token, set()).add(token)
+                        glossary_map.setdefault(token, set()).add(left_token)
+    return glossary_map
+
+
+def expand_query_terms(query_terms, glossary_map):
+    expanded_terms = []
+    seen_terms = set()
+    def push_term(term):
+        normalized = normalize_query_token(term)
+        if not normalized or normalized in seen_terms:
+            return
+        seen_terms.add(normalized)
+        expanded_terms.append(normalized)
+    for term in query_terms:
+        push_term(term)
+        for alias in glossary_map.get(normalize_query_token(term), set()):
+            push_term(alias)
+    return expanded_terms
+
+
+def get_obsidian_category_label(category):
+    return OBSIDIAN_CATEGORY_LABELS.get(category, category or "Uncategorized")
+
+
+def extract_best_excerpt(content, matched_terms, max_chars):
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", content or "") if block.strip()] or [(content or "").strip()]
+    chosen_block = ""
+    chosen_score = -1
+    for block in blocks:
+        lowered = block.casefold()
+        block_score = sum(12 for term in matched_terms[:6] if term in lowered) + min(len(block), max_chars) / 100.0
+        if block_score > chosen_score:
+            chosen_score = block_score
+            chosen_block = block
+    chosen_block = chosen_block or (content or "").strip()
+    if len(chosen_block) > max_chars:
+        chosen_block = chosen_block[:max_chars].rstrip() + "..."
+    return chosen_block
+
+
+def score_obsidian_docs(query_context, documents, glossary_map):
+    query_terms = expand_query_terms(query_context.get("keywords", []), glossary_map)
+    scored_docs = []
+    for doc in documents:
+        title_lower = doc.get("title", "").casefold()
+        content_lower = doc.get("content", "").casefold()
+        path_lower = doc.get("relative_path", "").casefold()
+        category = doc.get("category", "")
+        score = OBSIDIAN_CATEGORY_WEIGHTS.get(category, 12)
+        matched_terms = []
+        for term in query_terms:
+            if term in title_lower:
+                score += 12
+                matched_terms.append(term)
+            elif term in path_lower:
+                score += 6
+                matched_terms.append(term)
+            elif term in content_lower:
+                score += 4
+                matched_terms.append(term)
+        rel_path = doc.get("relative_path", "")
+        if rel_path.endswith("00_overviews/mobile-game-trends-2025.md") and matched_terms:
+            score += 8
+        if rel_path.endswith("00_overviews/terms-glossary.md") and matched_terms:
+            score += 4
+        unique_terms = []
+        seen_terms = set()
+        for term in matched_terms:
+            if term in seen_terms:
+                continue
+            seen_terms.add(term)
+            unique_terms.append(term)
+        if not unique_terms:
+            continue
+        scored_docs.append({"doc": doc, "score": score, "matched_terms": unique_terms})
+    scored_docs.sort(key=lambda item: (-item["score"], OBSIDIAN_CATEGORY_ORDER.index(item["doc"].get("category")) if item["doc"].get("category") in OBSIDIAN_CATEGORY_ORDER else 999, item["doc"].get("title", "")))
+    return scored_docs
+
+
+def build_obsidian_hits(scored_docs, max_hits, max_chars_per_hit):
+    hits = []
+    for item in scored_docs[:max_hits]:
+        doc = item["doc"]
+        matched_terms = item.get("matched_terms", [])
+        hits.append({
+            "title": doc.get("title", ""),
+            "path": doc.get("relative_path", ""),
+            "category": doc.get("category", ""),
+            "category_label": get_obsidian_category_label(doc.get("category", "")),
+            "score": item.get("score", 0),
+            "excerpt": extract_best_excerpt(doc.get("content", ""), matched_terms, max_chars_per_hit),
+            "reason": "Matched terms: " + ", ".join(matched_terms[:5]),
+            "matched_terms": matched_terms,
+            "modified_at": doc.get("modified_at", ""),
+        })
+    return hits
+
+
+def build_research_brief(hits):
+    if not hits:
+        return ""
+    grouped_hits = {}
+    for hit in hits:
+        grouped_hits.setdefault(hit.get("category", ""), []).append(hit)
+    brief_parts = [
+        "[Knowledge usage note] The following context comes from the local Obsidian knowledge base. Use it only for background, concept definitions, historical cases, and analysis frameworks. If it conflicts with the current source material, the current source material wins."
+    ]
+    heading_map = {
+        "00_overviews": "[Relevant overviews]",
+        "05_analyses": "[Reusable analysis frameworks]",
+        "03_concepts": "[Relevant concept definitions]",
+        "01_sources": "[Relevant cases and source summaries]",
+        "02_entities": "[Relevant entities]",
+        "04_topics": "[Relevant topics]",
+        "06_queries": "[Relevant query notes]",
+    }
+    for category in OBSIDIAN_CATEGORY_ORDER:
+        category_hits = grouped_hits.get(category, [])
+        if not category_hits:
+            continue
+        brief_parts.append(heading_map.get(category, f"[{get_obsidian_category_label(category)}]"))
+        for hit in category_hits[:2]:
+            line = f"- {hit.get('title', '')}: {hit.get('excerpt', '')}"
+            if hit.get("matched_terms"):
+                line += f" (matched: {', '.join(hit['matched_terms'][:4])})"
+            brief_parts.append(line)
+    brief = "\n".join(brief_parts).strip()
+    return brief[:3200].rstrip() + ("..." if len(brief) > 3200 else "")
+
+
+def build_editor_user_content(source_content, research_brief, use_images=False):
+    lead = "Below is a merged source packet. Use the attached reference images together with the text for deep analysis and synthesis:" if use_images else "Below is a merged source packet. Use the text-only source packet for deep analysis and synthesis:"
+    parts = [f"{lead}\n\n{(source_content or '').strip()}"]
+    if research_brief:
+        parts.append(
+            "Below is a research brief from your local Obsidian knowledge base. It may only be used for background, concept definitions, historical cases, and analysis frameworks. If anything conflicts with the current source packet, the current source packet wins.\n\n" + research_brief.strip()
+        )
+    return "\n\n================\n\n".join(part for part in parts if part.strip())
+
+
+def build_reviewer_user_content(source_content, draft_article, research_brief=""):
+    parts = [
+        f"Below is the merged source text (this is the only factual source for review):\n{(source_content or '').strip()}\n\n================\nBelow is the draft:\n{(draft_article or '').strip()}"
+    ]
+    if research_brief:
+        parts.append(
+            "Below is a knowledge-base research brief. It may only help you judge whether the article aligns with prior analysis frameworks. It must not be used for new fact checking or to override the source packet.\n\n" + research_brief.strip()
+        )
+    return "\n\n".join(parts)
+
+
+def build_chat_knowledge_context():
+    research_brief = (st.session_state.get("obsidian_research_brief", "") or "").strip()
+    hits = st.session_state.get("obsidian_hits", []) or []
+    if not research_brief and not hits:
+        return ""
+    parts = []
+    if research_brief:
+        parts.append(f"[Background knowledge brief]\n{research_brief}")
+    if hits:
+        hit_lines = [f"- {hit.get('title', '')} | {hit.get('category_label', '')} | {hit.get('path', '')}" for hit in hits[:8]]
+        parts.append("[Matched knowledge notes]\n" + "\n".join(hit_lines))
+    return "\n\n".join(parts)
+
+
+def run_obsidian_retrieval(force=False):
+    if not st.session_state.get("obsidian_enabled"):
+        reset_obsidian_context()
+        return
+    source_content = (st.session_state.get("source_content", "") or "").strip()
+    if not source_content:
+        reset_obsidian_context()
+        return
+    wiki_root, resolve_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
+    if resolve_error:
+        reset_obsidian_context()
+        st.session_state.obsidian_retrieval_error = resolve_error
+        save_draft()
+        return
+    max_hits = int(st.session_state.get("obsidian_max_hits", 6) or 6)
+    signature_base = f"{wiki_root}|{max_hits}|{hashlib.sha1(source_content.encode('utf-8')).hexdigest()}"
+    signature = hashlib.sha1(signature_base.encode("utf-8")).hexdigest()
+    has_cached_result = bool(st.session_state.get("obsidian_hits") or st.session_state.get("obsidian_research_brief") or st.session_state.get("obsidian_retrieval_error"))
+    if not force and has_cached_result and st.session_state.get("obsidian_retrieval_signature") == signature:
+        return
+    documents, read_errors = load_obsidian_documents(wiki_root)
+    query_context = extract_query_context(source_content)
+    glossary_map = load_terms_glossary(documents)
+    scored_docs = score_obsidian_docs(query_context, documents, glossary_map)
+    hits = build_obsidian_hits(scored_docs, max_hits=max_hits, max_chars_per_hit=280)
+    st.session_state.obsidian_hits = hits
+    st.session_state.obsidian_research_brief = build_research_brief(hits)
+    st.session_state.obsidian_query_terms = query_context.get("keywords", [])[:12]
+    st.session_state.obsidian_wiki_root = wiki_root
+    st.session_state.obsidian_last_indexed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.obsidian_retrieval_signature = signature
+    st.session_state.obsidian_retrieval_error = "Some notes could not be read, but retrieval still completed." if read_errors else ""
+    save_draft()
 
 DE_AI_MODELS = ["deepseek-v3-1-terminus", "deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
 ROLE_AUDIENCE_MAP = {
@@ -917,6 +1322,28 @@ def init_state():
         st.session_state.last_ai_error = ""
     if 'recovered_ai_notice' not in st.session_state:
         st.session_state.recovered_ai_notice = ""
+    if 'obsidian_enabled' not in st.session_state:
+        st.session_state.obsidian_enabled = False
+    if 'obsidian_vault_path' not in st.session_state:
+        st.session_state.obsidian_vault_path = ""
+    if 'obsidian_max_hits' not in st.session_state:
+        st.session_state.obsidian_max_hits = 6
+    if 'obsidian_show_hits' not in st.session_state:
+        st.session_state.obsidian_show_hits = True
+    if 'obsidian_hits' not in st.session_state:
+        st.session_state.obsidian_hits = []
+    if 'obsidian_research_brief' not in st.session_state:
+        st.session_state.obsidian_research_brief = ""
+    if 'obsidian_retrieval_error' not in st.session_state:
+        st.session_state.obsidian_retrieval_error = ""
+    if 'obsidian_query_terms' not in st.session_state:
+        st.session_state.obsidian_query_terms = []
+    if 'obsidian_wiki_root' not in st.session_state:
+        st.session_state.obsidian_wiki_root = ""
+    if 'obsidian_last_indexed_at' not in st.session_state:
+        st.session_state.obsidian_last_indexed_at = ""
+    if 'obsidian_retrieval_signature' not in st.session_state:
+        st.session_state.obsidian_retrieval_signature = ""
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -1106,6 +1533,7 @@ def bootstrap_article_versions():
 
 bootstrap_article_versions()
 recover_ai_progress_if_needed()
+run_obsidian_retrieval()
 
 
 def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
@@ -1660,7 +2088,20 @@ with st.sidebar:
         index=2, 
         disabled=not enable_script 
     )
-    
+
+    st.markdown("---")
+    st.header("Obsidian Knowledge")
+    st.toggle("Enable local knowledge boost", key="obsidian_enabled", on_change=save_draft)
+    st.text_input("Vault or wiki path", key="obsidian_vault_path", placeholder=r"D:\\Obsidian Vault", on_change=save_draft)
+    st.slider("Knowledge hits", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
+    st.toggle("Show hit details", key="obsidian_show_hits", on_change=save_draft)
+    wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
+    if st.session_state.get("obsidian_enabled"):
+        if wiki_root_preview:
+            st.caption(f"Detected wiki root: {wiki_root_preview}")
+        elif wiki_root_error:
+            st.caption(wiki_root_error)
+
     st.markdown("---")
     st.header("🗂️ 提示词管理中心")
     with st.expander("📝 角色与全局人设配置", expanded=False):
