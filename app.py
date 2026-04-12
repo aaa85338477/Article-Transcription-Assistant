@@ -148,7 +148,8 @@ def save_draft():
         'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
         'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
         'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
-        'obsidian_last_indexed_at', 'obsidian_retrieval_signature'
+        'obsidian_last_indexed_at', 'obsidian_retrieval_signature',
+        'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -270,13 +271,13 @@ OBSIDIAN_CATEGORY_WEIGHTS = {
 }
 
 OBSIDIAN_CATEGORY_LABELS = {
-    "00_overviews": "Overview",
-    "01_sources": "Source",
-    "02_entities": "Entity",
-    "03_concepts": "Concept",
-    "04_topics": "Topic",
-    "05_analyses": "Analysis",
-    "06_queries": "Query",
+    "00_overviews": "综述",
+    "01_sources": "来源",
+    "02_entities": "实体",
+    "03_concepts": "概念",
+    "04_topics": "主题",
+    "05_analyses": "分析",
+    "06_queries": "查询",
 }
 
 OBSIDIAN_CATEGORY_ORDER = [
@@ -334,6 +335,9 @@ def reset_obsidian_context():
     st.session_state.obsidian_wiki_root = ""
     st.session_state.obsidian_last_indexed_at = ""
     st.session_state.obsidian_retrieval_signature = ""
+    st.session_state.obsidian_influence_map = []
+    st.session_state.obsidian_influence_summary = ""
+    st.session_state.obsidian_influence_signature = ""
 
 
 def resolve_obsidian_wiki_root(vault_path):
@@ -358,8 +362,7 @@ def resolve_obsidian_wiki_root(vault_path):
             return str(resolved), ""
         if (resolved / "00_overviews").exists() or (resolved / "01_sources").exists():
             return str(resolved), ""
-    return None, "No readable Obsidian wiki directory was found. Provide the vault root, the LLM Wiki folder, or the LLM Wiki/wiki folder."
-
+    return None, "??????? Obsidian wiki ???????????LLM Wiki ???? LLM Wiki/wiki ???"
 
 def read_markdown_file(path_obj):
     for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
@@ -556,8 +559,7 @@ def expand_query_terms(query_terms, glossary_map):
 
 
 def get_obsidian_category_label(category):
-    return OBSIDIAN_CATEGORY_LABELS.get(category, category or "Uncategorized")
-
+    return OBSIDIAN_CATEGORY_LABELS.get(category, category or "未分类")
 
 def count_wikilinks(text):
     return len(re.findall(r"\[\[[^\]]+\]\]", text or ""))
@@ -737,7 +739,7 @@ def build_obsidian_hits(scored_docs, max_hits, max_chars_per_hit):
             "category_label": get_obsidian_category_label(doc.get("category", "")),
             "score": item.get("score", 0),
             "excerpt": excerpt,
-            "reason": "Matched terms: " + ", ".join(matched_terms[:5]),
+            "reason": "命中词：" + "、".join(matched_terms[:5]),
             "matched_terms": matched_terms,
             "modified_at": doc.get("modified_at", ""),
         })
@@ -762,13 +764,13 @@ def build_research_brief(hits):
         grouped_hits.setdefault(hit.get("category", ""), []).append(hit)
 
     brief_parts = [
-        "[Knowledge usage note] The following context comes from the local Obsidian knowledge base. Use it only for background, concept definitions, historical cases, and analysis frameworks. If it conflicts with the current source material, the current source material wins."
+        "[知识使用说明] 以下内容来自本地 Obsidian 知识库，仅可用于背景补充、概念定义、历史案例与分析框架。如果与当前素材包冲突，以当前素材包为准。"
     ]
     heading_map = {
-        "00_overviews": "[Relevant overviews]",
-        "05_analyses": "[Reusable analysis frameworks]",
-        "03_concepts": "[Relevant concept definitions]",
-        "01_sources": "[Relevant cases and source summaries]",
+        "00_overviews": "[相关综述]",
+        "05_analyses": "[可复用分析框架]",
+        "03_concepts": "[相关概念定义]",
+        "01_sources": "[相关案例与来源摘要]",
     }
     for category in ("00_overviews", "05_analyses", "03_concepts", "01_sources"):
         category_hits = grouped_hits.get(category, [])
@@ -780,9 +782,9 @@ def build_research_brief(hits):
             category_hits = sorted(category_hits, key=lambda hit: (-hit.get("score", 0), hit.get("title", "")))
         brief_parts.append(heading_map[category])
         for hit in category_hits[:2]:
-            line = f"- {hit.get('title', '')}: {hit.get('excerpt', '')}"
+            line = f"- {hit.get('title', '')}：{hit.get('excerpt', '')}"
             if hit.get("matched_terms"):
-                line += f" (matched: {', '.join(hit['matched_terms'][:4])})"
+                line += f"（命中词：{'、'.join(hit['matched_terms'][:4])}）"
             brief_parts.append(line)
     brief = "\n".join(brief_parts).strip()
     return brief[:3200].rstrip() + ("..." if len(brief) > 3200 else "")
@@ -809,6 +811,7 @@ def build_reviewer_user_content(source_content, draft_article, research_brief=""
     return "\n\n".join(parts)
 
 
+
 def build_chat_knowledge_context():
     research_brief = (st.session_state.get("obsidian_research_brief", "") or "").strip()
     hits = st.session_state.get("obsidian_hits", []) or []
@@ -816,11 +819,153 @@ def build_chat_knowledge_context():
         return ""
     parts = []
     if research_brief:
-        parts.append(f"[Background knowledge brief]\n{research_brief}")
+        parts.append(f"[Obsidian 研究摘要]\n{research_brief}")
     if hits:
         hit_lines = [f"- {hit.get('title', '')} | {hit.get('category_label', '')} | {hit.get('path', '')}" for hit in hits[:8]]
-        parts.append("[Matched knowledge notes]\n" + "\n".join(hit_lines))
+        parts.append("[命中笔记清单]\n" + "\n".join(hit_lines))
     return "\n\n".join(parts)
+
+
+    return "\n\n".join(parts)
+
+
+def split_article_paragraphs(text):
+    return [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
+
+
+def extract_obsidian_signal_terms(text):
+    terms = []
+    seen = set()
+    english_tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}", text or "")
+    chinese_tokens = re.findall("[\u4E00-\u9FFF]{2,12}", text or "")
+    for token in english_tokens:
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_EN:
+            continue
+        if len(normalized) < 4 and normalized not in ENGLISH_SIGNAL_HINTS:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+    for token in chinese_tokens:
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_ZH:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+    return terms[:24]
+
+
+def score_paragraph_against_obsidian_hit(paragraph, hit):
+    paragraph_terms = set(extract_obsidian_signal_terms(paragraph))
+    if not paragraph_terms:
+        return 0, []
+
+    candidate_terms = []
+    for term in hit.get("matched_terms", [])[:8]:
+        normalized = normalize_query_token(term)
+        if normalized:
+            candidate_terms.append(normalized)
+    candidate_terms.extend(extract_obsidian_signal_terms(hit.get("title", ""))[:6])
+    candidate_terms.extend(extract_obsidian_signal_terms(hit.get("excerpt", ""))[:10])
+
+    deduped_terms = []
+    seen = set()
+    for term in candidate_terms:
+        if term and term not in seen:
+            seen.add(term)
+            deduped_terms.append(term)
+
+    matched_terms = [term for term in deduped_terms if term in paragraph_terms]
+    score = len(matched_terms) * 3
+    if hit.get("title") and any(term in paragraph_terms for term in extract_obsidian_signal_terms(hit.get("title", ""))[:4]):
+        score += 2
+    if any(term in paragraph.casefold() for term in hit.get("matched_terms", [])[:4]):
+        score += 2
+    return score, matched_terms[:6]
+
+
+def build_obsidian_influence_map(final_article, hits):
+    paragraphs = split_article_paragraphs(final_article)
+    influence_items = []
+    for idx, paragraph in enumerate(paragraphs, start=1):
+        scored_hits = []
+        for hit in hits or []:
+            score, matched_terms = score_paragraph_against_obsidian_hit(paragraph, hit)
+            if score < 5:
+                continue
+            scored_hits.append({
+                "title": hit.get("title", ""),
+                "score": score,
+                "matched_terms": matched_terms,
+            })
+        if not scored_hits:
+            continue
+        scored_hits.sort(key=lambda item: (-item["score"], item["title"]))
+        top_hits = scored_hits[:3]
+        top_score = top_hits[0]["score"]
+        preview = paragraph if len(paragraph) <= 120 else paragraph[:120].rstrip() + "..."
+        merged_terms = []
+        seen_terms = set()
+        for item in top_hits:
+            for term in item.get("matched_terms", []):
+                if term not in seen_terms:
+                    seen_terms.add(term)
+                    merged_terms.append(term)
+        influence_items.append({
+            "paragraph_index": idx,
+            "paragraph_preview": preview,
+            "influence_level": "高" if top_score >= 10 else "中",
+            "score": top_score,
+            "note_titles": [item.get("title", "") for item in top_hits if item.get("title")],
+            "matched_terms": merged_terms[:6],
+        })
+    return influence_items
+
+
+def refresh_obsidian_influence_map(force=False):
+    final_article = (st.session_state.get("final_article", "") or "").strip()
+    hits = st.session_state.get("obsidian_hits", []) or []
+    if not st.session_state.get("obsidian_enabled") or not final_article or not hits:
+        st.session_state.obsidian_influence_map = []
+        st.session_state.obsidian_influence_summary = ""
+        st.session_state.obsidian_influence_signature = ""
+        return
+    signature_base = final_article + "\n" + json.dumps(
+        [{"title": hit.get("title", ""), "excerpt": hit.get("excerpt", ""), "matched_terms": hit.get("matched_terms", [])} for hit in hits],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    signature = hashlib.sha1(signature_base.encode("utf-8")).hexdigest()
+    if not force and st.session_state.get("obsidian_influence_signature") == signature:
+        return
+    influence_map = build_obsidian_influence_map(final_article, hits)
+    st.session_state.obsidian_influence_map = influence_map
+    st.session_state.obsidian_influence_summary = (
+        f"共发现 {len(influence_map)} 个段落明显受到 Obsidian 补充内容影响。"
+        if influence_map else
+        "当前定稿中暂无达到阈值的 Obsidian 影响段落。"
+    )
+    st.session_state.obsidian_influence_signature = signature
+
+
+def render_obsidian_influence_panel(influence_map, summary):
+    render_section_intro("Obsidian 影响地图", "按段落查看当前定稿中哪些内容明显受本地知识库补充影响。", "影响")
+    if summary:
+        st.caption(summary)
+    if not influence_map:
+        st.info("当前定稿里暂无达到阈值的 Obsidian 影响段落。")
+        return
+    for item in influence_map:
+        note_titles = item.get("note_titles", [])
+        label = f"第 {item.get('paragraph_index', 0)} 段 · {item.get('influence_level', '中')}影响"
+        with st.expander(label, expanded=(item.get("paragraph_index", 0) <= 2)):
+            if note_titles:
+                st.caption("相关笔记：" + " / ".join(note_titles[:3]))
+            if item.get("matched_terms"):
+                st.caption("命中关键词：" + "、".join(item.get("matched_terms", [])[:6]))
+            st.code(item.get("paragraph_preview", ""), language="markdown")
 
 
 def run_obsidian_retrieval(force=False):
@@ -854,7 +999,8 @@ def run_obsidian_retrieval(force=False):
     st.session_state.obsidian_wiki_root = wiki_root
     st.session_state.obsidian_last_indexed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.obsidian_retrieval_signature = signature
-    st.session_state.obsidian_retrieval_error = "Some notes could not be read, but retrieval still completed." if read_errors else ""
+    st.session_state.obsidian_retrieval_error = "部分 Obsidian 笔记读取失败，已跳过异常文件。" if read_errors else ""
+    refresh_obsidian_influence_map(force=True)
     save_draft()
 
 DE_AI_MODELS = ["deepseek-v3-1-terminus", "deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
@@ -1523,7 +1669,9 @@ def init_state():
     if 'obsidian_enabled' not in st.session_state:
         st.session_state.obsidian_enabled = False
     if 'obsidian_vault_path' not in st.session_state:
-        st.session_state.obsidian_vault_path = ""
+        st.session_state.obsidian_vault_path = "E:\\Obsidian\\originvault\\1\u53f7\u4ed3\u5e93\\LLM Wiki\\wiki"
+    if st.session_state.get("obsidian_vault_path") == r"E:\Obsidian\originvault\1???\LLM Wiki\wiki":
+        st.session_state.obsidian_vault_path = "E:\\Obsidian\\originvault\\1\u53f7\u4ed3\u5e93\\LLM Wiki\\wiki"
     if 'obsidian_max_hits' not in st.session_state:
         st.session_state.obsidian_max_hits = 6
     if 'obsidian_show_hits' not in st.session_state:
@@ -1542,6 +1690,12 @@ def init_state():
         st.session_state.obsidian_last_indexed_at = ""
     if 'obsidian_retrieval_signature' not in st.session_state:
         st.session_state.obsidian_retrieval_signature = ""
+    if 'obsidian_influence_map' not in st.session_state:
+        st.session_state.obsidian_influence_map = []
+    if 'obsidian_influence_summary' not in st.session_state:
+        st.session_state.obsidian_influence_summary = ""
+    if 'obsidian_influence_signature' not in st.session_state:
+        st.session_state.obsidian_influence_signature = ""
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -2298,16 +2452,17 @@ with st.sidebar:
         disabled=not enable_script 
     )
 
+
     st.markdown("---")
-    st.header("Obsidian Knowledge")
-    st.toggle("Enable local knowledge boost", key="obsidian_enabled", on_change=save_draft)
-    st.text_input("Vault or wiki path", key="obsidian_vault_path", placeholder=r"D:\\Obsidian Vault", on_change=save_draft)
-    st.slider("Knowledge hits", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
-    st.toggle("Show hit details", key="obsidian_show_hits", on_change=save_draft)
+    st.header("Obsidian 知识库")
+    st.toggle("启用本地知识增强", key="obsidian_enabled", on_change=save_draft)
+    st.text_input("知识库路径 / wiki 路径", key="obsidian_vault_path", placeholder=r"D:\Obsidian Vault", on_change=save_draft)
+    st.slider("知识命中数", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
+    st.toggle("显示命中详情", key="obsidian_show_hits", on_change=save_draft)
     wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
     if st.session_state.get("obsidian_enabled"):
         if wiki_root_preview:
-            st.caption(f"Detected wiki root: {wiki_root_preview}")
+            st.caption(f"检测到 wiki 根目录：{wiki_root_preview}")
         elif wiki_root_error:
             st.caption(wiki_root_error)
 
@@ -2544,10 +2699,11 @@ if st.session_state.current_step == 1:
             preview_text = st.session_state.source_content[:1800] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1800 else st.session_state.source_content
             st.code(preview_text, language="markdown")
 
+
         if st.session_state.get("obsidian_enabled"):
             with st.container(border=True):
-                render_section_intro("Obsidian Research Brief", "Review matched notes and the generated brief before you choose a writing mode.", "Knowledge")
-                if st.button("Refresh Obsidian retrieval", key="refresh_obsidian_hits", use_container_width=True):
+                render_section_intro("Obsidian 检索简报", "在选择写作模式前，先检查本地知识库命中与自动生成的研究摘要。", "知识库")
+                if st.button("刷新 Obsidian 检索", key="refresh_obsidian_hits", use_container_width=True):
                     run_obsidian_retrieval(force=True)
                     st.rerun()
 
@@ -2557,14 +2713,14 @@ if st.session_state.current_step == 1:
 
                 wiki_root_display = st.session_state.get("obsidian_wiki_root", "")
                 if wiki_root_display:
-                    st.caption(f"Wiki root: {wiki_root_display}")
+                    st.caption(f"Wiki 根目录：{wiki_root_display}")
                 indexed_at = st.session_state.get("obsidian_last_indexed_at", "")
                 if indexed_at:
-                    st.caption(f"Last indexed: {indexed_at}")
+                    st.caption(f"上次索引时间：{indexed_at}")
 
                 query_terms = st.session_state.get("obsidian_query_terms", []) or []
                 if query_terms:
-                    st.caption("Query terms: " + ", ".join(query_terms))
+                    st.caption("检索词：" + "、".join(query_terms))
 
                 obsidian_hits = st.session_state.get("obsidian_hits", []) or []
                 if obsidian_hits and st.session_state.get("obsidian_show_hits", True):
@@ -2574,10 +2730,10 @@ if st.session_state.current_step == 1:
                             st.markdown(hit.get("reason", ""))
                             st.code(hit.get("excerpt", ""), language="markdown")
                 elif st.session_state.get("obsidian_enabled") and not retrieval_error:
-                    st.info("No relevant Obsidian notes were matched for this source batch. The workflow will continue with source-only writing.")
+                    st.info("当前这批素材没有匹配到相关 Obsidian 笔记，后续将按纯素材写作继续。")
 
                 if st.session_state.get("obsidian_research_brief"):
-                    st.markdown("#### Research brief preview")
+                    st.markdown("#### 研究摘要预览")
                     st.code(st.session_state.obsidian_research_brief, language="markdown")
 
         with st.container(border=True):
@@ -2961,13 +3117,13 @@ elif st.session_state.current_step == 5:
                 go_to_step(6)
                 st.rerun()
 # --- Step 6：终极版分栏 UI ---
+
 elif st.session_state.current_step == 6:
+    refresh_obsidian_influence_map()
     render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
     render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
-    
-    st.markdown("<p class='toolbar-note'>主稿、分镜脚本、搜图和分发操作统一留在左侧主工作区；右侧专门用于精修、追问和追溯原文依据。</p>", unsafe_allow_html=True)
-    left_col, right_col = st.columns([1.45, 0.95])
-    
+    st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
+    left_col, right_col = st.columns([1.45, 0.98])
     with left_col:
         st.markdown("### 稿件版本时间线")
         versions = st.session_state.get("article_versions", [])
@@ -2996,14 +3152,15 @@ elif st.session_state.current_step == 6:
 
             if selected_version:
                 st.caption(f"当前阶段：{selected_version.get('stage', '未命名')}｜角色：{selected_version.get('role', '未记录')}｜模型：{selected_version.get('model', '未记录')}")
+
                 if st.button("将此版本设为当前定稿", key="use_selected_version_as_final", use_container_width=True):
                     st.session_state.final_article = selected_version.get("content", "")
                     st.session_state.highlighted_article = ""
                     st.session_state.active_article_version_id = selected_version_id
+                    refresh_obsidian_influence_map(force=True)
                     save_draft()
                     notify_step_completed()
                     st.success(f"已切换到版本 {selected_version_id}")
-
                 with st.expander("查看选中版本全文", expanded=False):
                     st.code(selected_version.get("content", ""), language="markdown")
                     render_editor_friendly_copy_button(selected_version.get("content", ""), f"version_{selected_version_id}")
@@ -3101,67 +3258,59 @@ elif st.session_state.current_step == 6:
                     del st.session_state[key]
                 st.rerun()
 
+
+    
     with right_col:
+        should_show_obsidian_influence = bool(
+            st.session_state.get("obsidian_enabled")
+            and (st.session_state.get("final_article", "") or "").strip()
+            and (st.session_state.get("obsidian_hits", []) or [])
+        )
+    
+        if should_show_obsidian_influence:
+            with st.container(border=True):
+                render_obsidian_influence_panel(
+                    st.session_state.get("obsidian_influence_map", []),
+                    st.session_state.get("obsidian_influence_summary", ""),
+                )
+    
         with st.container(border=True):
-            render_section_intro("精修侧栏", "在这里追问出处、重写局部段落，或把主稿改成更适合公众号和视频的表达。", "Assistant")
-            st.markdown("<p class='toolbar-note'>常用操作：追问某句结论的原文出处、要求重写某段、补一版更适合导语的开场、把段落改成更适合视频口播的语气。</p>", unsafe_allow_html=True)
-            quick_col1, quick_col2 = st.columns(2)
-            with quick_col1:
-                st.markdown("- 重写一段为更克制的媒体口吻")
-                st.markdown("- 追问文中某个数据的素材出处")
-            with quick_col2:
-                st.markdown("- 补一版更抓人的导语")
-                st.markdown("- 改写为更适合口播的表达")
-
-        with st.container(border=True):
-            render_section_intro("快捷动作", "先给使用者几个明确的提问方向，降低上手成本。", "Shortcuts")
-            shortcut_col1, shortcut_col2 = st.columns(2)
-            with shortcut_col1:
-                st.caption("适合改文")
-                st.markdown("- 帮我把导语写得更抓人")
-                st.markdown("- 把第三段改成更像媒体报道")
-            with shortcut_col2:
-                st.caption("适合追溯")
-                st.markdown("- 这句结论在原文哪一段")
-                st.markdown("- 这个数据的素材出处是什么")
-
-        with st.container(border=True):
-            render_section_intro("对话区", "所有精修历史都保存在这里，方便反复迭代。", "Chat")
-            chat_container = st.container(height=500)
-
+            render_section_intro("精修对话区", "保留消息历史与输入框，用于继续追问出处或改写段落。", "对话")
+            chat_container = st.container(height=360)
+    
             with chat_container:
                 for msg in st.session_state.chat_history:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
-
-            if user_query := st.chat_input("输入你的修改指令或疑问（回车发送）..."):
+    
+            if user_query := st.chat_input("输入修改指令、追问出处或改写要求，回车发送..."):
                 st.session_state.chat_history.append({"role": "user", "content": user_query})
                 with chat_container:
                     with st.chat_message("user"):
                         st.markdown(user_query)
-
+    
                     with st.chat_message("assistant"):
-                        with st.spinner("思考与检索中..."):
+                        with st.spinner("思考中..."):
                             knowledge_context = build_chat_knowledge_context()
                             chat_sys_prompt = f"""You are an expert article refinement and source-tracing assistant.
-
+    
                             [Reference source library - the only factual source for tracing]
                             {st.session_state.source_content}
-
+    
                             [Current final article]
                             {st.session_state.final_article}
-
+    
                             [Background knowledge library]
                             {knowledge_context}
-
+    
                             [Tasks]
                             1. If the user asks for sourcing, only use the reference source library to locate the original passage. Do not treat the knowledge library as a news-fact source.
                             2. If the user asks for a rewrite, output the replacement paragraph directly with no extra chatter.
                             3. If the user asks for derived analysis, combine the article and the background knowledge carefully. Mention the note title first when you rely on the knowledge library.
                             """
-
+    
                             history_to_send = st.session_state.chat_history[:-1]
-
+    
                             ai_response = call_llm(
                                 api_key=api_key,
                                 base_url=current_base_url,
@@ -3171,10 +3320,11 @@ elif st.session_state.current_step == 6:
                                 history=history_to_send
                             )
                             st.markdown(ai_response)
-
+    
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
