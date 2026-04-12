@@ -2933,18 +2933,22 @@ elif st.session_state.current_step == 6:
 
                     with st.chat_message("assistant"):
                         with st.spinner("思考与检索中..."):
-                            chat_sys_prompt = f"""你是一个极其专业的文章精修与溯源助手。
+                            knowledge_context = build_chat_knowledge_context()
+                            chat_sys_prompt = f"""You are an expert article refinement and source-tracing assistant.
 
-                            【你的参考资料库（唯一的真相来源）】：
+                            [Reference source library - the only factual source for tracing]
                             {st.session_state.source_content}
 
-                            【当前正在精修的定稿文章】：
+                            [Current final article]
                             {st.session_state.final_article}
 
-                            【你的任务】：
-                            1. 如果用户要求溯源，请精准定位到【参考资料库】中的原文片段，并客观回答。
-                            2. 如果用户要求重写某一段落，请直接输出修改后能够无缝替换回去的完美段落，不要说废话。
-                            3. 如果用户基于文章进行衍生提问，请结合上述资料给出专业见解。
+                            [Background knowledge library]
+                            {knowledge_context}
+
+                            [Tasks]
+                            1. If the user asks for sourcing, only use the reference source library to locate the original passage. Do not treat the knowledge library as a news-fact source.
+                            2. If the user asks for a rewrite, output the replacement paragraph directly with no extra chatter.
+                            3. If the user asks for derived analysis, combine the article and the background knowledge carefully. Mention the note title first when you rely on the knowledge library.
                             """
 
                             history_to_send = st.session_state.chat_history[:-1]
