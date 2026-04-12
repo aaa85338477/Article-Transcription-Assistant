@@ -2413,7 +2413,11 @@ if st.session_state.current_step == 1:
                         global_instruction = prompts_data.get("global_instruction", "")
                         final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
 
-                        draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
+                        draft_content = build_editor_user_content(
+                            st.session_state.source_content,
+                            st.session_state.get("obsidian_research_brief", ""),
+                            use_images=bool(st.session_state.source_images)
+                        )
                         st.session_state.draft_article = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
@@ -2426,7 +2430,11 @@ if st.session_state.current_step == 1:
                         anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
                         final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
 
-                        combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                        combined_content = build_reviewer_user_content(
+                            st.session_state.source_content,
+                            st.session_state.draft_article,
+                            st.session_state.get("obsidian_research_brief", "")
+                        )
                         st.session_state.review_feedback = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
@@ -2511,12 +2519,12 @@ elif st.session_state.current_step == 2:
             with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
-                
-                if st.session_state.source_images:
-                    editor_user_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
-                else:
-                    editor_user_content = f"以下是多个来源的素材聚合内容，请根据纯文本进行深度分析与融合：\n\n{st.session_state.source_content}"
-                
+                editor_user_content = build_editor_user_content(
+                    st.session_state.source_content,
+                    st.session_state.get("obsidian_research_brief", ""),
+                    use_images=bool(st.session_state.source_images)
+                )
+
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
                     base_url=current_base_url,
@@ -2567,11 +2575,19 @@ elif st.session_state.current_step == 3:
                 if st.session_state.source_images:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！绝对不允许使用自身知识库进行事实核对。"""
-                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    combined_content = build_reviewer_user_content(
+                        st.session_state.source_content,
+                        st.session_state.draft_article,
+                        st.session_state.get("obsidian_research_brief", "")
+                    )
                 else:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"""
-                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    combined_content = build_reviewer_user_content(
+                        st.session_state.source_content,
+                        st.session_state.draft_article,
+                        st.session_state.get("obsidian_research_brief", "")
+                    )
                 
                 final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
                 
