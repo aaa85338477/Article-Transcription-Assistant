@@ -8,12 +8,14 @@ import os
 import html as html_lib
 from docx import Document
 from openai import OpenAI
+import httpx
 import requests
 import json
 from bs4 import BeautifulSoup
 import re
 import streamlit.components.v1 as components
 import base64
+import hashlib
 from datetime import datetime
 try:
     import pandas as pd
@@ -37,6 +39,7 @@ PROMPTS_PATH_CANDIDATES = [
 
 PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
 DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
+AI_DIAGNOSTIC_LOG = os.path.join(APP_DIR, "ai_diagnostics.log")
 PROMPTS_LOAD_REPORT = ""
 
 
@@ -80,6 +83,46 @@ def get_prompt_file_candidates():
             seen.add(normalized)
             unique_candidates.append(normalized)
     return unique_candidates
+
+
+def build_exception_chain(exc):
+    chain = []
+    current = exc
+    seen = set()
+    while current and id(current) not in seen:
+        seen.add(id(current))
+        label = type(current).__name__
+        message = str(current).strip()
+        chain.append(f"{label}: {message}" if message else label)
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return chain
+
+
+def format_llm_exception(exc):
+    chain = build_exception_chain(exc)
+    if not chain:
+        return "Unknown error."
+    if len(chain) == 1:
+        return chain[0]
+    return " -> ".join(chain)
+
+
+def write_ai_diagnostic_log(stage_name, base_url, model_name, error_message, user_content, image_count=0, history_count=0):
+    payload = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "stage": stage_name or "",
+        "base_url": base_url or "",
+        "model": model_name or "",
+        "error": error_message,
+        "image_count": image_count,
+        "history_count": history_count,
+        "user_content_chars": len(user_content or ""),
+    }
+    try:
+        with open(AI_DIAGNOSTIC_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
@@ -142,7 +185,13 @@ def save_draft():
         'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
         'source_images_all', 'selected_source_image_ids', 'article_versions',
         'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
-        'de_ai_prompt_template'
+        'de_ai_prompt_template', 'pending_ai_stage', 'last_completed_ai_stage',
+        'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice',
+        'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
+        'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
+        'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
+        'obsidian_last_indexed_at', 'obsidian_retrieval_signature',
+        'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -253,7 +302,816 @@ def build_modification_system_prompt(global_instruction):
     ]
     return "\n\n".join([part for part in prompt_parts if part])
 
-DE_AI_MODELS = ["deepseek-v3-1-terminus", "deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
+OBSIDIAN_CATEGORY_WEIGHTS = {
+    "00_overviews": 60,
+    "05_analyses": 50,
+    "03_concepts": 40,
+    "01_sources": 30,
+    "02_entities": 24,
+    "04_topics": 22,
+    "06_queries": 18,
+}
+
+OBSIDIAN_CATEGORY_LABELS = {
+    "00_overviews": "综述",
+    "01_sources": "来源",
+    "02_entities": "实体",
+    "03_concepts": "概念",
+    "04_topics": "主题",
+    "05_analyses": "分析",
+    "06_queries": "查询",
+}
+
+OBSIDIAN_CATEGORY_ORDER = [
+    "00_overviews",
+    "05_analyses",
+    "03_concepts",
+    "01_sources",
+    "02_entities",
+    "04_topics",
+    "06_queries",
+]
+
+QUERY_STOPWORDS_EN = {
+    "about", "after", "again", "also", "among", "an", "and", "any", "are", "article",
+    "because", "before", "being", "between", "block", "brief", "can", "could", "content",
+    "does", "for", "from", "game", "games", "gaming", "have", "how", "into", "its",
+    "just", "more", "most", "news", "over", "report", "said", "same", "sort", "than",
+    "that", "the", "their", "there", "these", "they", "this", "those", "through", "under",
+    "using", "video", "were", "what", "when", "where", "which", "while", "will", "with",
+    "would", "your", "you",
+}
+
+QUERY_STOPWORDS_ZH = {
+    "\u6e38\u620f", "\u884c\u4e1a", "\u6587\u7ae0", "\u7d20\u6750", "\u5185\u5bb9", "\u89c6\u9891", "\u4fe1\u606f", "\u76f8\u5173", "\u4eca\u5929", "\u672c\u6b21", "\u8fd9\u6b21",
+    "\u8fd9\u7bc7", "\u8fd9\u4e2a", "\u90a3\u4e2a", "\u6211\u4eec", "\u4ed6\u4eec", "\u4ee5\u53ca", "\u56e0\u4e3a", "\u6240\u4ee5", "\u53ef\u4ee5", "\u5982\u679c", "\u5bf9\u4e8e",
+    "\u5173\u4e8e", "\u901a\u8fc7", "\u8fdb\u884c", "\u8868\u793a", "\u8ba4\u4e3a", "\u663e\u793a", "\u5176\u4e2d", "\u5df2\u7ecf", "\u53ef\u80fd",
+}
+
+ENGLISH_SIGNAL_HINTS = {
+    "abtest", "arpdau", "battlepass", "battle-pass", "casual", "cpi", "cpp", "creative",
+    "event", "fail", "gacha", "hybridcasual", "hybrid-casual", "iap", "idle", "liveops",
+    "ltv", "market", "match3", "merge", "meta", "midcore", "monetization", "puzzle",
+    "retention", "revenue", "revive", "roi", "rpg", "season", "shop", "slg", "subgenre",
+    "ua", "webshop", "web-shop",
+}
+
+LOW_SIGNAL_DOC_FILENAMES = {"index.md", "log.md"}
+LOW_SIGNAL_DIRNAMES = {"07_attachments", "raw", "schema", "templates"}
+LOW_SIGNAL_SECTION_MARKERS = (
+    "suggested pages", "related pages", "related page", "related notes", "related sources", "see also",
+    "\u63a8\u8350\u9605\u8bfb", "\u76f8\u5173\u9875\u9762", "\u76f8\u5173\u9875", "\u76f8\u5173\u9605\u8bfb", "\u76f8\u5173\u6765\u6e90", "\u53c2\u89c1",
+)
+
+DEFINITION_SECTION_MARKERS = (
+    "definition", "overview", "summary", "core", "thesis", "framework", "signals", "metrics",
+    "\u5b9a\u4e49", "\u6982\u5ff5", "\u662f\u4ec0\u4e48", "\u6838\u5fc3", "\u7279\u5f81", "\u673a\u5236", "\u73a9\u6cd5", "\u6846\u67b6",
+    "\u7814\u7a76\u4e0e\u6307\u6807", "\u5173\u952e\u4e3b\u5f20", "\u603b\u89c8", "\u6458\u8981",
+)
+
+def reset_obsidian_context():
+    st.session_state.obsidian_hits = []
+    st.session_state.obsidian_research_brief = ""
+    st.session_state.obsidian_retrieval_error = ""
+    st.session_state.obsidian_query_terms = []
+    st.session_state.obsidian_wiki_root = ""
+    st.session_state.obsidian_last_indexed_at = ""
+    st.session_state.obsidian_retrieval_signature = ""
+    st.session_state.obsidian_influence_map = []
+    st.session_state.obsidian_influence_summary = ""
+    st.session_state.obsidian_influence_signature = ""
+
+
+def resolve_obsidian_wiki_root(vault_path):
+    raw_path = (vault_path or "").strip()
+    if not raw_path:
+        return None, ""
+
+    base_path = Path(os.path.expandvars(raw_path)).expanduser()
+    candidate_paths = [
+        base_path / "LLM Wiki" / "wiki",
+        base_path / "wiki",
+        base_path,
+    ]
+    for candidate in candidate_paths:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        if resolved.name.lower() == "wiki":
+            return str(resolved), ""
+        if (resolved / "00_overviews").exists() or (resolved / "01_sources").exists():
+            return str(resolved), ""
+    return None, "??????? Obsidian wiki ???????????LLM Wiki ???? LLM Wiki/wiki ???"
+
+def read_markdown_file(path_obj):
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+        try:
+            with open(path_obj, "r", encoding=encoding) as f:
+                return f.read(), ""
+        except Exception:
+            continue
+    return "", f"Unsupported file encoding: {path_obj.name}"
+
+
+def strip_markdown_frontmatter(text):
+    if not isinstance(text, str):
+        return ""
+    if text.startswith("---"):
+        match = re.match(r"^---\s*\n.*?\n---\s*\n?", text, flags=re.DOTALL)
+        if match:
+            return text[match.end():]
+    return text
+
+
+def split_markdown_blocks(text):
+    return [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
+
+def strip_wikilink_markup(text):
+    return re.sub(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]", lambda match: match.group(2) or match.group(1), text or "")
+
+def is_low_signal_heading(line):
+    cleaned = re.sub(r"^[#>\-*\s]+", "", (line or "")).strip().casefold()
+    return any(marker in cleaned for marker in LOW_SIGNAL_SECTION_MARKERS)
+
+def is_pure_wikilink_block(block):
+    lines = [line.strip() for line in (block or "").splitlines() if line.strip()]
+    if not lines:
+        return True
+    joined = "\n".join(lines)
+    without_links = re.sub(r"\[\[[^\]]+\]\]", " ", joined)
+    without_markup = re.sub(r"[`*_>#\-|/:,\uFF0C\u3002.!?\uFF1F\uFF01\s\[\]\(\)]", "", without_links)
+    return len(without_markup) <= 12
+
+def clean_obsidian_content(text, *, preserve_glossary=False):
+    blocks = split_markdown_blocks(text)
+    if not blocks:
+        return ""
+    cleaned_blocks = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        first_line = lines[0]
+        if is_low_signal_heading(first_line):
+            continue
+        if is_pure_wikilink_block(block):
+            continue
+        if not preserve_glossary and block.count("[[") >= 3 and len(lines) <= 6:
+            continue
+        cleaned_blocks.append(block.strip())
+    if cleaned_blocks:
+        return "\n\n".join(cleaned_blocks)
+    return "\n\n".join(blocks[:2])
+
+def parse_obsidian_doc(path_obj, wiki_root):
+    raw_text, read_error = read_markdown_file(path_obj)
+    if read_error:
+        return None, read_error
+    clean_text = strip_markdown_frontmatter(raw_text).strip()
+    if not clean_text:
+        return None, ""
+    title = path_obj.stem
+    title_match = re.search(r"^\s*#\s+(.+?)\s*$", clean_text, flags=re.MULTILINE)
+    if title_match:
+        title = title_match.group(1).strip()
+    relative_path = path_obj.resolve().relative_to(Path(wiki_root).resolve()).as_posix()
+    parts = relative_path.split("/")
+    category = parts[0] if parts else ""
+    wikilinks = re.findall(r"\[\[([^\]]+)\]\]", clean_text)
+    rel_path_lower = relative_path.casefold()
+    is_glossary = rel_path_lower.endswith("00_overviews/terms-glossary.md")
+    clean_content = clean_obsidian_content(clean_text, preserve_glossary=is_glossary).strip() or clean_text
+    return {
+        "path": str(path_obj.resolve()),
+        "relative_path": relative_path,
+        "title": title,
+        "category": category,
+        "content": clean_text,
+        "clean_content": clean_content,
+        "wikilinks": wikilinks,
+        "is_low_signal_doc": path_obj.name.casefold() in LOW_SIGNAL_DOC_FILENAMES,
+        "modified_at": datetime.fromtimestamp(path_obj.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+    }, ""
+
+def load_obsidian_documents(wiki_root):
+    root_path = Path(wiki_root)
+    documents = []
+    read_errors = []
+    for path_obj in sorted(root_path.rglob("*.md")):
+        lower_parts = {part.casefold() for part in path_obj.parts}
+        if not path_obj.is_file() or any(part in LOW_SIGNAL_DIRNAMES for part in lower_parts):
+            continue
+        if path_obj.name.casefold() in LOW_SIGNAL_DOC_FILENAMES:
+            continue
+        doc, read_error = parse_obsidian_doc(path_obj, wiki_root)
+        if read_error:
+            read_errors.append(read_error)
+            continue
+        if doc and not doc.get("is_low_signal_doc"):
+            documents.append(doc)
+    return documents, read_errors
+
+def normalize_query_token(token):
+    cleaned = token.strip().strip("()[]{}<>.,!?;:'\"`")
+    return cleaned.casefold()
+
+def extract_query_context(source_content):
+    text = (source_content or "").strip()
+    english_tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}", text)
+    chinese_tokens = re.findall("[\u4E00-\u9FFF]{2,12}", text)
+    score_map = {}
+    order_map = {}
+
+    def bump(term, weight, order_idx):
+        score_map[term] = score_map.get(term, 0) + weight
+        order_map.setdefault(term, order_idx)
+
+    for idx, token in enumerate(english_tokens):
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_EN:
+            continue
+        if len(normalized) < 4 and normalized not in ENGLISH_SIGNAL_HINTS:
+            continue
+        weight = 3 if normalized in ENGLISH_SIGNAL_HINTS or any(ch.isdigit() for ch in normalized) or "-" in normalized or "+" in normalized else 1
+        bump(normalized, weight, idx)
+
+    offset = len(english_tokens)
+    for idx, token in enumerate(chinese_tokens, start=offset):
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_ZH:
+            continue
+        weight = 2 if len(normalized) >= 3 else 1
+        bump(normalized, weight, idx)
+
+    ranked_terms = sorted(score_map.items(), key=lambda item: (-item[1], order_map.get(item[0], 0), item[0]))
+    return {"keywords": [term for term, _ in ranked_terms[:24]], "raw_text": text}
+
+def load_terms_glossary(documents):
+    glossary_map = {}
+    glossary_doc = None
+    for doc in documents:
+        rel_path = doc.get("relative_path", "").casefold()
+        title = doc.get("title", "").casefold()
+        if rel_path.endswith("00_overviews/terms-glossary.md") or "terms-glossary" in title:
+            glossary_doc = doc
+            break
+    if not glossary_doc:
+        return glossary_map
+
+    for line in glossary_doc.get("content", "").splitlines():
+        cleaned = re.sub(r"[`*_>#\-|]", " ", line).strip()
+        if not cleaned:
+            continue
+        paren_match = re.search(r"(.+?)[\(（]([^\)）]{2,80})[\)）]", cleaned)
+        if paren_match:
+            left = normalize_query_token(paren_match.group(1))
+            right = normalize_query_token(paren_match.group(2))
+            if left and right and left != right:
+                glossary_map.setdefault(left, set()).add(right)
+                glossary_map.setdefault(right, set()).add(left)
+        if ":" in cleaned or "：" in cleaned:
+            left, right = re.split(r"[:：]", cleaned, maxsplit=1)
+            left_token = normalize_query_token(left)
+            right_tokens = [normalize_query_token(part) for part in re.split(r"[,，/、]", right)]
+            if left_token:
+                for token in right_tokens:
+                    if token and token != left_token:
+                        glossary_map.setdefault(left_token, set()).add(token)
+                        glossary_map.setdefault(token, set()).add(left_token)
+    return glossary_map
+
+
+def expand_query_terms(query_terms, glossary_map):
+    expanded_terms = []
+    seen_terms = set()
+    def push_term(term):
+        normalized = normalize_query_token(term)
+        if not normalized or normalized in seen_terms:
+            return
+        seen_terms.add(normalized)
+        expanded_terms.append(normalized)
+    for term in query_terms:
+        push_term(term)
+        for alias in glossary_map.get(normalize_query_token(term), set()):
+            push_term(alias)
+    return expanded_terms
+
+
+def get_obsidian_category_label(category):
+    return OBSIDIAN_CATEGORY_LABELS.get(category, category or "未分类")
+
+def count_wikilinks(text):
+    return len(re.findall(r"\[\[[^\]]+\]\]", text or ""))
+
+
+def is_definition_like_block(first_line, block, category):
+    first_line_clean = re.sub(r"^[#>\-*\s]+", "", (first_line or "")).strip().casefold()
+    block_clean = strip_wikilink_markup(block or "")
+    if any(marker in first_line_clean for marker in DEFINITION_SECTION_MARKERS):
+        return True
+    if category == "03_concepts":
+        if not first_line.startswith("#") and len(block_clean) >= 80 and count_wikilinks(block) <= 1:
+            return True
+        if re.search(r"\b(is|means|refers to|describes)\b", block_clean.casefold()):
+            return True
+        if any(marker in block_clean for marker in ("是指", "指的是", "通常指", "本质上", "核心在于")):
+            return True
+    return False
+
+
+def score_excerpt_block(block, matched_terms, category):
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    if not lines:
+        return -999
+    first_line = lines[0]
+    if is_low_signal_heading(first_line) or is_pure_wikilink_block(block):
+        return -999
+
+    lowered = block.casefold()
+    block_score = sum(14 for term in matched_terms[:6] if term in lowered)
+    wikilink_count = count_wikilinks(block)
+    prose_block = strip_wikilink_markup(block)
+
+    if wikilink_count == 0:
+        block_score += 4
+    elif wikilink_count == 1:
+        block_score += 1
+    else:
+        block_score -= min(6, wikilink_count)
+
+    if re.search(r"[。！？.!?]", prose_block):
+        block_score += 2
+    if first_line.startswith("#"):
+        block_score -= 2
+    if category == "03_concepts":
+        if is_definition_like_block(first_line, block, category):
+            block_score += 12
+        elif wikilink_count >= 2:
+            block_score -= 8
+    elif category == "00_overviews" and is_definition_like_block(first_line, block, category):
+        block_score += 6
+    elif category == "01_sources" and any(marker in first_line.casefold() for marker in ("key claims", "summary", "takeaways", "结论", "要点", "摘要", "关键主张")):
+        block_score += 8
+
+    return block_score
+
+
+def extract_best_excerpt(content, matched_terms, max_chars, *, category="", title=""):
+    blocks = split_markdown_blocks(content) or [(content or "").strip()]
+    chosen_block = ""
+    chosen_score = -1
+    fallback_block = ""
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        block_score = score_excerpt_block(block, matched_terms, category)
+        if block_score <= -999:
+            continue
+        if not fallback_block:
+            fallback_block = block
+        if block_score > chosen_score:
+            chosen_score = block_score
+            chosen_block = block
+
+    chosen_block = chosen_block or fallback_block
+    if not chosen_block:
+        return ""
+    chosen_block = strip_wikilink_markup(chosen_block)
+    chosen_block = re.sub(r"\n{3,}", "\n\n", chosen_block).strip()
+    if title and chosen_block.casefold().startswith(title.casefold()):
+        chosen_block = chosen_block[len(title):].lstrip(" :\uFF1A-\n") or chosen_block
+    if len(chosen_block) > max_chars:
+        chosen_block = chosen_block[:max_chars].rstrip() + "..."
+    return chosen_block
+
+
+def score_obsidian_docs(query_context, documents, glossary_map):
+    base_terms = [normalize_query_token(term) for term in query_context.get("keywords", []) if normalize_query_token(term)]
+    base_term_set = set(base_terms)
+    query_terms = expand_query_terms(base_terms, glossary_map)
+    scored_docs = []
+    for doc in documents:
+        if doc.get("is_low_signal_doc"):
+            continue
+        title_lower = doc.get("title", "").casefold()
+        content_lower = doc.get("clean_content", doc.get("content", "")).casefold()
+        path_lower = doc.get("relative_path", "").casefold()
+        category = doc.get("category", "")
+        score = OBSIDIAN_CATEGORY_WEIGHTS.get(category, 12)
+        title_matches = []
+        path_matches = []
+        content_matches = []
+        for term in query_terms:
+            is_base_term = term in base_term_set
+            if term in title_lower:
+                score += 18 if is_base_term else 12
+                title_matches.append(term)
+            elif term in path_lower:
+                score += 9 if is_base_term else 6
+                path_matches.append(term)
+            elif term in content_lower:
+                score += 5 if is_base_term else 3
+                content_matches.append(term)
+        rel_path = doc.get("relative_path", "")
+        rel_path_lower = rel_path.casefold()
+        matched_terms = []
+        seen_terms = set()
+        for term in title_matches + path_matches + content_matches:
+            if term in seen_terms:
+                continue
+            seen_terms.add(term)
+            matched_terms.append(term)
+        if not matched_terms:
+            continue
+        if not title_matches and not path_matches and len(set(content_matches)) < 2:
+            continue
+        if rel_path_lower.endswith("00_overviews/mobile-game-trends-2025.md") and matched_terms:
+            score += 8
+        if rel_path_lower.endswith("00_overviews/terms-glossary.md") and matched_terms:
+            score -= 28
+            if title_matches or path_matches:
+                score += 2
+            if len(set(content_matches)) < 3 and not title_matches and not path_matches:
+                continue
+            if any(term in ENGLISH_SIGNAL_HINTS for term in matched_terms[:6]):
+                score += 1
+        if category == "03_concepts" and title_matches:
+            score += 6
+        if title_matches:
+            score += 4
+        scored_docs.append({
+            "doc": doc,
+            "score": score,
+            "matched_terms": matched_terms,
+            "title_matches": title_matches,
+            "path_matches": path_matches,
+            "content_matches": content_matches,
+        })
+    scored_docs.sort(key=lambda item: (-item["score"], OBSIDIAN_CATEGORY_ORDER.index(item["doc"].get("category")) if item["doc"].get("category") in OBSIDIAN_CATEGORY_ORDER else 999, item["doc"].get("title", "")))
+    return scored_docs
+
+def build_obsidian_hits(scored_docs, max_hits, max_chars_per_hit):
+    hits = []
+    for item in scored_docs:
+        if len(hits) >= max_hits:
+            break
+        doc = item["doc"]
+        matched_terms = item.get("matched_terms", [])
+        excerpt = extract_best_excerpt(
+            doc.get("clean_content", doc.get("content", "")),
+            matched_terms,
+            max_chars_per_hit,
+            category=doc.get("category", ""),
+            title=doc.get("title", ""),
+        )
+        first_excerpt_line = excerpt.splitlines()[0] if excerpt.splitlines() else ""
+        if not excerpt or is_pure_wikilink_block(excerpt) or is_low_signal_heading(first_excerpt_line):
+            continue
+        hits.append({
+            "title": doc.get("title", ""),
+            "path": doc.get("relative_path", ""),
+            "category": doc.get("category", ""),
+            "category_label": get_obsidian_category_label(doc.get("category", "")),
+            "score": item.get("score", 0),
+            "excerpt": excerpt,
+            "reason": "命中词：" + "、".join(matched_terms[:5]),
+            "matched_terms": matched_terms,
+            "modified_at": doc.get("modified_at", ""),
+        })
+    return hits
+
+
+def build_research_brief(hits):
+    if not hits:
+        return ""
+
+    def is_glossary_hit(hit):
+        return hit.get("path", "").casefold().endswith("00_overviews/terms-glossary.md")
+
+    grouped_hits = {}
+    for hit in hits:
+        excerpt = hit.get("excerpt", "")
+        if not excerpt or is_pure_wikilink_block(excerpt):
+            continue
+        first_line = excerpt.splitlines()[0] if excerpt.splitlines() else ""
+        if is_low_signal_heading(first_line):
+            continue
+        grouped_hits.setdefault(hit.get("category", ""), []).append(hit)
+
+    brief_parts = [
+        "[知识使用说明] 以下内容来自本地 Obsidian 知识库，仅可用于背景补充、概念定义、历史案例与分析框架。如果与当前素材包冲突，以当前素材包为准。"
+    ]
+    heading_map = {
+        "00_overviews": "[相关综述]",
+        "05_analyses": "[可复用分析框架]",
+        "03_concepts": "[相关概念定义]",
+        "01_sources": "[相关案例与来源摘要]",
+    }
+    for category in ("00_overviews", "05_analyses", "03_concepts", "01_sources"):
+        category_hits = grouped_hits.get(category, [])
+        if not category_hits:
+            continue
+        if category == "00_overviews":
+            category_hits = sorted(category_hits, key=lambda hit: (is_glossary_hit(hit), -hit.get("score", 0), hit.get("title", "")))
+        else:
+            category_hits = sorted(category_hits, key=lambda hit: (-hit.get("score", 0), hit.get("title", "")))
+        brief_parts.append(heading_map[category])
+        for hit in category_hits[:2]:
+            line = f"- {hit.get('title', '')}：{hit.get('excerpt', '')}"
+            if hit.get("matched_terms"):
+                line += f"（命中词：{'、'.join(hit['matched_terms'][:4])}）"
+            brief_parts.append(line)
+    brief = "\n".join(brief_parts).strip()
+    return brief[:3200].rstrip() + ("..." if len(brief) > 3200 else "")
+
+
+def build_editor_user_content(source_content, research_brief, use_images=False):
+    lead = "Below is a merged source packet. Use the attached reference images together with the text for deep analysis and synthesis:" if use_images else "Below is a merged source packet. Use the text-only source packet for deep analysis and synthesis:"
+    parts = [f"{lead}\n\n{(source_content or '').strip()}"]
+    if research_brief:
+        parts.append(
+            "Below is a research brief from your local Obsidian knowledge base. It may only be used for background, concept definitions, historical cases, and analysis frameworks. If anything conflicts with the current source packet, the current source packet wins.\n\n" + research_brief.strip()
+        )
+    return "\n\n================\n\n".join(part for part in parts if part.strip())
+
+
+def build_reviewer_user_content(source_content, draft_article, research_brief=""):
+    parts = [
+        f"Below is the merged source text (this is the only factual source for review):\n{(source_content or '').strip()}\n\n================\nBelow is the draft:\n{(draft_article or '').strip()}"
+    ]
+    if research_brief:
+        parts.append(
+            "Below is a knowledge-base research brief. It may only help you judge whether the article aligns with prior analysis frameworks. It must not be used for new fact checking or to override the source packet.\n\n" + research_brief.strip()
+        )
+    return "\n\n".join(parts)
+
+
+
+def build_chat_knowledge_context():
+    research_brief = (st.session_state.get("obsidian_research_brief", "") or "").strip()
+    hits = st.session_state.get("obsidian_hits", []) or []
+    if not research_brief and not hits:
+        return ""
+    parts = []
+    if research_brief:
+        parts.append(f"[Obsidian 研究摘要]\n{research_brief}")
+    if hits:
+        hit_lines = [f"- {hit.get('title', '')} | {hit.get('category_label', '')} | {hit.get('path', '')}" for hit in hits[:8]]
+        parts.append("[命中笔记清单]\n" + "\n".join(hit_lines))
+    return "\n\n".join(parts)
+
+
+    return "\n\n".join(parts)
+
+
+def split_article_paragraphs(text):
+    return [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
+
+
+def extract_obsidian_signal_terms(text):
+    terms = []
+    seen = set()
+    english_tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}", text or "")
+    chinese_tokens = re.findall("[\u4E00-\u9FFF]{2,12}", text or "")
+    for token in english_tokens:
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_EN:
+            continue
+        if len(normalized) < 4 and normalized not in ENGLISH_SIGNAL_HINTS:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+    for token in chinese_tokens:
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_ZH:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            terms.append(normalized)
+    return terms[:24]
+
+
+def score_paragraph_against_obsidian_hit(paragraph, hit):
+    paragraph_terms = set(extract_obsidian_signal_terms(paragraph))
+    if not paragraph_terms:
+        return 0, []
+
+    candidate_terms = []
+    for term in hit.get("matched_terms", [])[:8]:
+        normalized = normalize_query_token(term)
+        if normalized:
+            candidate_terms.append(normalized)
+    candidate_terms.extend(extract_obsidian_signal_terms(hit.get("title", ""))[:6])
+    candidate_terms.extend(extract_obsidian_signal_terms(hit.get("excerpt", ""))[:10])
+
+    deduped_terms = []
+    seen = set()
+    for term in candidate_terms:
+        if term and term not in seen:
+            seen.add(term)
+            deduped_terms.append(term)
+
+    matched_terms = [term for term in deduped_terms if term in paragraph_terms]
+    score = len(matched_terms) * 3
+    if hit.get("title") and any(term in paragraph_terms for term in extract_obsidian_signal_terms(hit.get("title", ""))[:4]):
+        score += 2
+    if any(term in paragraph.casefold() for term in hit.get("matched_terms", [])[:4]):
+        score += 2
+    return score, matched_terms[:6]
+
+
+def build_obsidian_influence_map(final_article, hits):
+    paragraphs = split_article_paragraphs(final_article)
+    influence_items = []
+    for idx, paragraph in enumerate(paragraphs, start=1):
+        scored_hits = []
+        for hit in hits or []:
+            score, matched_terms = score_paragraph_against_obsidian_hit(paragraph, hit)
+            if score < 5:
+                continue
+            scored_hits.append({
+                "title": hit.get("title", ""),
+                "score": score,
+                "matched_terms": matched_terms,
+            })
+        if not scored_hits:
+            continue
+        scored_hits.sort(key=lambda item: (-item["score"], item["title"]))
+        top_hits = scored_hits[:3]
+        top_score = top_hits[0]["score"]
+        preview = paragraph if len(paragraph) <= 120 else paragraph[:120].rstrip() + "..."
+        merged_terms = []
+        seen_terms = set()
+        for item in top_hits:
+            for term in item.get("matched_terms", []):
+                if term not in seen_terms:
+                    seen_terms.add(term)
+                    merged_terms.append(term)
+        influence_items.append({
+            "paragraph_index": idx,
+            "paragraph_preview": preview,
+            "influence_level": "高" if top_score >= 10 else "中",
+            "score": top_score,
+            "note_titles": [item.get("title", "") for item in top_hits if item.get("title")],
+            "matched_terms": merged_terms[:6],
+        })
+    return influence_items
+
+
+def refresh_obsidian_influence_map(force=False):
+    final_article = (st.session_state.get("final_article", "") or "").strip()
+    hits = st.session_state.get("obsidian_hits", []) or []
+    if not st.session_state.get("obsidian_enabled") or not final_article or not hits:
+        st.session_state.obsidian_influence_map = []
+        st.session_state.obsidian_influence_summary = ""
+        st.session_state.obsidian_influence_signature = ""
+        return
+    signature_base = final_article + "\n" + json.dumps(
+        [{"title": hit.get("title", ""), "excerpt": hit.get("excerpt", ""), "matched_terms": hit.get("matched_terms", [])} for hit in hits],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    signature = hashlib.sha1(signature_base.encode("utf-8")).hexdigest()
+    if not force and st.session_state.get("obsidian_influence_signature") == signature:
+        return
+    influence_map = build_obsidian_influence_map(final_article, hits)
+    st.session_state.obsidian_influence_map = influence_map
+    st.session_state.obsidian_influence_summary = (
+        f"共发现 {len(influence_map)} 个段落明显受到 Obsidian 补充内容影响。"
+        if influence_map else
+        "当前定稿中暂无达到阈值的 Obsidian 影响段落。"
+    )
+    st.session_state.obsidian_influence_signature = signature
+
+
+def render_obsidian_influence_panel(influence_map, summary):
+    render_section_intro("Obsidian 影响地图", "按段落查看当前定稿中哪些内容明显受本地知识库补充影响。", "影响")
+    if summary:
+        st.caption(summary)
+    if not influence_map:
+        st.info("当前定稿里暂无达到阈值的 Obsidian 影响段落。")
+        return
+    for item in influence_map:
+        note_titles = item.get("note_titles", [])
+        label = f"第 {item.get('paragraph_index', 0)} 段 · {item.get('influence_level', '中')}影响"
+        with st.expander(label, expanded=(item.get("paragraph_index", 0) <= 2)):
+            if note_titles:
+                st.caption("相关笔记：" + " / ".join(note_titles[:3]))
+            if item.get("matched_terms"):
+                st.caption("命中关键词：" + "、".join(item.get("matched_terms", [])[:6]))
+            st.code(item.get("paragraph_preview", ""), language="markdown")
+
+
+def run_obsidian_retrieval(force=False):
+    if not st.session_state.get("obsidian_enabled"):
+        reset_obsidian_context()
+        return
+    source_content = (st.session_state.get("source_content", "") or "").strip()
+    if not source_content:
+        reset_obsidian_context()
+        return
+    wiki_root, resolve_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
+    if resolve_error:
+        reset_obsidian_context()
+        st.session_state.obsidian_retrieval_error = resolve_error
+        save_draft()
+        return
+    max_hits = int(st.session_state.get("obsidian_max_hits", 6) or 6)
+    signature_base = f"{wiki_root}|{max_hits}|{hashlib.sha1(source_content.encode('utf-8')).hexdigest()}"
+    signature = hashlib.sha1(signature_base.encode("utf-8")).hexdigest()
+    has_cached_result = bool(st.session_state.get("obsidian_hits") or st.session_state.get("obsidian_research_brief") or st.session_state.get("obsidian_retrieval_error"))
+    if not force and has_cached_result and st.session_state.get("obsidian_retrieval_signature") == signature:
+        return
+    documents, read_errors = load_obsidian_documents(wiki_root)
+    query_context = extract_query_context(source_content)
+    glossary_map = load_terms_glossary(documents)
+    scored_docs = score_obsidian_docs(query_context, documents, glossary_map)
+    hits = build_obsidian_hits(scored_docs, max_hits=max_hits, max_chars_per_hit=280)
+    st.session_state.obsidian_hits = hits
+    st.session_state.obsidian_research_brief = build_research_brief(hits)
+    st.session_state.obsidian_query_terms = query_context.get("keywords", [])[:12]
+    st.session_state.obsidian_wiki_root = wiki_root
+    st.session_state.obsidian_last_indexed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.obsidian_retrieval_signature = signature
+    st.session_state.obsidian_retrieval_error = "部分 Obsidian 笔记读取失败，已跳过异常文件。" if read_errors else ""
+    refresh_obsidian_influence_map(force=True)
+    save_draft()
+
+def build_openai_timeout(base_url, model_name):
+    base_url = (base_url or "").strip().lower()
+    model_name = (model_name or "").strip().lower()
+
+    # Yunwu Qwen models have shown billed-but-disconnected responses, so use a wider timeout window.
+    if "yunwu.ai/v1" in base_url and model_name in {"qwen3.5-plus", "qwen3.6-plus"}:
+        return httpx.Timeout(connect=30.0, read=1800.0, write=120.0, pool=120.0)
+
+    return httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=60.0)
+
+
+
+def should_stream_llm_request(base_url, model_name):
+    base_url = (base_url or "").strip().lower()
+    model_name = (model_name or "").strip().lower()
+    return "yunwu.ai/v1" in base_url and model_name in {"qwen3.5-plus", "qwen3.6-plus"}
+
+
+BLTCY_MODEL_OPTIONS = [
+    "qwen3.5-plus",
+    "kimi-k2.5",
+    "gpt-5.4",
+    "claude-opus-4-6",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano",
+    "gemini-3.1-pro-preview",
+    "claude-sonnet-4-6-thinking",
+    "claude-opus-4-6-thinking",
+    "claude-opus-4-5-20251101-thinking",
+    "gemini-3.1-pro-preview-thinking-high",
+    "gemini-3.1-flash-lite-preview-thinking-high",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed"
+]
+DEERAPI_MODEL_OPTIONS = [
+    "gpt-5.4",
+    "qwen3.5-27b",
+    "qwen3.5-flash",
+    "gpt-5.4-nano",
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-thinking",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview-thinking"
+]
+YUNWU_MODEL_OPTIONS = [
+    "qwen3.6-plus",
+    "qwen3.5-plus",
+    "kimi-k2.5",
+    "gpt-5.4",
+    "claude-opus-4-6",
+    "doubao-seed-2-0-lite-260215",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano",
+    "gemini-3.1-pro-preview",
+    "claude-sonnet-4-6-thinking",
+    "claude-opus-4-6-thinking",
+    "claude-opus-4-5-20251101-thinking",
+    "gemini-3.1-pro-preview-thinking-high",
+    "gemini-3.1-flash-lite-preview-thinking-high",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed"
+]
+DE_AI_MODEL_MIGRATION = {
+    "deepseek-v3-1-terminus": "deepseek-v3.1",
+    "deepseek-v3-2-exp": "deepseek-v3.2",
+}
+DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "qwen3.5-plus", "glm-5"]
 ROLE_AUDIENCE_MAP = {
     "发行主编": "游戏行业从业者",
     "研发主编": "游戏圈同行和硬核玩家",
@@ -433,23 +1291,31 @@ def generate_script_for_current_article(api_key, base_url, model_name, script_du
 # ==========================================
 def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None, temperature=None):
     if not api_key:
-        st.error("⚠️ 请先在左侧边栏输入 API Key！")
+        st.error("Please enter an API key in the sidebar first.")
         st.stop()
-        
+
     if image_urls is None:
         image_urls = []
-        
+    if history is None:
+        history = []
+
+    current_stage = st.session_state.get("pending_ai_stage", "")
+
     try:
+        timeout_config = build_openai_timeout(base_url, model_name)
+        use_stream = should_stream_llm_request(base_url, model_name)
         client = OpenAI(
             api_key=api_key,
-            base_url=base_url 
+            base_url=base_url,
+            max_retries=0,
+            timeout=timeout_config,
         )
-        
+
         messages = [{"role": "system", "content": system_prompt}]
-        
+
         if history:
             messages.extend(history)
-            
+
         if image_urls:
             message_content = [{"type": "text", "text": user_content}]
             for img_url in image_urls:
@@ -462,14 +1328,50 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
 
         messages.append({"role": "user", "content": message_content})
 
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=0.3 if temperature is None else temperature
-        )
-        return response.choices[0].message.content
+        request_kwargs = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.3 if temperature is None else temperature,
+        }
+
+        if use_stream:
+            parts = []
+            with client.chat.completions.create(stream=True, **request_kwargs) as stream:
+                for chunk in stream:
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    for choice in chunk.choices:
+                        delta = getattr(choice, "delta", None)
+                        delta_content = getattr(delta, "content", None) if delta else None
+                        if delta_content:
+                            parts.append(delta_content)
+            content = "".join(parts).strip()
+        else:
+            response = client.chat.completions.create(**request_kwargs)
+            if not getattr(response, "choices", None):
+                raise ValueError("Model returned no choices.")
+            message = response.choices[0].message if response.choices else None
+            content = normalize_llm_response_content(getattr(message, "content", None))
+
+        if not content.strip():
+            raise ValueError("Model returned an empty message body.")
+        st.session_state.last_ai_error = ""
+        return content
     except Exception as e:
-        st.error(f"API 调用失败: {str(e)}")
+        formatted_error = format_llm_exception(e)
+        st.session_state.last_ai_error = formatted_error
+        st.session_state.pending_ai_stage = ""
+        write_ai_diagnostic_log(
+            current_stage,
+            base_url,
+            model_name,
+            formatted_error,
+            user_content,
+            image_count=len(image_urls),
+            history_count=len(history),
+        )
+        save_draft()
+        st.error(f"API call failed: {formatted_error}")
         st.stop()
 
 def push_to_feishu(article_text, script_text=None):
@@ -875,7 +1777,14 @@ def init_state():
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
     if 'de_ai_model' not in st.session_state:
-        st.session_state.de_ai_model = "deepseek-v3-1-terminus"
+        st.session_state.de_ai_model = DE_AI_MODELS[0]
+    else:
+        st.session_state.de_ai_model = DE_AI_MODEL_MIGRATION.get(
+            st.session_state.de_ai_model,
+            st.session_state.de_ai_model,
+        )
+        if st.session_state.de_ai_model not in DE_AI_MODELS:
+            st.session_state.de_ai_model = DE_AI_MODELS[0]
     if 'de_ai_temperature' not in st.session_state:
         st.session_state.de_ai_temperature = 0.75
     if 'de_ai_prompt_template' not in st.session_state:
@@ -896,6 +1805,46 @@ def init_state():
         st.session_state.article_versions = []
     if 'active_article_version_id' not in st.session_state:
         st.session_state.active_article_version_id = None
+    if 'pending_ai_stage' not in st.session_state:
+        st.session_state.pending_ai_stage = ""
+    if 'last_completed_ai_stage' not in st.session_state:
+        st.session_state.last_completed_ai_stage = ""
+    if 'last_completed_ai_target_step' not in st.session_state:
+        st.session_state.last_completed_ai_target_step = 0
+    if 'last_ai_error' not in st.session_state:
+        st.session_state.last_ai_error = ""
+    if 'recovered_ai_notice' not in st.session_state:
+        st.session_state.recovered_ai_notice = ""
+    if 'obsidian_enabled' not in st.session_state:
+        st.session_state.obsidian_enabled = False
+    if 'obsidian_vault_path' not in st.session_state:
+        st.session_state.obsidian_vault_path = "E:\\Obsidian\\originvault\\1\u53f7\u4ed3\u5e93\\LLM Wiki\\wiki"
+    if st.session_state.get("obsidian_vault_path") == r"E:\Obsidian\originvault\1???\LLM Wiki\wiki":
+        st.session_state.obsidian_vault_path = "E:\\Obsidian\\originvault\\1\u53f7\u4ed3\u5e93\\LLM Wiki\\wiki"
+    if 'obsidian_max_hits' not in st.session_state:
+        st.session_state.obsidian_max_hits = 6
+    if 'obsidian_show_hits' not in st.session_state:
+        st.session_state.obsidian_show_hits = True
+    if 'obsidian_hits' not in st.session_state:
+        st.session_state.obsidian_hits = []
+    if 'obsidian_research_brief' not in st.session_state:
+        st.session_state.obsidian_research_brief = ""
+    if 'obsidian_retrieval_error' not in st.session_state:
+        st.session_state.obsidian_retrieval_error = ""
+    if 'obsidian_query_terms' not in st.session_state:
+        st.session_state.obsidian_query_terms = []
+    if 'obsidian_wiki_root' not in st.session_state:
+        st.session_state.obsidian_wiki_root = ""
+    if 'obsidian_last_indexed_at' not in st.session_state:
+        st.session_state.obsidian_last_indexed_at = ""
+    if 'obsidian_retrieval_signature' not in st.session_state:
+        st.session_state.obsidian_retrieval_signature = ""
+    if 'obsidian_influence_map' not in st.session_state:
+        st.session_state.obsidian_influence_map = []
+    if 'obsidian_influence_summary' not in st.session_state:
+        st.session_state.obsidian_influence_summary = ""
+    if 'obsidian_influence_signature' not in st.session_state:
+        st.session_state.obsidian_influence_signature = ""
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -904,6 +1853,81 @@ def init_state():
 
 
 init_state()
+
+
+def mark_ai_stage_started(stage_name):
+    st.session_state.pending_ai_stage = stage_name
+    st.session_state.last_ai_error = ""
+    save_draft()
+
+
+def checkpoint_ai_stage(stage_name, target_step=None):
+    st.session_state.pending_ai_stage = ""
+    st.session_state.last_completed_ai_stage = stage_name
+    st.session_state.last_completed_ai_target_step = target_step or 0
+    st.session_state.last_ai_error = ""
+    st.session_state.recovered_ai_notice = ""
+    save_draft()
+
+
+def clear_ai_stage_checkpoint():
+    st.session_state.pending_ai_stage = ""
+    st.session_state.last_completed_ai_stage = ""
+    st.session_state.last_completed_ai_target_step = 0
+    save_draft()
+
+
+def recover_ai_progress_if_needed():
+    target_step = st.session_state.get("last_completed_ai_target_step", 0) or 0
+    current_step = st.session_state.get("current_step", 1)
+    last_stage = st.session_state.get("last_completed_ai_stage", "")
+    if target_step and current_step < target_step:
+        st.session_state.current_step = target_step
+        st.session_state.recovered_ai_notice = f"AI 已完成「{format_ai_stage_name(last_stage)}」，已自动恢复到第 {target_step} 步。"
+        clear_ai_stage_checkpoint()
+        st.rerun()
+    if target_step and current_step >= target_step:
+        clear_ai_stage_checkpoint()
+
+
+def normalize_llm_response_content(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    parts.append(text_value)
+        return "\n".join(part for part in parts if part).strip()
+    return "" if content is None else str(content)
+
+
+def format_ai_stage_name(stage_name):
+    return {
+        "draft_generation": "写出稿",
+        "review_generation": "严格审稿",
+        "modification_generation": "修改稿件",
+        "de_ai_generation": "去 AI 味重写",
+    }.get(stage_name, stage_name or "AI 任务")
+
+
+def render_ai_progress_banner():
+    recovered_notice = st.session_state.get("recovered_ai_notice", "")
+    if recovered_notice:
+        st.success(recovered_notice)
+
+    pending_stage = st.session_state.get("pending_ai_stage", "")
+    if pending_stage:
+        st.info(f"AI 正在执行「{format_ai_stage_name(pending_stage)}」。如果页面短暂重载，系统会自动尝试续上流程。")
+
+    last_error = (st.session_state.get("last_ai_error", "") or "").strip()
+    if last_error:
+        st.warning(f"上一轮 AI 调用未完整收尾：{last_error}")
+
 
 def go_to_step(step):
     st.session_state.current_step = step
@@ -1009,13 +2033,26 @@ def bootstrap_article_versions():
 
 
 bootstrap_article_versions()
+recover_ai_progress_if_needed()
+run_obsidian_retrieval()
 
 
 def render_html_iframe(html_content, *, height=150, width=None, scrolling=False):
     iframe_html = "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='margin:0;padding:0;'>" + html_content + "</body></html>"
     iframe_src = "data:text/html;base64," + base64.b64encode(iframe_html.encode("utf-8")).decode("ascii")
-    components.iframe(iframe_src, height=height, width=width, scrolling=scrolling)
-
+    iframe_renderer = getattr(components, "iframe", None)
+    if callable(iframe_renderer):
+        try:
+            iframe_renderer(iframe_src, height=height, width=width, scrolling=scrolling)
+            return
+        except Exception:
+            pass
+    html_renderer = getattr(components, "html", None)
+    if callable(html_renderer):
+        try:
+            html_renderer(iframe_html, height=height, width=width, scrolling=scrolling)
+        except Exception:
+            pass
 
 def render_responsive_image(image_payload):
     try:
@@ -1087,23 +2124,43 @@ def normalize_copy_text(text):
     return normalized.strip()
 
 
+def _render_inline_markdown_for_clipboard(text):
+    escaped = html_lib.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
+    return escaped.replace("\n", "<br/>")
+
+
 def markdown_to_editor_html(markdown_text):
     normalized = normalize_copy_text(markdown_text)
     if not normalized:
-        return "<p></p>"
+        fragment = "<div><br/></div>"
+        return (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+            "<!--StartFragment-->"
+            f"{fragment}"
+            "<!--EndFragment-->"
+            "</body></html>"
+        )
 
     paragraphs = [item.strip() for item in re.split(r"\n{2,}", normalized) if item.strip()]
     if not paragraphs:
-        return "<p></p>"
+        paragraphs = [normalized]
 
     html_parts = []
     for paragraph in paragraphs:
-        escaped = html_lib.escape(paragraph)
-        escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
-        escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
-        escaped = escaped.replace("\n", "<br/>")
-        html_parts.append(f"<p>{escaped}</p>")
-    return "".join(html_parts)
+        rendered_paragraph = _render_inline_markdown_for_clipboard(paragraph)
+        # Use block-level divs for better compatibility with community editors.
+        html_parts.append(f"<div>{rendered_paragraph}</div>")
+
+    fragment = "".join(html_parts)
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+        "<!--StartFragment-->"
+        f"{fragment}"
+        "<!--EndFragment-->"
+        "</body></html>"
+    )
 
 
 def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制（保留段落）"):
@@ -1513,45 +2570,29 @@ with st.sidebar:
         st.warning("未读取到有效 prompts 配置，当前使用默认角色。请确认部署目录中的 prompts.json。")
         st.caption(PROMPTS_LOAD_REPORT)
     st.header("⚙️ 引擎设置")
-    api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
+    api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI", "云雾API"])
     
     if api_provider == "BLTCY (柏拉图次元)":
         api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
         current_base_url = "https://api.bltcy.ai/v1"
-        available_models = [
-            "gemini-3.1-pro-preview",
-            "gemini-3.1-pro-preview-thinking-high",
-            "gemini-3.1-flash-lite-preview-thinking-high",
-            "claude-opus-4-6-thinking",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6-thinking",
-            "claude-opus-4-5-20251101-thinking",
-            "gpt-5.4",
-            "gpt-5.4-nano",
-            "gpt-5.4-mini-2026-03-17",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7-highspeed",
-            "qwen3.5-plus",
-            "kimi-k2.5"
-        ]
+        available_models = BLTCY_MODEL_OPTIONS
+    elif api_provider == "云雾API":
+        api_key = st.text_input("🔑 输入云雾API Key", type="password")
+        current_base_url = "https://yunwu.ai/v1"
+        available_models = YUNWU_MODEL_OPTIONS
     else:
         api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
         current_base_url = "https://api.deerapi.com/v1"
-        available_models = [
-            "gemini-3.1-pro-preview",
-            "gemini-3.1-pro-preview-thinking",
-            "gemini-3.1-flash-lite",
-            "gemini-3.1-flash-lite-preview-thinking",
-            "gpt-5.4-nano",
-            "gpt-5.4",
-            "qwen3.5-27b",
-            "qwen3.5-flash"
-        ]
+        available_models = DEERAPI_MODEL_OPTIONS
 
-    default_model_idx = 0
-    if "gemini-3.1-pro-preview" in available_models:
-        default_model_idx = available_models.index("gemini-3.1-pro-preview")
-        
+    preferred_default_models = {
+        "BLTCY (柏拉图次元)": "qwen3.5-plus",
+        "DeerAPI": "gpt-5.4",
+        "云雾API": "qwen3.6-plus",
+    }
+    preferred_default_model = preferred_default_models.get(api_provider, available_models[0])
+    default_model_idx = available_models.index(preferred_default_model) if preferred_default_model in available_models else 0
+
     selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
     
     st.markdown("---")
@@ -1563,7 +2604,21 @@ with st.sidebar:
         index=2, 
         disabled=not enable_script 
     )
-    
+
+
+    st.markdown("---")
+    st.header("Obsidian 知识库")
+    st.toggle("启用本地知识增强", key="obsidian_enabled", on_change=save_draft)
+    st.text_input("知识库路径 / wiki 路径", key="obsidian_vault_path", placeholder=r"D:\Obsidian Vault", on_change=save_draft)
+    st.slider("知识命中数", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
+    st.toggle("显示命中详情", key="obsidian_show_hits", on_change=save_draft)
+    wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
+    if st.session_state.get("obsidian_enabled"):
+        if wiki_root_preview:
+            st.caption(f"检测到 wiki 根目录：{wiki_root_preview}")
+        elif wiki_root_error:
+            st.caption(wiki_root_error)
+
     st.markdown("---")
     st.header("🗂️ 提示词管理中心")
     with st.expander("📝 角色与全局人设配置", expanded=False):
@@ -1621,6 +2676,7 @@ with st.sidebar:
 
 render_app_hero()
 render_stepper(st.session_state.current_step)
+render_ai_progress_banner()
 
 # --- Step 1 ---
 if st.session_state.current_step == 1:
@@ -1744,6 +2800,8 @@ if st.session_state.current_step == 1:
                         for stale_key in [k for k in list(st.session_state.keys()) if k.startswith("source_image_pick_")]:
                             del st.session_state[stale_key]
                         st.session_state.extraction_success = True
+                        st.session_state.obsidian_retrieval_signature = ""
+                        run_obsidian_retrieval(force=True)
                         notify_step_completed()
 
                         if errors:
@@ -1755,6 +2813,7 @@ if st.session_state.current_step == 1:
                                 st.success(f"批量提取成功！共融合了 {success_count} 个素材。（无有效配图，走纯文本模式）")
                     else:
                         st.session_state.extraction_success = False
+                        reset_obsidian_context()
                         st.error("所有素材提取均失败，请检查链接、上传文件内容或网络状态。\n" + "\n".join(errors))
 
     if st.session_state.extraction_success:
@@ -1792,6 +2851,43 @@ if st.session_state.current_step == 1:
             st.markdown("#### 合并后的文本正文")
             preview_text = st.session_state.source_content[:1800] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1800 else st.session_state.source_content
             st.code(preview_text, language="markdown")
+
+
+        if st.session_state.get("obsidian_enabled"):
+            with st.container(border=True):
+                render_section_intro("Obsidian 检索简报", "在选择写作模式前，先检查本地知识库命中与自动生成的研究摘要。", "知识库")
+                if st.button("刷新 Obsidian 检索", key="refresh_obsidian_hits", use_container_width=True):
+                    run_obsidian_retrieval(force=True)
+                    st.rerun()
+
+                retrieval_error = (st.session_state.get("obsidian_retrieval_error", "") or "").strip()
+                if retrieval_error:
+                    st.warning(retrieval_error)
+
+                wiki_root_display = st.session_state.get("obsidian_wiki_root", "")
+                if wiki_root_display:
+                    st.caption(f"Wiki 根目录：{wiki_root_display}")
+                indexed_at = st.session_state.get("obsidian_last_indexed_at", "")
+                if indexed_at:
+                    st.caption(f"上次索引时间：{indexed_at}")
+
+                query_terms = st.session_state.get("obsidian_query_terms", []) or []
+                if query_terms:
+                    st.caption("检索词：" + "、".join(query_terms))
+
+                obsidian_hits = st.session_state.get("obsidian_hits", []) or []
+                if obsidian_hits and st.session_state.get("obsidian_show_hits", True):
+                    for idx, hit in enumerate(obsidian_hits, start=1):
+                        with st.expander(f"{idx}. {hit.get('title', '')} | {hit.get('category_label', '')}", expanded=(idx <= 2)):
+                            st.caption(f"{hit.get('path', '')} | {hit.get('modified_at', '')}")
+                            st.markdown(hit.get("reason", ""))
+                            st.code(hit.get("excerpt", ""), language="markdown")
+                elif st.session_state.get("obsidian_enabled") and not retrieval_error:
+                    st.info("当前这批素材没有匹配到相关 Obsidian 笔记，后续将按纯素材写作继续。")
+
+                if st.session_state.get("obsidian_research_brief"):
+                    st.markdown("#### 研究摘要预览")
+                    st.code(st.session_state.obsidian_research_brief, language="markdown")
 
         with st.container(border=True):
             render_section_intro("选择工作流模式", "手动精调适合逐步把关，全自动驾驶适合快速得到高完成度定稿。", "Workflow")
@@ -1835,24 +2931,34 @@ if st.session_state.current_step == 1:
                         global_instruction = prompts_data.get("global_instruction", "")
                         final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
 
-                        draft_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
+                        draft_content = build_editor_user_content(
+                            st.session_state.source_content,
+                            st.session_state.get("obsidian_research_brief", ""),
+                            use_images=bool(st.session_state.source_images)
+                        )
                         st.session_state.draft_article = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
                         )
                         append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=chosen_editor, model=selected_model)
+                        save_draft()
 
                         st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
                         reviewer_prompt = prompts_data["reviewer"]
                         anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
                         final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
 
-                        combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                        combined_content = build_reviewer_user_content(
+                            st.session_state.source_content,
+                            st.session_state.draft_article,
+                            st.session_state.get("obsidian_research_brief", "")
+                        )
                         st.session_state.review_feedback = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
                         )
 
+                        save_draft()
                         st.write("✨ 接收修改意见，正在进行最终打磨...")
                         modification_prompt = build_modification_system_prompt(global_instruction)
                         content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
@@ -1862,6 +2968,7 @@ if st.session_state.current_step == 1:
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
                         append_article_version(st.session_state.final_article, "自动驾驶定稿", role=chosen_editor, model=selected_model)
+                        save_draft()
 
                         if enable_script:
                             st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
@@ -1926,15 +3033,16 @@ elif st.session_state.current_step == 2:
             st.rerun()
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
+            mark_ai_stage_started("draft_generation")
             with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
-                
-                if st.session_state.source_images:
-                    editor_user_content = f"以下是多个来源的素材聚合内容，请结合附带的参考图片一起深度分析与融合：\n\n{st.session_state.source_content}"
-                else:
-                    editor_user_content = f"以下是多个来源的素材聚合内容，请根据纯文本进行深度分析与融合：\n\n{st.session_state.source_content}"
-                
+                editor_user_content = build_editor_user_content(
+                    st.session_state.source_content,
+                    st.session_state.get("obsidian_research_brief", ""),
+                    use_images=bool(st.session_state.source_images)
+                )
+
                 st.session_state.draft_article = call_llm(
                     api_key=api_key, 
                     base_url=current_base_url,
@@ -1944,6 +3052,8 @@ elif st.session_state.current_step == 2:
                     image_urls=st.session_state.source_images
                 )
                 append_article_version(st.session_state.draft_article, "手动初稿", role=editor_role, model=selected_model)
+                checkpoint_ai_stage("draft_generation", target_step=3)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(3)
                 st.rerun()
@@ -1978,15 +3088,24 @@ elif st.session_state.current_step == 3:
                 st.rerun()
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
+            mark_ai_stage_started("review_generation")
             with st.spinner("主编正在核对原文素材..."):
                 if st.session_state.source_images:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】以及你所看到的【参考配图】！绝对不允许使用自身知识库进行事实核对。"""
-                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    combined_content = build_reviewer_user_content(
+                        st.session_state.source_content,
+                        st.session_state.draft_article,
+                        st.session_state.get("obsidian_research_brief", "")
+                    )
                 else:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
                     你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"""
-                    combined_content = f"下面是聚合的【原始素材文本】（这是唯一的真相来源）：\n{st.session_state.source_content}\n\n================\n下面是【初稿】：\n{st.session_state.draft_article}"
+                    combined_content = build_reviewer_user_content(
+                        st.session_state.source_content,
+                        st.session_state.draft_article,
+                        st.session_state.get("obsidian_research_brief", "")
+                    )
                 
                 final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
                 
@@ -1998,6 +3117,8 @@ elif st.session_state.current_step == 3:
                     user_content=combined_content,
                     image_urls=st.session_state.source_images
                 )
+                checkpoint_ai_stage("review_generation", target_step=4)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(4)
                 st.rerun()
@@ -2035,6 +3156,7 @@ elif st.session_state.current_step == 4:
                 st.rerun()
     with col3:
         if st.button(f"✨ 使用 {selected_model} 接受意见并生成修改稿"):
+            mark_ai_stage_started("modification_generation")
             with st.spinner("编辑正在根据主编意见生成修改稿..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 modification_prompt = build_modification_system_prompt(global_instruction)
@@ -2052,6 +3174,8 @@ elif st.session_state.current_step == 4:
                 st.session_state.highlighted_article = ""
                 st.session_state.spoken_script = ""
                 append_article_version(st.session_state.modified_article, "接受审稿修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
+                checkpoint_ai_stage("modification_generation", target_step=5)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
@@ -2110,6 +3234,7 @@ elif st.session_state.current_step == 5:
                 append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                    save_draft()
                 else:
                     st.session_state.spoken_script = ""
                 notify_step_completed(defer_until_rerun=True)
@@ -2117,6 +3242,7 @@ elif st.session_state.current_step == 5:
                 st.rerun()
     with col3:
         if st.button(f"✨ 使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写"):
+            mark_ai_stage_started("de_ai_generation")
             spinner_msg = f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味，并生成【{script_duration}口播及分镜脚本】..." if enable_script else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写..."
             with st.spinner(spinner_msg):
                 de_ai_response = call_llm(
@@ -2131,23 +3257,26 @@ elif st.session_state.current_step == 5:
                 st.session_state.final_article = pure_article or (de_ai_response or "").strip()
                 st.session_state.highlighted_article = highlighted_article
                 append_article_version(st.session_state.final_article, "去AI味定稿", role=current_role, model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]))
+                save_draft()
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
                 else:
                     st.session_state.spoken_script = ""
                 if not highlighted_article:
                     st.warning("高亮版生成失败，本次仅保留纯净定稿。")
+                checkpoint_ai_stage("de_ai_generation", target_step=6)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
                 st.rerun()
 # --- Step 6：终极版分栏 UI ---
+
 elif st.session_state.current_step == 6:
+    refresh_obsidian_influence_map()
     render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
     render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
-    
-    st.markdown("<p class='toolbar-note'>主稿、分镜脚本、搜图和分发操作统一留在左侧主工作区；右侧专门用于精修、追问和追溯原文依据。</p>", unsafe_allow_html=True)
-    left_col, right_col = st.columns([1.45, 0.95])
-    
+    st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
+    left_col, right_col = st.columns([1.45, 0.98])
     with left_col:
         st.markdown("### 稿件版本时间线")
         versions = st.session_state.get("article_versions", [])
@@ -2176,14 +3305,15 @@ elif st.session_state.current_step == 6:
 
             if selected_version:
                 st.caption(f"当前阶段：{selected_version.get('stage', '未命名')}｜角色：{selected_version.get('role', '未记录')}｜模型：{selected_version.get('model', '未记录')}")
+
                 if st.button("将此版本设为当前定稿", key="use_selected_version_as_final", use_container_width=True):
                     st.session_state.final_article = selected_version.get("content", "")
                     st.session_state.highlighted_article = ""
                     st.session_state.active_article_version_id = selected_version_id
+                    refresh_obsidian_influence_map(force=True)
                     save_draft()
                     notify_step_completed()
                     st.success(f"已切换到版本 {selected_version_id}")
-
                 with st.expander("查看选中版本全文", expanded=False):
                     st.code(selected_version.get("content", ""), language="markdown")
                     render_editor_friendly_copy_button(selected_version.get("content", ""), f"version_{selected_version_id}")
@@ -2281,63 +3411,59 @@ elif st.session_state.current_step == 6:
                     del st.session_state[key]
                 st.rerun()
 
+
+    
     with right_col:
+        should_show_obsidian_influence = bool(
+            st.session_state.get("obsidian_enabled")
+            and (st.session_state.get("final_article", "") or "").strip()
+            and (st.session_state.get("obsidian_hits", []) or [])
+        )
+    
+        if should_show_obsidian_influence:
+            with st.container(border=True):
+                render_obsidian_influence_panel(
+                    st.session_state.get("obsidian_influence_map", []),
+                    st.session_state.get("obsidian_influence_summary", ""),
+                )
+    
         with st.container(border=True):
-            render_section_intro("精修侧栏", "在这里追问出处、重写局部段落，或把主稿改成更适合公众号和视频的表达。", "Assistant")
-            st.markdown("<p class='toolbar-note'>常用操作：追问某句结论的原文出处、要求重写某段、补一版更适合导语的开场、把段落改成更适合视频口播的语气。</p>", unsafe_allow_html=True)
-            quick_col1, quick_col2 = st.columns(2)
-            with quick_col1:
-                st.markdown("- 重写一段为更克制的媒体口吻")
-                st.markdown("- 追问文中某个数据的素材出处")
-            with quick_col2:
-                st.markdown("- 补一版更抓人的导语")
-                st.markdown("- 改写为更适合口播的表达")
-
-        with st.container(border=True):
-            render_section_intro("快捷动作", "先给使用者几个明确的提问方向，降低上手成本。", "Shortcuts")
-            shortcut_col1, shortcut_col2 = st.columns(2)
-            with shortcut_col1:
-                st.caption("适合改文")
-                st.markdown("- 帮我把导语写得更抓人")
-                st.markdown("- 把第三段改成更像媒体报道")
-            with shortcut_col2:
-                st.caption("适合追溯")
-                st.markdown("- 这句结论在原文哪一段")
-                st.markdown("- 这个数据的素材出处是什么")
-
-        with st.container(border=True):
-            render_section_intro("对话区", "所有精修历史都保存在这里，方便反复迭代。", "Chat")
-            chat_container = st.container(height=500)
-
+            render_section_intro("精修对话区", "保留消息历史与输入框，用于继续追问出处或改写段落。", "对话")
+            chat_container = st.container(height=360)
+    
             with chat_container:
                 for msg in st.session_state.chat_history:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
-
-            if user_query := st.chat_input("输入你的修改指令或疑问（回车发送）..."):
+    
+            if user_query := st.chat_input("输入修改指令、追问出处或改写要求，回车发送..."):
                 st.session_state.chat_history.append({"role": "user", "content": user_query})
                 with chat_container:
                     with st.chat_message("user"):
                         st.markdown(user_query)
-
+    
                     with st.chat_message("assistant"):
-                        with st.spinner("思考与检索中..."):
-                            chat_sys_prompt = f"""你是一个极其专业的文章精修与溯源助手。
-
-                            【你的参考资料库（唯一的真相来源）】：
+                        with st.spinner("思考中..."):
+                            knowledge_context = build_chat_knowledge_context()
+                            chat_sys_prompt = f"""You are an expert article refinement and source-tracing assistant.
+    
+                            [Reference source library - the only factual source for tracing]
                             {st.session_state.source_content}
-
-                            【当前正在精修的定稿文章】：
+    
+                            [Current final article]
                             {st.session_state.final_article}
-
-                            【你的任务】：
-                            1. 如果用户要求溯源，请精准定位到【参考资料库】中的原文片段，并客观回答。
-                            2. 如果用户要求重写某一段落，请直接输出修改后能够无缝替换回去的完美段落，不要说废话。
-                            3. 如果用户基于文章进行衍生提问，请结合上述资料给出专业见解。
+    
+                            [Background knowledge library]
+                            {knowledge_context}
+    
+                            [Tasks]
+                            1. If the user asks for sourcing, only use the reference source library to locate the original passage. Do not treat the knowledge library as a news-fact source.
+                            2. If the user asks for a rewrite, output the replacement paragraph directly with no extra chatter.
+                            3. If the user asks for derived analysis, combine the article and the background knowledge carefully. Mention the note title first when you rely on the knowledge library.
                             """
-
+    
                             history_to_send = st.session_state.chat_history[:-1]
-
+    
                             ai_response = call_llm(
                                 api_key=api_key,
                                 base_url=current_base_url,
@@ -2347,10 +3473,11 @@ elif st.session_state.current_step == 6:
                                 history=history_to_send
                             )
                             st.markdown(ai_response)
-
+    
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+
 
 
 
