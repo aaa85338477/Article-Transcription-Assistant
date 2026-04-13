@@ -1044,7 +1044,41 @@ def run_obsidian_retrieval(force=False):
     refresh_obsidian_influence_map(force=True)
     save_draft()
 
-DE_AI_MODELS = ["deepseek-v3-1-terminus", "deepseek-v3-2-exp", "qwen3.5-plus", "glm-5"]
+BLTCY_MODEL_OPTIONS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-thinking-high",
+    "gemini-3.1-flash-lite-preview-thinking-high",
+    "claude-opus-4-6-thinking",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6-thinking",
+    "claude-opus-4-5-20251101-thinking",
+    "gpt-5.4",
+    "gpt-5.4-nano",
+    "gpt-5.4-mini-2026-03-17",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "qwen3.5-plus",
+    "kimi-k2.5"
+]
+DEERAPI_MODEL_OPTIONS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-thinking",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview-thinking",
+    "gpt-5.4-nano",
+    "gpt-5.4",
+    "qwen3.5-27b",
+    "qwen3.5-flash"
+]
+YUNWU_MODEL_OPTIONS = BLTCY_MODEL_OPTIONS + [
+    "qwen3.6-plus",
+    "doubao-seed-2-0-lite-260215"
+]
+DE_AI_MODEL_MIGRATION = {
+    "deepseek-v3-1-terminus": "deepseek-v3.1",
+    "deepseek-v3-2-exp": "deepseek-v3.2",
+}
+DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "qwen3.5-plus", "glm-5"]
 ROLE_AUDIENCE_MAP = {
     "发行主编": "游戏行业从业者",
     "研发主编": "游戏圈同行和硬核玩家",
@@ -1691,7 +1725,14 @@ def init_state():
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
     if 'de_ai_model' not in st.session_state:
-        st.session_state.de_ai_model = "deepseek-v3-1-terminus"
+        st.session_state.de_ai_model = DE_AI_MODELS[0]
+    else:
+        st.session_state.de_ai_model = DE_AI_MODEL_MIGRATION.get(
+            st.session_state.de_ai_model,
+            st.session_state.de_ai_model,
+        )
+        if st.session_state.de_ai_model not in DE_AI_MODELS:
+            st.session_state.de_ai_model = DE_AI_MODELS[0]
     if 'de_ai_temperature' not in st.session_state:
         st.session_state.de_ai_temperature = 0.75
     if 'de_ai_prompt_template' not in st.session_state:
@@ -2477,40 +2518,20 @@ with st.sidebar:
         st.warning("未读取到有效 prompts 配置，当前使用默认角色。请确认部署目录中的 prompts.json。")
         st.caption(PROMPTS_LOAD_REPORT)
     st.header("⚙️ 引擎设置")
-    api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI"])
+    api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI", "云雾API"])
     
     if api_provider == "BLTCY (柏拉图次元)":
         api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
         current_base_url = "https://api.bltcy.ai/v1"
-        available_models = [
-            "gemini-3.1-pro-preview",
-            "gemini-3.1-pro-preview-thinking-high",
-            "gemini-3.1-flash-lite-preview-thinking-high",
-            "claude-opus-4-6-thinking",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6-thinking",
-            "claude-opus-4-5-20251101-thinking",
-            "gpt-5.4",
-            "gpt-5.4-nano",
-            "gpt-5.4-mini-2026-03-17",
-            "MiniMax-M2.7",
-            "MiniMax-M2.7-highspeed",
-            "qwen3.5-plus",
-            "kimi-k2.5"
-        ]
+        available_models = BLTCY_MODEL_OPTIONS
+    elif api_provider == "云雾API":
+        api_key = st.text_input("🔑 输入云雾API Key", type="password")
+        current_base_url = "https://yunwu.ai/v1"
+        available_models = YUNWU_MODEL_OPTIONS
     else:
         api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
         current_base_url = "https://api.deerapi.com/v1"
-        available_models = [
-            "gemini-3.1-pro-preview",
-            "gemini-3.1-pro-preview-thinking",
-            "gemini-3.1-flash-lite",
-            "gemini-3.1-flash-lite-preview-thinking",
-            "gpt-5.4-nano",
-            "gpt-5.4",
-            "qwen3.5-27b",
-            "qwen3.5-flash"
-        ]
+        available_models = DEERAPI_MODEL_OPTIONS
 
     default_model_idx = 0
     if "gemini-3.1-pro-preview" in available_models:
