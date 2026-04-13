@@ -1121,6 +1121,68 @@ def build_openai_timeout(base_url, model_name):
     return httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=60.0)
 
 
+def build_openai_http_client(timeout_config):
+    return httpx.Client(
+        timeout=timeout_config,
+        http2=False,
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=0),
+        headers={
+            "Connection": "close",
+            "Accept-Encoding": "identity",
+        },
+    )
+
+
+def should_retry_with_requests_fallback(exc):
+    error_text = format_llm_exception(exc).lower()
+    retry_markers = [
+        "apiconnectionerror",
+        "remoteprotocolerror",
+        "server disconnected without sending a response",
+        "connection aborted",
+        "connection reset",
+        "connection refused",
+        "connection error",
+    ]
+    return any(marker in error_text for marker in retry_markers)
+
+
+def build_requests_timeout(timeout_config):
+    connect_timeout = getattr(timeout_config, "connect", None) or 20.0
+    read_timeout = getattr(timeout_config, "read", None) or 600.0
+    return (connect_timeout, read_timeout)
+
+
+def call_llm_via_requests(api_key, base_url, request_payload, timeout_config):
+    endpoint = (base_url or "").rstrip("/") + "/chat/completions"
+    session = requests.Session()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Connection": "close",
+        "Accept-Encoding": "identity",
+    }
+
+    response = session.post(
+        endpoint,
+        headers=headers,
+        json=request_payload,
+        timeout=build_requests_timeout(timeout_config),
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not choices:
+        raise ValueError("Fallback request returned no choices.")
+
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = normalize_llm_response_content(message.get("content"))
+    if not content.strip():
+        raise ValueError("Fallback request returned an empty message body.")
+    return content
+
 
 def should_stream_llm_request(base_url, model_name):
     base_url = (base_url or "").strip().lower()
@@ -1369,12 +1431,6 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
     try:
         timeout_config = build_openai_timeout(base_url, model_name)
         use_stream = should_stream_llm_request(base_url, model_name)
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            max_retries=0,
-            timeout=timeout_config,
-        )
 
         messages = [{"role": "system", "content": system_prompt}]
 
@@ -1399,24 +1455,38 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
             "temperature": 0.3 if temperature is None else temperature,
         }
 
-        if use_stream:
-            parts = []
-            with client.chat.completions.create(stream=True, **request_kwargs) as stream:
-                for chunk in stream:
-                    if not getattr(chunk, "choices", None):
-                        continue
-                    for choice in chunk.choices:
-                        delta = getattr(choice, "delta", None)
-                        delta_content = getattr(delta, "content", None) if delta else None
-                        if delta_content:
-                            parts.append(delta_content)
-            content = "".join(parts).strip()
-        else:
-            response = client.chat.completions.create(**request_kwargs)
-            if not getattr(response, "choices", None):
-                raise ValueError("Model returned no choices.")
-            message = response.choices[0].message if response.choices else None
-            content = normalize_llm_response_content(getattr(message, "content", None))
+        try:
+            with build_openai_http_client(timeout_config) as raw_http_client:
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    max_retries=0,
+                    timeout=timeout_config,
+                    http_client=raw_http_client,
+                )
+
+                if use_stream:
+                    parts = []
+                    with client.chat.completions.create(stream=True, **request_kwargs) as stream:
+                        for chunk in stream:
+                            if not getattr(chunk, "choices", None):
+                                continue
+                            for choice in chunk.choices:
+                                delta = getattr(choice, "delta", None)
+                                delta_content = getattr(delta, "content", None) if delta else None
+                                if delta_content:
+                                    parts.append(delta_content)
+                    content = "".join(parts).strip()
+                else:
+                    response = client.chat.completions.create(**request_kwargs)
+                    if not getattr(response, "choices", None):
+                        raise ValueError("Model returned no choices.")
+                    message = response.choices[0].message if response.choices else None
+                    content = normalize_llm_response_content(getattr(message, "content", None))
+        except Exception as sdk_error:
+            if not should_retry_with_requests_fallback(sdk_error):
+                raise
+            content = call_llm_via_requests(api_key, base_url, request_kwargs, timeout_config)
 
         if not content.strip():
             raise ValueError("Model returned an empty message body.")
