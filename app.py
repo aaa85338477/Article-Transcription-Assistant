@@ -38,6 +38,7 @@ PROMPTS_PATH_CANDIDATES = [
 
 PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
 DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
+AI_DIAGNOSTIC_LOG = os.path.join(APP_DIR, "ai_diagnostics.log")
 PROMPTS_LOAD_REPORT = ""
 
 
@@ -81,6 +82,46 @@ def get_prompt_file_candidates():
             seen.add(normalized)
             unique_candidates.append(normalized)
     return unique_candidates
+
+
+def build_exception_chain(exc):
+    chain = []
+    current = exc
+    seen = set()
+    while current and id(current) not in seen:
+        seen.add(id(current))
+        label = type(current).__name__
+        message = str(current).strip()
+        chain.append(f"{label}: {message}" if message else label)
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return chain
+
+
+def format_llm_exception(exc):
+    chain = build_exception_chain(exc)
+    if not chain:
+        return "Unknown error."
+    if len(chain) == 1:
+        return chain[0]
+    return " -> ".join(chain)
+
+
+def write_ai_diagnostic_log(stage_name, base_url, model_name, error_message, user_content, image_count=0, history_count=0):
+    payload = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "stage": stage_name or "",
+        "base_url": base_url or "",
+        "model": model_name or "",
+        "error": error_message,
+        "image_count": image_count,
+        "history_count": history_count,
+        "user_content_chars": len(user_content or ""),
+    }
+    try:
+        with open(AI_DIAGNOSTIC_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 1. 切断 AI 八股句式：坚决禁用“不是……而是”、“不仅……甚至”、“总而言之”、“在这个瞬息万变的时代”、“正如前文所述”等强烈的机械感过渡句和排比句。
@@ -1183,23 +1224,28 @@ def generate_script_for_current_article(api_key, base_url, model_name, script_du
 # ==========================================
 def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None, temperature=None):
     if not api_key:
-        st.error("⚠️ 请先在左侧边栏输入 API Key！")
+        st.error("Please enter an API key in the sidebar first.")
         st.stop()
-        
+
     if image_urls is None:
         image_urls = []
-        
+    if history is None:
+        history = []
+
+    current_stage = st.session_state.get("pending_ai_stage", "")
+
     try:
         client = OpenAI(
             api_key=api_key,
-            base_url=base_url 
+            base_url=base_url,
+            max_retries=0,
         )
-        
+
         messages = [{"role": "system", "content": system_prompt}]
-        
+
         if history:
             messages.extend(history)
-            
+
         if image_urls:
             message_content = [{"type": "text", "text": user_content}]
             for img_url in image_urls:
@@ -1226,10 +1272,20 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         st.session_state.last_ai_error = ""
         return content
     except Exception as e:
-        st.session_state.last_ai_error = str(e)
+        formatted_error = format_llm_exception(e)
+        st.session_state.last_ai_error = formatted_error
         st.session_state.pending_ai_stage = ""
+        write_ai_diagnostic_log(
+            current_stage,
+            base_url,
+            model_name,
+            formatted_error,
+            user_content,
+            image_count=len(image_urls),
+            history_count=len(history),
+        )
         save_draft()
-        st.error(f"API call failed: {str(e)}")
+        st.error(f"API call failed: {formatted_error}")
         st.stop()
 
 def push_to_feishu(article_text, script_text=None):
@@ -1975,23 +2031,43 @@ def normalize_copy_text(text):
     return normalized.strip()
 
 
+def _render_inline_markdown_for_clipboard(text):
+    escaped = html_lib.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
+    return escaped.replace("\n", "<br/>")
+
+
 def markdown_to_editor_html(markdown_text):
     normalized = normalize_copy_text(markdown_text)
     if not normalized:
-        return "<p></p>"
+        fragment = "<div><br/></div>"
+        return (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+            "<!--StartFragment-->"
+            f"{fragment}"
+            "<!--EndFragment-->"
+            "</body></html>"
+        )
 
     paragraphs = [item.strip() for item in re.split(r"\n{2,}", normalized) if item.strip()]
     if not paragraphs:
-        return "<p></p>"
+        paragraphs = [normalized]
 
     html_parts = []
     for paragraph in paragraphs:
-        escaped = html_lib.escape(paragraph)
-        escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
-        escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
-        escaped = escaped.replace("\n", "<br/>")
-        html_parts.append(f"<p>{escaped}</p>")
-    return "".join(html_parts)
+        rendered_paragraph = _render_inline_markdown_for_clipboard(paragraph)
+        # Use block-level divs for better compatibility with community editors.
+        html_parts.append(f"<div>{rendered_paragraph}</div>")
+
+    fragment = "".join(html_parts)
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+        "<!--StartFragment-->"
+        f"{fragment}"
+        "<!--EndFragment-->"
+        "</body></html>"
+    )
 
 
 def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制（保留段落）"):
