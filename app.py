@@ -22,11 +22,23 @@ try:
 except Exception:
     pd = None
 
+from podcast_audio import (
+    DEFAULT_TTS_MODEL,
+    DEFAULT_TTS_VOICE,
+    VOICE_LABELS as PODCAST_VOICE_LABELS,
+    PodcastAudioError,
+    synthesize_podcast,
+)
+from podcast_script import get_podcast_sys_prompt, normalize_podcast_segments, parse_podcast_script_segments
+
 
 # ==========================================
 # 0. 提示词与草稿持久化管理 (JSON 存储)
 # ==========================================
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_AUDIO_DIR = os.path.join(APP_DIR, "runtime_audio")
+PODCAST_OUTPUT_DIR = os.path.join(RUNTIME_AUDIO_DIR, "podcasts")
+PODCAST_CACHE_DIR = os.path.join(RUNTIME_AUDIO_DIR, "tts_cache")
 
 PROMPTS_PATH_CANDIDATES = [
     os.path.join(APP_DIR, "prompts.json"),
@@ -182,6 +194,9 @@ def save_draft():
         'current_step', 'article_url', 'video_url', 'source_content',
         'source_images', 'extraction_success', 'draft_article',
         'review_feedback', 'modified_article', 'final_article', 'highlighted_article', 'spoken_script',
+        'podcast_enabled', 'podcast_duration', 'podcast_script_raw', 'podcast_script_segments',
+        'podcast_audio_path', 'podcast_audio_manifest', 'podcast_last_error', 'podcast_voice',
+        'podcast_tts_provider', 'podcast_tts_api_key_present',
         'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
         'source_images_all', 'selected_source_image_ids', 'article_versions',
         'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
@@ -220,6 +235,56 @@ def clear_draft():
         except:
             pass
 
+
+def ensure_podcast_runtime_dirs():
+    os.makedirs(PODCAST_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(PODCAST_CACHE_DIR, exist_ok=True)
+
+
+def reset_podcast_outputs(delete_audio=False):
+    audio_path = st.session_state.get("podcast_audio_path", "")
+    if delete_audio and audio_path and os.path.exists(audio_path):
+        try:
+            os.remove(audio_path)
+        except OSError:
+            pass
+    st.session_state.podcast_script_raw = ""
+    st.session_state.podcast_script_segments = []
+    st.session_state.podcast_audio_path = ""
+    st.session_state.podcast_audio_manifest = {}
+    st.session_state.podcast_last_error = ""
+
+
+def generate_podcast_script_for_current_article(api_key, base_url, model_name, podcast_duration):
+    final_article = (st.session_state.get("final_article") or "").strip()
+    if not final_article:
+        reset_podcast_outputs(delete_audio=True)
+        return False
+
+    raw_script = call_llm(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=model_name,
+        system_prompt=get_podcast_sys_prompt(podcast_duration),
+        user_content=f"请将以下文章改写为适合 {podcast_duration} 的单人中文播客解说 JSON：\n\n{final_article}",
+    )
+
+    try:
+        segments = parse_podcast_script_segments(raw_script)
+    except ValueError as exc:
+        reset_podcast_outputs(delete_audio=True)
+        st.session_state.podcast_script_raw = raw_script
+        st.session_state.podcast_last_error = str(exc)
+        save_draft()
+        return False
+
+    st.session_state.podcast_script_raw = raw_script
+    st.session_state.podcast_script_segments = segments
+    st.session_state.podcast_audio_path = ""
+    st.session_state.podcast_audio_manifest = {}
+    st.session_state.podcast_last_error = ""
+    save_draft()
+    return True
 
 def sanitize_editor_prompt(prompt_text):
     if not isinstance(prompt_text, str):
@@ -1793,6 +1858,40 @@ def init_state():
         st.session_state.chat_history = []
     if 'image_keywords' not in st.session_state:
         st.session_state.image_keywords = ""
+    if 'podcast_enabled' not in st.session_state:
+        st.session_state.podcast_enabled = False
+    if 'podcast_duration' not in st.session_state:
+        st.session_state.podcast_duration = "5分钟"
+    if 'podcast_script_raw' not in st.session_state:
+        st.session_state.podcast_script_raw = ""
+    if 'podcast_script_segments' not in st.session_state:
+        st.session_state.podcast_script_segments = []
+    if 'podcast_audio_path' not in st.session_state:
+        st.session_state.podcast_audio_path = ""
+    if 'podcast_audio_manifest' not in st.session_state:
+        st.session_state.podcast_audio_manifest = {}
+    if 'podcast_last_error' not in st.session_state:
+        st.session_state.podcast_last_error = ""
+    if 'podcast_voice' not in st.session_state:
+        st.session_state.podcast_voice = (
+            st.session_state.get("podcast_voice_a")
+            or st.session_state.get("podcast_voice_b")
+            or DEFAULT_TTS_VOICE
+        )
+    legacy_podcast_segments = st.session_state.get("podcast_script_segments", [])
+    if legacy_podcast_segments:
+        try:
+            st.session_state.podcast_script_segments = normalize_podcast_segments(legacy_podcast_segments)
+        except ValueError:
+            st.session_state.podcast_script_segments = []
+    legacy_podcast_manifest = st.session_state.get("podcast_audio_manifest", {}) or {}
+    if legacy_podcast_manifest.get("voice_map") and not legacy_podcast_manifest.get("voice"):
+        st.session_state.podcast_audio_path = ""
+        st.session_state.podcast_audio_manifest = {}
+    if 'podcast_tts_provider' not in st.session_state:
+        st.session_state.podcast_tts_provider = "DashScope Qwen-TTS"
+    if 'podcast_tts_api_key_present' not in st.session_state:
+        st.session_state.podcast_tts_api_key_present = False
     if 'pending_completion_sound' not in st.session_state:
         st.session_state.pending_completion_sound = False
     if 'target_article_words' not in st.session_state:
@@ -2599,12 +2698,33 @@ with st.sidebar:
     st.header("🎬 视频分镜设置")
     enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
     script_duration = st.selectbox(
-        "⏱️ 设定分镜脚本目标时长", 
-        ["1分钟", "3分钟", "5分钟", "8分钟"], 
-        index=2, 
-        disabled=not enable_script 
+        "⏱️ 设定分镜脚本目标时长",
+        ["1分钟", "3分钟", "5分钟", "8分钟"],
+        index=2,
+        disabled=not enable_script
     )
 
+    st.markdown("---")
+    st.header("播客语音设置")
+    st.toggle("启用伴生【播客解说稿】", key="podcast_enabled", on_change=save_draft)
+    st.selectbox(
+        "播客时长",
+        ["3分钟", "5分钟", "8分钟", "12分钟"],
+        key="podcast_duration",
+        on_change=save_draft,
+        disabled=not st.session_state.get("podcast_enabled", False)
+    )
+    podcast_api_key = st.text_input("输入阿里云 DashScope API Key", type="password")
+    st.session_state.podcast_tts_api_key_present = bool((podcast_api_key or "").strip())
+    st.caption("当前播客语音合成使用单音色 Qwen-TTS。")
+    st.selectbox(
+        "主播音色",
+        options=list(PODCAST_VOICE_LABELS.keys()),
+        format_func=lambda key: PODCAST_VOICE_LABELS.get(key, key),
+        key="podcast_voice",
+        on_change=save_draft,
+        disabled=not st.session_state.get("podcast_enabled", False)
+    )
 
     st.markdown("---")
     st.header("Obsidian 知识库")
@@ -3234,9 +3354,19 @@ elif st.session_state.current_step == 5:
                 append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
-                    save_draft()
                 else:
                     st.session_state.spoken_script = ""
+
+                if st.session_state.get("podcast_enabled"):
+                    generate_podcast_script_for_current_article(
+                        api_key,
+                        current_base_url,
+                        selected_model,
+                        st.session_state.get("podcast_duration", "5分钟"),
+                    )
+                else:
+                    reset_podcast_outputs(delete_audio=True)
+                save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
                 st.rerun()
@@ -3262,6 +3392,16 @@ elif st.session_state.current_step == 5:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
                 else:
                     st.session_state.spoken_script = ""
+
+                if st.session_state.get("podcast_enabled"):
+                    generate_podcast_script_for_current_article(
+                        api_key,
+                        current_base_url,
+                        selected_model,
+                        st.session_state.get("podcast_duration", "5分钟"),
+                    )
+                else:
+                    reset_podcast_outputs(delete_audio=True)
                 if not highlighted_article:
                     st.warning("高亮版生成失败，本次仅保留纯净定稿。")
                 checkpoint_ai_stage("de_ai_generation", target_step=6)
@@ -3309,6 +3449,8 @@ elif st.session_state.current_step == 6:
                 if st.button("将此版本设为当前定稿", key="use_selected_version_as_final", use_container_width=True):
                     st.session_state.final_article = selected_version.get("content", "")
                     st.session_state.highlighted_article = ""
+                    st.session_state.spoken_script = ""
+                    reset_podcast_outputs(delete_audio=True)
                     st.session_state.active_article_version_id = selected_version_id
                     refresh_obsidian_influence_map(force=True)
                     save_draft()
@@ -3328,17 +3470,111 @@ elif st.session_state.current_step == 6:
         st.divider()
         st.markdown("### 高亮阅读版")
         render_highlighted_article_panel(st.session_state.get("highlighted_article", ""))
-        
+
         if st.session_state.spoken_script:
             st.divider()
             st.markdown(f"### 分镜脚本 · {script_duration}")
             st.code(st.session_state.spoken_script, language="markdown")
             render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step6")
-        
+        if st.session_state.get("podcast_enabled"):
+            st.divider()
+            st.markdown(f"### 播客解说稿 · {st.session_state.get('podcast_duration', '5分钟')}")
+            podcast_script_segments = st.session_state.get("podcast_script_segments", []) or []
+            podcast_script_json = json.dumps(podcast_script_segments, ensure_ascii=False, indent=2) if podcast_script_segments else ""
+
+            podcast_btn_col1, podcast_btn_col2, podcast_btn_col3 = st.columns(3)
+            with podcast_btn_col1:
+                if st.button("重生成播客稿", use_container_width=True):
+                    with st.spinner("正在生成单人播客解说稿..."):
+                        success = generate_podcast_script_for_current_article(
+                            api_key,
+                            current_base_url,
+                            selected_model,
+                            st.session_state.get("podcast_duration", "5分钟"),
+                        )
+                        if success:
+                            st.success("播客解说稿已更新。")
+                        else:
+                            st.error(st.session_state.get("podcast_last_error", "播客解说稿生成失败。"))
+                        st.rerun()
+            with podcast_btn_col2:
+                synthesize_clicked = st.button("合成播客音频", use_container_width=True)
+            with podcast_btn_col3:
+                if st.button("清除播客音频", use_container_width=True):
+                    audio_path = st.session_state.get("podcast_audio_path", "")
+                    if audio_path and os.path.exists(audio_path):
+                        try:
+                            os.remove(audio_path)
+                        except OSError:
+                            pass
+                    st.session_state.podcast_audio_path = ""
+                    st.session_state.podcast_audio_manifest = {}
+                    st.session_state.podcast_last_error = ""
+                    save_draft()
+                    st.rerun()
+
+            if podcast_script_json:
+                st.code(podcast_script_json, language="json")
+                render_editor_friendly_copy_button(podcast_script_json, "podcast_script_step6")
+            else:
+                st.info("当前还没有播客解说稿。你可以先点击“重生成播客稿”。")
+
+            if synthesize_clicked:
+                if not podcast_script_segments:
+                    st.error("请先生成播客解说稿，再进行音频合成。")
+                elif not (podcast_api_key or "").strip():
+                    st.error("请先在侧边栏填写阿里云 DashScope API Key。")
+                else:
+                    with st.spinner("正在合成播客音频..."):
+                        try:
+                            ensure_podcast_runtime_dirs()
+                            output_path, manifest = synthesize_podcast(
+                                segments=podcast_script_segments,
+                                voice=st.session_state.get("podcast_voice", DEFAULT_TTS_VOICE),
+                                api_key=podcast_api_key.strip(),
+                                output_dir=PODCAST_OUTPUT_DIR,
+                                cache_dir=PODCAST_CACHE_DIR,
+                                model=DEFAULT_TTS_MODEL,
+                            )
+                            st.session_state.podcast_audio_path = output_path
+                            st.session_state.podcast_audio_manifest = manifest
+                            st.session_state.podcast_last_error = ""
+                            save_draft()
+                            st.success("播客音频已生成。")
+                            st.rerun()
+                        except PodcastAudioError as exc:
+                            st.session_state.podcast_last_error = str(exc)
+                            save_draft()
+                            st.error(str(exc))
+
+            podcast_error = st.session_state.get("podcast_last_error", "")
+            if podcast_error:
+                st.error(podcast_error)
+
+            podcast_audio_path = st.session_state.get("podcast_audio_path", "")
+            if podcast_audio_path and os.path.exists(podcast_audio_path):
+                with open(podcast_audio_path, "rb") as podcast_audio_file:
+                    podcast_audio_bytes = podcast_audio_file.read()
+                st.audio(podcast_audio_bytes, format="audio/mp3")
+                st.download_button(
+                    label="下载播客 MP3",
+                    data=podcast_audio_bytes,
+                    file_name=os.path.basename(podcast_audio_path),
+                    mime="audio/mpeg",
+                    use_container_width=True,
+                )
+                manifest = st.session_state.get("podcast_audio_manifest", {}) or {}
+                if manifest:
+                    voice = manifest.get("voice", "")
+                    st.caption(
+                        f"音色：{PODCAST_VOICE_LABELS.get(voice, voice)}｜"
+                        f"片段数：{manifest.get('segment_count', 0)}｜缓存命中：{manifest.get('cache_hits', 0)}"
+                    )
+
         st.divider()
         st.markdown("### 智能配图助手")
         st.info("需要为文章寻找真实、高质的配图？点击下方按钮，AI 将根据文章核心内容提取 10 个精确的 Google 图片搜索关键词。")
-        
+
         if st.button("💡 提取 10 个 Google 搜图关键词", use_container_width=True):
             with st.spinner("正在深度分析文章，提取精确的搜图词汇..."):
                 keyword_prompt = """请根据以下文章内容，提取 10 个最适合在 Google 图片（Google Images）中搜索配图的精准关键词组合。
@@ -3351,17 +3587,17 @@ elif st.session_state.current_step == 6:
                 
                 【文章定稿内容】：
                 """ + st.session_state.final_article
-                
+
                 st.session_state.image_keywords = call_llm(
-                    api_key=api_key, 
+                    api_key=api_key,
                     base_url=current_base_url,
-                    model_name=selected_model, 
-                    system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。", 
+                    model_name=selected_model,
+                    system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。",
                     user_content=keyword_prompt
                 )
                 save_draft()
                 notify_step_completed()
-                
+
         if st.session_state.image_keywords:
             st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
             st.code(st.session_state.image_keywords, language="markdown")
