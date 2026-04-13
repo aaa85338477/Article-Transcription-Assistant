@@ -8,6 +8,7 @@ import os
 import html as html_lib
 from docx import Document
 from openai import OpenAI
+import httpx
 import requests
 import json
 from bs4 import BeautifulSoup
@@ -1044,35 +1045,67 @@ def run_obsidian_retrieval(force=False):
     refresh_obsidian_influence_map(force=True)
     save_draft()
 
+def build_openai_timeout(base_url, model_name):
+    base_url = (base_url or "").strip().lower()
+    model_name = (model_name or "").strip().lower()
+
+    # Yunwu Qwen models have shown billed-but-disconnected responses, so use a wider timeout window.
+    if "yunwu.ai/v1" in base_url and model_name in {"qwen3.5-plus", "qwen3.6-plus"}:
+        return httpx.Timeout(connect=30.0, read=1800.0, write=120.0, pool=120.0)
+
+    return httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=60.0)
+
+
+
+def should_stream_llm_request(base_url, model_name):
+    base_url = (base_url or "").strip().lower()
+    model_name = (model_name or "").strip().lower()
+    return "yunwu.ai/v1" in base_url and model_name in {"qwen3.5-plus", "qwen3.6-plus"}
+
+
 BLTCY_MODEL_OPTIONS = [
+    "qwen3.5-plus",
+    "kimi-k2.5",
+    "gpt-5.4",
+    "claude-opus-4-6",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano",
     "gemini-3.1-pro-preview",
+    "claude-sonnet-4-6-thinking",
+    "claude-opus-4-6-thinking",
+    "claude-opus-4-5-20251101-thinking",
     "gemini-3.1-pro-preview-thinking-high",
     "gemini-3.1-flash-lite-preview-thinking-high",
-    "claude-opus-4-6-thinking",
-    "claude-opus-4-6",
-    "claude-sonnet-4-6-thinking",
-    "claude-opus-4-5-20251101-thinking",
-    "gpt-5.4",
-    "gpt-5.4-nano",
-    "gpt-5.4-mini-2026-03-17",
     "MiniMax-M2.7",
-    "MiniMax-M2.7-highspeed",
-    "qwen3.5-plus",
-    "kimi-k2.5"
+    "MiniMax-M2.7-highspeed"
 ]
 DEERAPI_MODEL_OPTIONS = [
+    "gpt-5.4",
+    "qwen3.5-27b",
+    "qwen3.5-flash",
+    "gpt-5.4-nano",
     "gemini-3.1-pro-preview",
     "gemini-3.1-pro-preview-thinking",
     "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-preview-thinking",
-    "gpt-5.4-nano",
-    "gpt-5.4",
-    "qwen3.5-27b",
-    "qwen3.5-flash"
+    "gemini-3.1-flash-lite-preview-thinking"
 ]
-YUNWU_MODEL_OPTIONS = BLTCY_MODEL_OPTIONS + [
+YUNWU_MODEL_OPTIONS = [
     "qwen3.6-plus",
-    "doubao-seed-2-0-lite-260215"
+    "qwen3.5-plus",
+    "kimi-k2.5",
+    "gpt-5.4",
+    "claude-opus-4-6",
+    "doubao-seed-2-0-lite-260215",
+    "gpt-5.4-mini-2026-03-17",
+    "gpt-5.4-nano",
+    "gemini-3.1-pro-preview",
+    "claude-sonnet-4-6-thinking",
+    "claude-opus-4-6-thinking",
+    "claude-opus-4-5-20251101-thinking",
+    "gemini-3.1-pro-preview-thinking-high",
+    "gemini-3.1-flash-lite-preview-thinking-high",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed"
 ]
 DE_AI_MODEL_MIGRATION = {
     "deepseek-v3-1-terminus": "deepseek-v3.1",
@@ -1269,10 +1302,13 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
     current_stage = st.session_state.get("pending_ai_stage", "")
 
     try:
+        timeout_config = build_openai_timeout(base_url, model_name)
+        use_stream = should_stream_llm_request(base_url, model_name)
         client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             max_retries=0,
+            timeout=timeout_config,
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -1292,15 +1328,31 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
 
         messages.append({"role": "user", "content": message_content})
 
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=0.3 if temperature is None else temperature
-        )
-        if not getattr(response, "choices", None):
-            raise ValueError("Model returned no choices.")
-        message = response.choices[0].message if response.choices else None
-        content = normalize_llm_response_content(getattr(message, "content", None))
+        request_kwargs = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.3 if temperature is None else temperature,
+        }
+
+        if use_stream:
+            parts = []
+            with client.chat.completions.create(stream=True, **request_kwargs) as stream:
+                for chunk in stream:
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    for choice in chunk.choices:
+                        delta = getattr(choice, "delta", None)
+                        delta_content = getattr(delta, "content", None) if delta else None
+                        if delta_content:
+                            parts.append(delta_content)
+            content = "".join(parts).strip()
+        else:
+            response = client.chat.completions.create(**request_kwargs)
+            if not getattr(response, "choices", None):
+                raise ValueError("Model returned no choices.")
+            message = response.choices[0].message if response.choices else None
+            content = normalize_llm_response_content(getattr(message, "content", None))
+
         if not content.strip():
             raise ValueError("Model returned an empty message body.")
         st.session_state.last_ai_error = ""
@@ -2533,10 +2585,14 @@ with st.sidebar:
         current_base_url = "https://api.deerapi.com/v1"
         available_models = DEERAPI_MODEL_OPTIONS
 
-    default_model_idx = 0
-    if "gemini-3.1-pro-preview" in available_models:
-        default_model_idx = available_models.index("gemini-3.1-pro-preview")
-        
+    preferred_default_models = {
+        "BLTCY (柏拉图次元)": "qwen3.5-plus",
+        "DeerAPI": "gpt-5.4",
+        "云雾API": "qwen3.6-plus",
+    }
+    preferred_default_model = preferred_default_models.get(api_provider, available_models[0])
+    default_model_idx = available_models.index(preferred_default_model) if preferred_default_model in available_models else 0
+
     selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
     
     st.markdown("---")
