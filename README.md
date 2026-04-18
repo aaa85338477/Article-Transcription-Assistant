@@ -1,118 +1,246 @@
-﻿# 公众号文章生成助手
+# Article Transcription Assistant
 
-一个面向游戏行业内容团队的 `Streamlit` 多智能体工作台。
+A Streamlit-based editorial workstation for game-industry content teams.
 
-它可以抓取英文行业文章或 YouTube 视频字幕，自动整理素材，调用大模型完成选角色写稿、审稿、改稿、定稿，并可继续生成短视频口播与分镜脚本、配图搜索词、Word 文档和飞书通知。
+This project combines article scraping, YouTube transcript ingestion, local research files, optional Obsidian knowledge support, multi-stage drafting, review and rewrite flows, de-AI finalization, highlighted reading output, podcast/script generation, and export/distribution tools in a single UI.
 
-## 核心能力
+## What This Branch Includes
 
-- 抓取网页文章正文，并自动提取核心配图
-- 抓取 YouTube 字幕，遇到常规字幕接口受限时自动尝试备用解析
-- 支持多编辑角色写稿，例如发行主编、研发主编、游戏快讯编辑、客观转录编辑
-- 支持主编审稿和根据审稿意见自动改稿
-- 支持两种工作模式：
-  - 手动精调模式：逐步确认每一步
-  - 全自动驾驶模式：自动路由角色并一路生成到定稿
-- 可选生成适配剪映 AI 的中文口播与分镜脚本
-- 基于定稿自动提取 Google 搜图关键词
-- 支持导出 Word 文档
-- 支持推送定稿结果到飞书群
-- 支持在定稿页继续对文章进行对话式精修、局部重写和原文溯源
-- 支持保存和恢复未完成工作流草稿
-- 支持在界面中直接管理角色 Prompt 和全局写作规范
+This branch reflects the current production workflow, including:
 
-## 项目结构
+- Multi-source ingestion:
+  - Web articles
+  - YouTube transcripts
+  - Local Word / Excel / TXT / image files
+- Two working modes:
+  - Manual step-by-step workflow
+  - Full auto-drive workflow
+- Multi-role drafting pipeline
+- Reviewer + revision workflow
+- Structured article output with:
+  - candidate title group
+  - opening background lede
+  - sectioned body structure
+- De-AI stage with three style variants:
+  - `Standard`
+  - `Community Article`
+  - `Natural Conversational`
+- Dual final outputs:
+  - clean article output
+  - highlighted reading version
+- Rich copy support for highlighted reading output
+- Version timeline for draft/final article history
+- Version restore that now restores both:
+  - final article body
+  - highlighted reading version
+- Optional downstream outputs:
+  - short-video narration + storyboard script
+  - single-host podcast script
+  - podcast audio synthesis
+  - image search keywords
+  - Word export
+  - Feishu push
+- Prompt management in the UI
+- Draft persistence and recovery
+- Optional Obsidian-assisted research enrichment
+
+## Typical Use Cases
+
+- Turn overseas game-industry articles into Chinese long-form content
+- Turn YouTube commentary into structured Chinese writeups
+- Produce analysis, publishing commentary, design breakdowns, and game-news articles
+- Generate article + short-video script assets from one source package
+- Run a second-pass rewrite for stronger readability or less AI-like phrasing
+
+## Project Layout
 
 ```text
 .
-├─ app.py
-├─ prompts.json
-├─ requirements.txt
-└─ .streamlit/
-   └─ config.toml
+|-- app.py
+|-- podcast_audio.py
+|-- podcast_script.py
+|-- prompts.json
+|-- requirements.txt
+|-- launch_article_tool.cmd
+|-- tests/
+|-- .streamlit/
+|-- draft_state.json      # generated at runtime
+|-- ai_diagnostics.log    # generated at runtime
+`-- runtime_audio/        # generated at runtime
 ```
 
-## 安装与启动
+## Installation
 
-1. 安装依赖：
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. 启动应用：
+## Running the App
+
+Standard startup:
 
 ```bash
 streamlit run app.py
 ```
 
-3. 打开本地页面后，在左侧边栏选择 API 中转站并填写对应的 Key。
+Windows convenience launcher:
 
-## 使用流程
+```bash
+launch_article_tool.cmd
+```
 
-### 1. 输入素材
+After startup, configure the sidebar with the model endpoint and API key you want to use.
 
-- 输入文章链接
-- 可选输入一个 YouTube 视频链接
-- 系统会自动聚合网页正文、视频字幕和图片素材
+## Workflow Overview
 
-### 2. 选择模式
+### 1. Source Intake
 
-- `手动精调模式`：逐步确认生成、审稿、改稿过程
-- `一键全自动驾驶`：AI 自动匹配最佳编辑角色，并连续完成写稿到定稿
+You can combine multiple inputs in one run:
 
-### 3. 定稿扩展
+- article URLs
+- YouTube URLs
+- local files such as Word / Excel / TXT / images
 
-定稿页支持继续完成以下任务：
+The app merges them into one source packet.
 
-- 生成短视频口播与分镜脚本
-- 提取 10 个 Google 图片搜索关键词
-- 导出 Word 文档
-- 推送结果到飞书群
-- 在右侧聊天区让 AI 帮你重写段落或追溯原文出处
+### 2. Mode Selection
 
-## Prompt 配置
+- `Manual`: confirm each stage yourself
+- `Auto-drive`: route the article automatically and generate through to final draft
 
-项目通过 `prompts.json` 管理内容生产角色和写作约束：
+### 3. Draft Generation
 
-- `editors`：编辑角色 Prompt 集合
-- `reviewer`：审稿员 Prompt
-- `global_instruction`：强制追加到所有编辑 Prompt 末尾的全局写作规范
+The editor role produces structured output with:
 
-你既可以直接修改 `prompts.json`，也可以在页面左侧边栏的“提示词管理中心”里完成新增、编辑和删除。
+- candidate titles
+- article body
 
-## 输出内容
+### 4. Review and Revision
 
-根据是否启用扩展能力，系统可产出：
+The reviewer checks:
 
-- 中文公众号深度文章定稿
-- 剪映 AI 可用的口播与分镜脚本
-- Google 图片搜索关键词
-- Word 文档
-- 飞书通知消息
+- factual consistency
+- logic quality
+- opening context clarity
+- heading structure
+- title-group continuity
 
-## 依赖说明
+### 5. De-AI Finalization
 
-- `streamlit`：Web UI
-- `trafilatura`：网页正文提取
-- `youtube-transcript-api`：YouTube 字幕提取
-- `beautifulsoup4`：网页解析与图片提取
-- `openai`：调用兼容 OpenAI SDK 的模型接口
-- `python-docx`：导出 Word 文档
-- `requests`：网页抓取与飞书推送
+The current branch supports three rewrite variants:
 
-## 注意事项
+- `Standard`: balanced and stable
+- `Community Article`: better suited for player-community/forum long posts
+- `Natural Conversational`: more like an experienced human writer talking the point through
 
-- 当前版本以 `Streamlit` 页面应用为主，没有可直接使用的 CLI 入口
-- 飞书推送依赖代码中的 Webhook 配置，使用前请确认是否需要替换成你自己的地址
-- 页面中的角色配置会写回 `prompts.json`
-- 工作流草稿会保存到运行目录下的 `draft_state.json`
-- 如果网页正文提取失败，程序会回退到更简单的提取方式
-- 如果需要结合图片做分析，建议选择支持视觉能力的模型
+This stage outputs three blocks:
 
-## 适用场景
+- `Pure Title Group`
+- `Pure Final Article`
+- `Highlighted Reading Version`
 
-- 英文游戏行业文章转中文公众号深度稿
-- 海外游戏视频内容转中文特稿
-- 游戏出海、研发拆解、行业新闻快讯的内容生产
-- 图文稿与短视频脚本联动生产
+### 6. Distribution Workspace
+
+The final workspace supports:
+
+- final article review
+- highlighted reading view
+- formatted copy for highlighted output
+- version timeline switching
+- narration/storyboard generation
+- podcast script generation
+- podcast audio synthesis
+- image keyword generation
+- Word export
+- Feishu push
+- chat-based polishing
+
+## Prompt Configuration
+
+Prompt configuration is stored in `prompts.json`.
+
+Main sections:
+
+- `editors`: editor role prompts
+- `reviewer`: reviewer prompt
+- `global_instruction`: global writing constraints appended into the drafting flow
+
+You can manage prompts either:
+
+- by editing `prompts.json` directly
+- or through the in-app prompt management UI
+
+You can also point to a custom prompt file with the `PROMPTS_FILE` environment variable.
+
+## Optional Integrations
+
+### Obsidian
+
+If an Obsidian vault path is configured, the app can:
+
+- retrieve local notes as background research
+- build a compact research brief
+- show an influence map that highlights which final paragraphs were clearly informed by local notes
+
+### Podcast / TTS
+
+If podcast features are enabled, the app can:
+
+- generate a single-host podcast script from the current final article
+- synthesize audio into `runtime_audio/podcasts/`
+- cache TTS fragments in `runtime_audio/tts_cache/`
+
+## Important Runtime Files
+
+These files and folders are runtime artifacts and are usually not meant to be committed:
+
+- `draft_state.json`
+- `ai_diagnostics.log`
+- `runtime_audio/`
+- `.tmp_test_runtime/`
+
+## Dependencies
+
+Main packages used in this project:
+
+- `streamlit`
+- `trafilatura`
+- `youtube-transcript-api`
+- `beautifulsoup4`
+- `openai`
+- `python-docx`
+- `pandas`
+- `openpyxl`
+- `xlrd`
+- `dashscope`
+- `pydub`
+- `audioop-lts`
+- `imageio-ffmpeg`
+- `requests`
+- `httpx`
+
+## Notes
+
+- This is a Streamlit application, not a CLI-first tool.
+- Prompt edits inside the UI are written back to `prompts.json`.
+- Working drafts are persisted to `draft_state.json`.
+- AI call diagnostics are written to `ai_diagnostics.log`.
+- Highlighted reading output is now treated as part of a restorable article version.
+- Some downstream features depend on external credentials and model availability.
+- If you want image-aware analysis, use a model endpoint that supports visual input.
+
+## Tests
+
+Run the focused regression suite:
+
+```bash
+python -m unittest tests.test_prompt_structure tests.test_copy_formatting tests.test_article_versions tests.test_podcast_script
+```
+
+Run a quick syntax check:
+
+```bash
+python -m py_compile app.py
+```
