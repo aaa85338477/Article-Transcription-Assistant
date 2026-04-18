@@ -17,6 +17,8 @@ import streamlit.components.v1 as components
 import base64
 import hashlib
 from datetime import datetime
+import time
+import ctypes
 try:
     import pandas as pd
 except Exception:
@@ -119,7 +121,24 @@ def format_llm_exception(exc):
     return " -> ".join(chain)
 
 
-def write_ai_diagnostic_log(stage_name, base_url, model_name, error_message, user_content, image_count=0, history_count=0):
+def build_proxy_diagnostic_snapshot():
+    env_proxy_map = {}
+    for env_name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+        env_value = os.environ.get(env_name, "").strip()
+        if env_value:
+            env_proxy_map[env_name] = env_value
+
+    return {
+        "http_proxy": env_proxy_map.get("HTTP_PROXY", ""),
+        "https_proxy": env_proxy_map.get("HTTPS_PROXY", ""),
+        "all_proxy": env_proxy_map.get("ALL_PROXY", ""),
+        "no_proxy": env_proxy_map.get("NO_PROXY", ""),
+        "env_proxy_keys": sorted(env_proxy_map.keys()),
+        "trust_env_disabled": True,
+    }
+
+
+def write_ai_diagnostic_log(stage_name, base_url, model_name, error_message, user_content, image_count=0, history_count=0, extra_details=None):
     payload = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "stage": stage_name or "",
@@ -130,6 +149,8 @@ def write_ai_diagnostic_log(stage_name, base_url, model_name, error_message, use
         "history_count": history_count,
         "user_content_chars": len(user_content or ""),
     }
+    if extra_details:
+        payload.update(extra_details)
     try:
         with open(AI_DIAGNOSTIC_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -193,13 +214,13 @@ def save_draft():
     keys_to_save = [
         'current_step', 'article_url', 'video_url', 'source_content',
         'source_images', 'extraction_success', 'draft_article',
-        'review_feedback', 'modified_article', 'final_article', 'highlighted_article', 'spoken_script',
+        'review_feedback', 'modified_article', 'final_article', 'title_candidates', 'highlighted_article', 'spoken_script',
         'podcast_enabled', 'podcast_duration', 'podcast_script_raw', 'podcast_script_segments',
         'podcast_audio_path', 'podcast_audio_manifest', 'podcast_last_error', 'podcast_voice',
         'podcast_tts_provider', 'podcast_tts_api_key_present',
         'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
         'source_images_all', 'selected_source_image_ids', 'article_versions',
-        'active_article_version_id', 'de_ai_model', 'de_ai_temperature',
+        'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
         'de_ai_prompt_template', 'pending_ai_stage', 'last_completed_ai_stage',
         'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice',
         'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
@@ -256,7 +277,7 @@ def reset_podcast_outputs(delete_audio=False):
 
 
 def generate_podcast_script_for_current_article(api_key, base_url, model_name, podcast_duration):
-    final_article = (st.session_state.get("final_article") or "").strip()
+    final_article = get_article_body_text((st.session_state.get("final_article") or "").strip())
     if not final_article:
         reset_podcast_outputs(delete_audio=True)
         return False
@@ -343,29 +364,108 @@ def sync_selected_role():
 def build_target_length_instruction():
     target_words = get_target_article_words()
     return (
-        f"【本轮全局字数要求（最高优先级）】\n"
-        f"本次目标字数：约 {target_words} 字（允许 ±10% 浮动）。\n"
-        "若角色提示中存在固定字数要求，请忽略并以本轮全局目标为准。"
+        f"[Global Length Requirement | Highest Priority]\n"
+        f"Target length for this run: about {target_words} words (allow +/-10%).\n"
+        "If any role prompt contains a fixed word-count target, ignore it and follow this run-level target instead."
     )
+
+
+ARTICLE_TITLE_MARKER = "\u3010\u5907\u9009\u6807\u9898\u3011"
+ARTICLE_BODY_MARKER = "\u3010\u6b63\u6587\u3011"
+PURE_TITLE_MARKER = "\u3010\u7eaf\u51c0\u6807\u9898\u7ec4\u3011"
+PURE_BODY_MARKER = "\u3010\u7eaf\u51c0\u5b9a\u7a3f\u3011"
+HIGHLIGHT_MARKER = "\u3010\u9ad8\u4eae\u9605\u8bfb\u7248\u3011"
+
+
+def build_article_structure_instruction(target_words=None):
+    if target_words is None:
+        target_words = get_target_article_words()
+    try:
+        target_words = int(target_words)
+    except Exception:
+        target_words = get_target_article_words()
+
+    if target_words < 1200:
+        heading_instruction = "Use exactly 3 `##` sections for a short article."
+    elif target_words <= 2500:
+        heading_instruction = "Use 3-5 `##` sections so the middle of the article is clearly structured."
+    else:
+        heading_instruction = "Use 4-5 `##` sections by default; add `###` only when one section is genuinely complex."
+
+    return "\n".join([
+        "[Article Structure Protocol | Highest Priority]",
+        "The article body must be written in Markdown.",
+        "Use a short opening lede of 1-2 paragraphs, then move into the main analysis.",
+        heading_instruction,
+        "Each `##` section should usually contain 2-4 natural paragraphs.",
+        "Section titles must be informative and specific; do not use empty headings like `Background`, `Summary`, or `Some Thoughts`.",
+        "Keep the structure clear without making every section mechanically equal.",
+    ])
+
+
+def build_reviewer_structure_instruction():
+    structure_check_marker = "\u3010\u7ed3\u6784\u6027\u68c0\u67e5\u3011"
+    background_check_marker = "\u3010\u80cc\u666f\u5b8c\u6574\u6027\u68c0\u67e5\u3011"
+    title_check_marker = "\u3010\u6807\u9898\u7ec4\u68c0\u67e5\u3011"
+    return "\n".join([
+        "[Structural Review Requirements]",
+        f"You must add a dedicated `{structure_check_marker}` section to the review report.",
+        f"Inside that section, you must explicitly cover `{background_check_marker}` and `{title_check_marker}`.",
+        "Check whether the opening 1-2 paragraphs clearly tell the reader which game, event, company, or controversy the article is about.",
+        "Check whether the opening also explains why this case matters now before the analysis begins.",
+        "Check whether 3-5 candidate titles are still present, aligned with the body, and not drifting in framing.",
+        "Check whether any `##` section is too long, whether headings are too vague, and whether the article still reads like one uninterrupted wall of text.",
+        "If the structure is good, say so explicitly. If it is not, give concrete repair instructions in the revision feedback.",
+    ])
+
+
+def build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction=""):
+    prompt_parts = [
+        reviewer_prompt.strip() if isinstance(reviewer_prompt, str) else "",
+        build_reviewer_structure_instruction(),
+        anti_hallucination_instruction.strip() if isinstance(anti_hallucination_instruction, str) else "",
+    ]
+    return "\n\n".join([part for part in prompt_parts if part])
+
+
+def build_article_output_instruction():
+    return "\n".join([
+        "[Opening Background Protocol | Highest Priority]",
+        "Paragraph 1 must tell the reader exactly which game, event, company, or controversy this article is about.",
+        "Paragraph 2 should explain the immediate background, the current debate, or why this case is worth analyzing now.",
+        "Do not start with conclusions, monetization analysis, or system-level breakdown before the object/event is introduced.",
+        "[Structured Output Protocol | Strict]",
+        "Keep the title group alive at every stage. Do not swallow it into the body.",
+        "All candidate titles and the body must be written in Simplified Chinese.",
+        f"Output exactly two blocks in this order:\n{ARTICLE_TITLE_MARKER}\n1. ...\n2. ...\n3. ...\nProvide 3-5 candidate titles.\n\n{ARTICLE_BODY_MARKER}\nWrite the full article body here.",
+    ])
 
 
 def build_editor_system_prompt(editor_prompt, global_instruction):
     prompt_parts = [
         sanitize_editor_prompt(editor_prompt),
         build_target_length_instruction(),
-        global_instruction.strip() if isinstance(global_instruction, str) else ""
+        build_article_structure_instruction(),
+        build_article_output_instruction(),
+        global_instruction.strip() if isinstance(global_instruction, str) else "",
     ]
     return "\n\n".join([part for part in prompt_parts if part])
 
 
 def build_modification_system_prompt(global_instruction):
-    base_prompt = "你是一位专业文字编辑。请根据审稿意见全面修改初稿，直接输出最终成稿，不要额外解释。"
+    base_prompt = (
+        "You are a professional article editor. Rewrite the draft according to the review feedback. "
+        "Preserve the candidate-title block, preserve the factual order, and output the final revised article directly with no extra explanation."
+    )
     prompt_parts = [
         base_prompt,
         build_target_length_instruction(),
-        global_instruction.strip() if isinstance(global_instruction, str) else ""
+        build_article_structure_instruction(),
+        build_article_output_instruction(),
+        global_instruction.strip() if isinstance(global_instruction, str) else "",
     ]
     return "\n\n".join([part for part in prompt_parts if part])
+
 
 OBSIDIAN_CATEGORY_WEIGHTS = {
     "00_overviews": 60,
@@ -907,16 +1007,151 @@ def build_editor_user_content(source_content, research_brief, use_images=False):
     return "\n\n================\n\n".join(part for part in parts if part.strip())
 
 
-def build_reviewer_user_content(source_content, draft_article, research_brief=""):
+def normalize_title_candidates(title_candidates):
+    if isinstance(title_candidates, str):
+        raw_lines = title_candidates.splitlines()
+    else:
+        raw_lines = []
+        for item in title_candidates or []:
+            raw_lines.extend(str(item).splitlines())
+
+    normalized = []
+    seen = set()
+    ignored_markers = {
+        ARTICLE_TITLE_MARKER,
+        ARTICLE_BODY_MARKER,
+        PURE_TITLE_MARKER,
+        PURE_BODY_MARKER,
+        HIGHLIGHT_MARKER,
+    }
+    for line in raw_lines:
+        cleaned = str(line).strip()
+        cleaned = re.sub(r"^\s*(?:[-*#]|\d+[\.)])\s*", "", cleaned)
+        cleaned = cleaned.strip(" \t\"'`[]")
+        if not cleaned or cleaned in ignored_markers:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(cleaned)
+    return normalized[:5]
+
+
+def parse_title_candidates_block(block_text):
+    return normalize_title_candidates(block_text)
+
+
+def split_structured_article_sections(article_text):
+    clean_text = (article_text or "").strip()
+    if not clean_text:
+        return [], ""
+
+    if ARTICLE_TITLE_MARKER in clean_text:
+        after_title = clean_text.split(ARTICLE_TITLE_MARKER, 1)[1]
+        if ARTICLE_BODY_MARKER in after_title:
+            title_block, body_block = after_title.split(ARTICLE_BODY_MARKER, 1)
+            return parse_title_candidates_block(title_block), body_block.strip()
+
+    if ARTICLE_BODY_MARKER in clean_text:
+        return [], clean_text.split(ARTICLE_BODY_MARKER, 1)[1].strip()
+
+    return [], clean_text
+
+
+def build_title_candidates_block(title_candidates, marker=ARTICLE_TITLE_MARKER):
+    titles = normalize_title_candidates(title_candidates)
+    if not titles:
+        return ""
+    lines = [marker]
+    lines.extend(f"{idx}. {title}" for idx, title in enumerate(titles, start=1))
+    return "\n".join(lines)
+
+
+def build_structured_article_text(title_candidates, article_body):
+    title_block = build_title_candidates_block(title_candidates)
+    clean_body = (article_body or "").strip()
+    parts = []
+    if title_block:
+        parts.append(title_block)
+    if clean_body:
+        parts.append(f"{ARTICLE_BODY_MARKER}\n{clean_body}")
+    return "\n\n".join(parts).strip()
+
+
+def build_display_article_text(article_text, title_candidates=None):
+    titles, body = split_structured_article_sections(article_text)
+    resolved_titles = titles or normalize_title_candidates(title_candidates)
+    clean_body = (body or article_text or "").strip()
+    combined = build_structured_article_text(resolved_titles, clean_body)
+    return combined or clean_body
+
+
+def parse_article_generation_response(response_text, fallback_titles=None):
+    titles, article_body = split_structured_article_sections(response_text)
+    resolved_titles = titles or normalize_title_candidates(fallback_titles)
+    clean_body = (article_body or "").strip()
+    if not clean_body:
+        clean_body = (response_text or "").strip()
+    combined_text = build_structured_article_text(resolved_titles, clean_body)
+    return resolved_titles, clean_body, combined_text or clean_body
+
+
+def get_article_body_text(article_text):
+    _, article_body = split_structured_article_sections(article_text)
+    return (article_body or article_text or "").strip()
+
+
+def build_reviewer_user_content(source_content, draft_article, research_brief="", title_candidates=None):
+    resolved_titles = normalize_title_candidates(title_candidates)
+    if not resolved_titles:
+        resolved_titles, _ = split_structured_article_sections(draft_article)
+
+    title_block = build_title_candidates_block(resolved_titles)
+    if not title_block:
+        title_block = ARTICLE_TITLE_MARKER + "\n(Missing title candidates; treat this as a structural issue.)"
+
+    draft_body = get_article_body_text(draft_article)
     parts = [
-        f"Below is the merged source text (this is the only factual source for review):\n{(source_content or '').strip()}\n\n================\nBelow is the draft:\n{(draft_article or '').strip()}"
+        "Below is the merged source text (this is the only factual source for review):\n"
+        + (source_content or "").strip()
+        + "\n\n================\n\n"
+        + "Below are the current title candidates:\n"
+        + title_block
+        + "\n\n================\n\n"
+        + "Below is the draft body:\n"
+        + draft_body
     ]
     if research_brief:
         parts.append(
-            "Below is a knowledge-base research brief. It may only help you judge whether the article aligns with prior analysis frameworks. It must not be used for new fact checking or to override the source packet.\n\n" + research_brief.strip()
+            "Below is a knowledge-base research brief. It may only help you judge whether the article aligns with prior analysis frameworks. It must not be used for new fact checking or to override the source packet.\n\n"
+            + research_brief.strip()
         )
     return "\n\n".join(parts)
 
+
+def build_modification_user_content(review_feedback, draft_article, title_candidates=None):
+    resolved_titles = normalize_title_candidates(title_candidates)
+    if not resolved_titles:
+        resolved_titles, _ = split_structured_article_sections(draft_article)
+
+    title_block = build_title_candidates_block(resolved_titles)
+    if not title_block:
+        title_block = ARTICLE_TITLE_MARKER + "\n1. ...\n2. ...\n3. ..."
+
+    article_body = get_article_body_text(draft_article)
+    return (
+        "[Current title candidates]\n"
+        + title_block
+        + "\n\n================\n\n"
+        + "[Review feedback]\n"
+        + (review_feedback or "").strip()
+        + "\n\n================\n\n"
+        + "[Current article body]\n"
+        + article_body
+        + "\n\n[Editing requirements]\n"
+        + "Keep the title-candidates block alive. If the direction has not changed, preserve the current title skeleton and only improve wording, precision, and communication power."
+    ).strip()
 
 
 def build_chat_knowledge_context():
@@ -1032,7 +1267,7 @@ def build_obsidian_influence_map(final_article, hits):
 
 
 def refresh_obsidian_influence_map(force=False):
-    final_article = (st.session_state.get("final_article", "") or "").strip()
+    final_article = get_article_body_text((st.session_state.get("final_article", "") or "").strip())
     hits = st.session_state.get("obsidian_hits", []) or []
     if not st.session_state.get("obsidian_enabled") or not final_article or not hits:
         st.session_state.obsidian_influence_map = []
@@ -1124,13 +1359,10 @@ def build_openai_timeout(base_url, model_name):
 def build_openai_http_client(timeout_config):
     return httpx.Client(
         timeout=timeout_config,
+        trust_env=False,
         http2=False,
         follow_redirects=True,
         limits=httpx.Limits(max_connections=20, max_keepalive_connections=0),
-        headers={
-            "Connection": "close",
-            "Accept-Encoding": "identity",
-        },
     )
 
 
@@ -1140,10 +1372,17 @@ def should_retry_with_requests_fallback(exc):
         "apiconnectionerror",
         "remoteprotocolerror",
         "server disconnected without sending a response",
+        "remote end closed connection without response",
         "connection aborted",
         "connection reset",
         "connection refused",
         "connection error",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "502",
+        "503",
+        "504",
     ]
     return any(marker in error_text for marker in retry_markers)
 
@@ -1154,34 +1393,116 @@ def build_requests_timeout(timeout_config):
     return (connect_timeout, read_timeout)
 
 
+def extract_llm_response_content(response_data, empty_choices_message, empty_body_message):
+    choices = response_data.get("choices") if isinstance(response_data, dict) else None
+    if not choices:
+        raise ValueError(empty_choices_message)
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+    content = normalize_llm_response_content(message.get("content"))
+    if not content.strip():
+        raise ValueError(empty_body_message)
+    return content
+
+
 def call_llm_via_requests(api_key, base_url, request_payload, timeout_config):
     endpoint = (base_url or "").rstrip("/") + "/chat/completions"
     session = requests.Session()
+    session.trust_env = False
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "Connection": "close",
-        "Accept-Encoding": "identity",
+        "User-Agent": "Article-Transcription-Assistant/1.0",
     }
 
-    response = session.post(
-        endpoint,
-        headers=headers,
-        json=request_payload,
-        timeout=build_requests_timeout(timeout_config),
-    )
-    response.raise_for_status()
+    try:
+        response = session.post(
+            endpoint,
+            headers=headers,
+            json=request_payload,
+            timeout=build_requests_timeout(timeout_config),
+        )
+        response.raise_for_status()
+        return extract_llm_response_content(
+            response.json(),
+            "Fallback request returned no choices.",
+            "Fallback request returned an empty message body.",
+        )
+    finally:
+        session.close()
 
-    data = response.json()
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if not choices:
-        raise ValueError("Fallback request returned no choices.")
 
-    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-    content = normalize_llm_response_content(message.get("content"))
-    if not content.strip():
-        raise ValueError("Fallback request returned an empty message body.")
-    return content
+def call_llm_via_httpx_raw(api_key, base_url, request_payload, timeout_config):
+    endpoint = (base_url or "").rstrip("/") + "/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "Article-Transcription-Assistant/1.0",
+    }
+
+    with build_openai_http_client(timeout_config) as http_client:
+        response = http_client.post(endpoint, headers=headers, json=request_payload)
+        response.raise_for_status()
+        return extract_llm_response_content(
+            response.json(),
+            "Raw HTTP fallback returned no choices.",
+            "Raw HTTP fallback returned an empty message body.",
+        )
+
+
+def execute_llm_request_once(api_key, base_url, model_name, request_kwargs, timeout_config, use_stream):
+    transport_errors = []
+
+    try:
+        with build_openai_http_client(timeout_config) as raw_http_client:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                max_retries=0,
+                timeout=timeout_config,
+                http_client=raw_http_client,
+            )
+
+            if use_stream:
+                parts = []
+                with client.chat.completions.create(stream=True, **request_kwargs) as stream:
+                    for chunk in stream:
+                        if not getattr(chunk, "choices", None):
+                            continue
+                        for choice in chunk.choices:
+                            delta = getattr(choice, "delta", None)
+                            delta_content = getattr(delta, "content", None) if delta else None
+                            if delta_content:
+                                parts.append(delta_content)
+                content = "".join(parts).strip()
+            else:
+                response = client.chat.completions.create(**request_kwargs)
+                if not getattr(response, "choices", None):
+                    raise ValueError("Model returned no choices.")
+                message = response.choices[0].message if response.choices else None
+                content = normalize_llm_response_content(getattr(message, "content", None))
+
+        if content.strip():
+            return content
+        raise ValueError("Model returned an empty message body.")
+    except Exception as sdk_error:
+        transport_errors.append(f"sdk={format_llm_exception(sdk_error)}")
+        if not should_retry_with_requests_fallback(sdk_error):
+            raise
+
+    for transport_name, transport_fn in (
+        ("requests", call_llm_via_requests),
+        ("httpx_raw", call_llm_via_httpx_raw),
+    ):
+        try:
+            return transport_fn(api_key, base_url, request_kwargs, timeout_config)
+        except Exception as transport_error:
+            transport_errors.append(f"{transport_name}={format_llm_exception(transport_error)}")
+            if not should_retry_with_requests_fallback(transport_error):
+                raise
+
+    raise RuntimeError("All transports failed: " + " | ".join(transport_errors))
 
 
 def should_stream_llm_request(base_url, model_name):
@@ -1239,26 +1560,30 @@ DE_AI_MODEL_MIGRATION = {
     "deepseek-v3-2-exp": "deepseek-v3.2",
 }
 DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "qwen3.5-plus", "glm-5"]
+DE_AI_VARIANTS = ["\u666e\u901a\u7248", "\u793e\u533a\u6587\u7ae0\u53bbAI\u7248", "\u81ea\u7136\u5520\u55d1\u7248"]
+DE_AI_VARIANT_DEFAULT = DE_AI_VARIANTS[0]
+DE_AI_VARIANT_COMMUNITY = DE_AI_VARIANTS[1]
+DE_AI_VARIANT_CHAT = DE_AI_VARIANTS[2]
 ROLE_AUDIENCE_MAP = {
-    "发行主编": "游戏行业从业者",
-    "研发主编": "游戏圈同行和硬核玩家",
-    "游戏快讯编辑": "行业从业者",
-    "客观转录编辑": "公众读者",
-    "游戏行业评论人": "游戏行业从业者",
+    "\u53d1\u884c\u4e3b\u7f16": "\u6e38\u620f\u884c\u4e1a\u4ece\u4e1a\u8005",
+    "\u7814\u53d1\u4e3b\u7f16": "\u6e38\u620f\u5708\u540c\u884c\u548c\u786c\u6838\u73a9\u5bb6",
+    "\u6e38\u620f\u5feb\u8baf\u7f16\u8f91": "\u884c\u4e1a\u4ece\u4e1a\u8005",
+    "\u5ba2\u89c2\u8f6c\u5f55\u7f16\u8f91": "\u516c\u4f17\u8bfb\u8005",
+    "\u6e38\u620f\u884c\u4e1a\u8bc4\u8bba\u5458": "\u6e38\u620f\u884c\u4e1a\u4ece\u4e1a\u8005",
 }
 ROLE_JARGON_MAP = {
-    "发行主编": "ROI、LTV、买量",
-    "研发主编": "核心循环、技术债、管线",
-    "游戏快讯编辑": "版号、上线档期、发行节奏",
-    "客观转录编辑": "留存、变现、本地化",
-    "游戏行业评论人": "ROI、洗量、跑路",
+    "\u53d1\u884c\u4e3b\u7f16": "ROI, LTV, \u4e70\u91cf, \u53d8\u73b0\u6548\u7387",
+    "\u7814\u53d1\u4e3b\u7f16": "\u6838\u5fc3\u5faa\u73af, \u7cfb\u7edf\u8bbe\u8ba1, \u6280\u672f\u503a, \u5de5\u4e1a\u5316\u7ba1\u7ebf",
+    "\u6e38\u620f\u5feb\u8baf\u7f16\u8f91": "\u7248\u53f7, \u4e0a\u7ebf\u6863\u671f, \u53d1\u884c\u8282\u594f, \u5e02\u573a\u53cd\u9988",
+    "\u5ba2\u89c2\u8f6c\u5f55\u7f16\u8f91": "\u7559\u5b58, \u53d8\u73b0, \u672c\u5730\u5316, \u8fd0\u8425\u8282\u594f",
+    "\u6e38\u620f\u884c\u4e1a\u8bc4\u8bba\u5458": "ROI, \u6d17\u91cf, \u8dd1\u91cf, \u5546\u4e1a\u5316\u6548\u7387",
 }
 ROLE_TONE_MAP = {
-    "发行主编": "冷酷清醒",
-    "研发主编": "毒舌但专业",
-    "游戏快讯编辑": "克制冷静",
-    "客观转录编辑": "娓娓道来",
-    "游戏行业评论人": "一针见血",
+    "\u53d1\u884c\u4e3b\u7f16": "\u51b7\u9759\u3001\u950b\u5229\u3001\u5224\u65ad\u660e\u786e",
+    "\u7814\u53d1\u4e3b\u7f16": "\u4e13\u4e1a\u3001\u76f4\u63a5\u3001\u5e26\u4e00\u70b9\u6bd2\u820c",
+    "\u6e38\u620f\u5feb\u8baf\u7f16\u8f91": "\u514b\u5236\u3001\u6e05\u695a\u3001\u4fe1\u606f\u5bc6\u5ea6\u9ad8",
+    "\u5ba2\u89c2\u8f6c\u5f55\u7f16\u8f91": "\u5e73\u5b9e\u3001\u5e72\u51c0\u3001\u7ed3\u6784\u6e05\u6670",
+    "\u6e38\u620f\u884c\u4e1a\u8bc4\u8bba\u5458": "\u4e00\u9488\u89c1\u8840\u3001\u5f3a\u89c2\u70b9\u4f46\u4e0d\u6d6e\u5938",
 }
 
 
@@ -1269,80 +1594,128 @@ def infer_role_persona(role_name, editor_prompt):
         persona = first_line.split(":", 1)[1].strip()
         if persona:
             return persona
-    return role_name or "10年经验的资深行业作者"
+    return role_name or "\u8d44\u6df1\u884c\u4e1a\u4f5c\u8005"
 
 
 def infer_article_topic(source_content):
+
     clean_text = " ".join((source_content or "").split())
     if not clean_text:
         return "当前游戏行业主题"
     return clean_text[:40] + ("..." if len(clean_text) > 40 else "")
 
 
-def build_de_ai_prompt_template(role_name, editor_prompt, source_content):
+def build_de_ai_prompt_template(role_name, editor_prompt, source_content, variant=DE_AI_VARIANT_DEFAULT):
     persona = infer_role_persona(role_name, editor_prompt)
     topic = infer_article_topic(source_content)
-    audience = ROLE_AUDIENCE_MAP.get(role_name, "从业者")
-    jargon = ROLE_JARGON_MAP.get(role_name, "ROI、买量、留存")
-    tone = ROLE_TONE_MAP.get(role_name, "冷酷清醒")
+    audience = ROLE_AUDIENCE_MAP.get(role_name, "行业读者")
+    jargon = ROLE_JARGON_MAP.get(role_name, "ROI, LTV, retention, monetization")
+    tone = ROLE_TONE_MAP.get(role_name, "冷静, 尖锐, 有判断")
+    structure_instruction = build_article_structure_instruction()
+    community_instruction = ""
+    chatty_instruction = ""
+    if variant == DE_AI_VARIANT_COMMUNITY:
+        community_instruction = """
+# Community Forum Adaptation
+Apply a light community-forum rewrite for high-quality game-player discussion spaces.
+- Use more natural player-facing wording and reduce newsroom stiffness, documentation tone, and report-like phrasing.
+- Keep viewpoint clarity, but make sentence rhythm feel more like a strong long post in a player forum.
+- Prefer shorter sentences, cleaner pauses, and more natural transitions between paragraphs.
+- Allow moderate player-perspective resonance, but do not turn the article into emotional venting or fan shouting.
+- Convert overly hard, media-style, or industry-report wording into expressions that ordinary players can read smoothly.
+- Reduce jargon stacking. When jargon is necessary, make it understandable in plain language nearby.
+- Make the conclusion land more clearly on what this means for players, expectations, or community discussion.
+- Do not overdo interactivity: avoid frequent rhetorical questions, forced meme tone, tieba slang, or exaggerated emotional catchphrases.
+"""
+    elif variant == DE_AI_VARIANT_CHAT:
+        chatty_instruction = """
+# Natural Conversational Adaptation
+Apply a medium-strength conversational rewrite that sounds like a real, experienced writer talking the reader through the point.
+- Keep the analysis sharp and useful, but make the prose feel like a human explaining things face to face instead of filing a report.
+- Allow natural transitions such as "to be honest", "actually", "in other words", "so the real issue is", or similar conversational pivots in natural Simplified Chinese.
+- Use more sentence-length variation. Let some sentences land short when the point needs emphasis, instead of keeping every sentence evenly shaped.
+- Allow light scene-setting, light self-aware phrasing, or a brief aside in parentheses when it helps the rhythm, but keep it restrained.
+- Replace newsroom tone, report tone, and instruction-manual tone with clearer human phrasing that still respects the reader's intelligence.
+- Keep professional terms when they matter, but explain them in plain language nearby instead of stacking jargon.
+- Make the ending land on what the matter really means, not just that the analysis is complete.
+- Keep this as high-quality long-form writing. Do not turn it into low-grade chatter, meme posting, tieba slang, dense rhetorical questions, or self-indulgent rambling.
+- Do not let first-person phrasing take over the article. The writer may feel present, but the article must stay focused on the topic and argument.
+- Preserve the title structure, opening background, and analytical spine. Conversational does not mean loose or messy.
+"""
     return f"""# Role: {persona}
 
 # Context
-我有一篇关于【{topic}】的草稿。这篇文章的核心骨架和信息增量是好的，但目前的文本带有严重的“AI 生成味”：结构八股、过渡词生硬、用词存在假大空的翻译腔，缺乏真正【{audience}】在交流时的真实感和血肉感。
+I have an article draft about [{topic}]. The information gain and analytical spine are already useful, but the language still sounds too synthetic. Rewrite it so it feels like a real human expert from the target audience [{audience}] wrote it in natural Simplified Chinese.
 
 # Task
-请你完全代入【填写上述设定的 Role】的视角，对以下【草稿原文】进行彻底的去 AI 化重写。
-你需要保留原文的全部核心信息、数据和逻辑推演，但必须完全摧毁现有的文本外壳，用人类专家的自然口吻重新表达。
+Keep every key fact, data point, argument, example, and reasoning step from the draft. Rewrite only the expression, cadence, and sentence texture.
+If the draft opens too abruptly, add a 1-2 paragraph lede so the reader immediately knows which game, event, company, or controversy the article is about, and why this case matters now.
 
-# 🚫 核心约束：反 AI 审查清单（优先级最高，必须严格遵守）
-1. 词汇黑名单：绝对禁止使用“毫无疑问”、“不仅...而且”、“在这个充满...的时代”、“一场名为...的”、“总而言之”、“不可否认”、“至关重要”、“双刃剑”、“随着...的发展”、“综上所述”等AI高频陈词滥调。
-2. 结构粉碎：禁止使用“一、二、三”或“首先、其次、最后”等死板的枚举结构推进文章。必须使用情绪递进、场景带入或逻辑转折来做段落过渡。
-3. 拒绝“绝对客观”：放弃 AI 惯用的“虽然A有缺点，但B也有不足”的端水句式。你的语气要有主观色彩、有锋芒，甚至可以带点行业人的自嘲或无奈。
-4. 节奏控制：禁止全篇使用长度相似的陈述句。强制要求长短句结合。情绪宣泄和抛出观点时用短句（甚至单句成段），拆解复杂逻辑时用长句。
-5. 行业语境注入：自然地（切忌堆砌）使用【{jargon}】等词汇，营造“圈内人对话”的真实感。
+# Core Constraints
+1. Output everything in Simplified Chinese.
+2. Do not delete the candidate-title block.
+3. Do not flatten the article back into one long wall of text.
+4. Keep the factual order and analytical direction stable.
+5. Use jargon naturally when appropriate: {jargon}.
+6. Preferred tone: {tone}.
 
-# Style & Tone
-* 语气词：{tone}
-* 排版格式：适合移动端阅读，多留白，避免大段密集的文字墙。
+{community_instruction}
+{chatty_instruction}
+# Structure Preservation
+{structure_instruction}
+- Preserve existing heading hierarchy when it already works. You may polish heading wording, but you must not delete the hierarchy.
+- Preserve the candidate-title block and keep 3-5 candidate titles in the final output. If the direction has not changed, keep the same title skeleton and only improve wording and punch.
+- If the draft lacks enough background in the opening, repair that with a concise 1-2 paragraph lede before the main analysis begins.
+- De-AI means rewriting expression, not rebuilding the article from scratch.
 
 # Output Protocol
-请严格按照以下格式输出，顺序不能变：
-【纯净定稿】
-这里输出不含任何HTML、颜色、解释或额外标题的最终成文。
+Output exactly three blocks in this order, with no extra explanation:
 
-【高亮阅读版】
-这里输出基于同一份定稿制作的阅读增强版，只允许做包裹式标注，不能改写信息或增删内容。
-高亮规则只有两类：
-- 学习点 / 方法论 / 正向启发：用 <strong><span class="highlight-positive">...</span></strong>
-- 避坑点 / 风险提醒 / 反例警示：用 <strong><span class="highlight-risk">...</span></strong>
-额外约束：
-- 只允许使用 <p>、<strong>、<span class="highlight-positive">、<span class="highlight-risk"> 这四类标签
-- 禁止输出任何其他HTML标签、内联样式、脚本、解释性前言
-- 每段最多 1-2 处高亮
-- 不要整段上色
-- 没有明显价值就不要高亮
+{PURE_TITLE_MARKER}
+1. ...
+2. ...
+3. ...
+Keep 3-5 candidate titles here.
 
-# 【草稿原文】
-[在此粘贴草稿内容]"""
+{PURE_BODY_MARKER}
+Output only the clean final article body here. Do not repeat the title block. Do not output HTML here.
 
+{HIGHLIGHT_MARKER}
+Output a reading-enhanced HTML version of the same article body.
+Allowed tags: <h2>, <h3>, <p>, <strong>, <span class="highlight-positive">, <span class="highlight-risk">. Prefer <h2>/<h3> instead of Markdown `##` headings when section titles are needed.
+Do not change facts. Do not add or remove content. Highlight only important learning points or risk warnings.
 
-def parse_de_ai_dual_output(response_text):
+# Draft
+[Paste the full draft here]"""
+
+def parse_de_ai_dual_output(response_text, fallback_titles=None):
     clean_text = (response_text or "").strip()
     if not clean_text:
-        return "", ""
+        return normalize_title_candidates(fallback_titles), "", ""
 
-    pure_marker = "【纯净定稿】"
-    highlight_marker = "【高亮阅读版】"
+    resolved_titles = normalize_title_candidates(fallback_titles)
+    pure_part = clean_text
+    if PURE_TITLE_MARKER in clean_text and PURE_BODY_MARKER in clean_text:
+        title_part = clean_text.split(PURE_TITLE_MARKER, 1)[1].split(PURE_BODY_MARKER, 1)[0]
+        parsed_titles = parse_title_candidates_block(title_part)
+        if parsed_titles:
+            resolved_titles = parsed_titles
+        pure_part = clean_text.split(PURE_BODY_MARKER, 1)[1]
+    elif PURE_BODY_MARKER in clean_text:
+        pure_part = clean_text.split(PURE_BODY_MARKER, 1)[1]
+    else:
+        parsed_titles, pure_body = split_structured_article_sections(clean_text)
+        return parsed_titles or resolved_titles, pure_body or clean_text, ""
 
-    if pure_marker not in clean_text:
-        return clean_text, ""
+    highlighted_text = ""
+    if HIGHLIGHT_MARKER in pure_part:
+        pure_text, highlighted_text = pure_part.split(HIGHLIGHT_MARKER, 1)
+    else:
+        pure_text = pure_part
 
-    pure_part = clean_text.split(pure_marker, 1)[1]
-    if highlight_marker in pure_part:
-        pure_text, highlighted_text = pure_part.split(highlight_marker, 1)
-        return pure_text.strip(), highlighted_text.strip()
-
-    return pure_part.strip(), ""
+    _, pure_body = split_structured_article_sections(pure_text)
+    clean_body = (pure_body or pure_text or "").strip()
+    return resolved_titles, clean_body, highlighted_text.strip()
 
 
 def sanitize_highlighted_article(html_text):
@@ -1357,10 +1730,40 @@ def sanitize_highlighted_article(html_text):
     clean_text = clean_text.replace("onerror=", "data-onerror=")
     clean_text = clean_text.replace("onclick=", "data-onclick=")
     clean_text = clean_text.replace("onload=", "data-onload=")
+    clean_text = clean_text.replace("&#x1F517;", "")
+    clean_text = clean_text.replace("\U0001F517", "")
+
+    normalized_lines = []
+    for raw_line in clean_text.splitlines():
+        stripped = raw_line.strip()
+        heading_match = re.match(r"^(#{2,3})\s+(.+)$", stripped)
+        if heading_match:
+            level = len(heading_match.group(1))
+            heading_text = heading_match.group(2).replace("\U0001F517", "")
+            heading_text = re.sub(r"\s*#+\s*$", "", heading_text).strip()
+            normalized_lines.append(f"<h{level}>{heading_text}</h{level}>")
+        else:
+            normalized_lines.append(raw_line)
+    clean_text = "\n".join(normalized_lines)
+
+    clean_text = re.sub(
+        r'<a[^>]*?(?:headerlink|anchor|fragment-link)[^>]*>.*?</a>',
+        "",
+        clean_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    clean_text = re.sub(
+        r'<a[^>]*?href="#.*?"[^>]*>.*?</a>',
+        "",
+        clean_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     return clean_text
 
 
 def render_highlighted_article_panel(html_text):
+
+
     if not (html_text or "").strip():
         st.info("当前版本未生成高亮阅读视图。")
         return
@@ -1377,8 +1780,27 @@ def render_highlighted_article_panel(html_text):
             line-height: 1.9;
             color: #16211c;
         }
+        .highlight-article h2,
+        .highlight-article h3 {
+            margin: 0 0 1rem;
+            color: #16211c;
+            font-weight: 700;
+            line-height: 1.3;
+        }
+        .highlight-article h2 {
+            font-size: 2.1rem;
+        }
+        .highlight-article h3 {
+            font-size: 1.45rem;
+        }
         .highlight-article p {
             margin: 0 0 1rem;
+        }
+        .highlight-article h1 a,
+        .highlight-article h2 a,
+        .highlight-article h3 a,
+        .highlight-article a[href^="#"] {
+            display: none !important;
         }
         .highlight-article .highlight-positive {
             display: inline;
@@ -1398,10 +1820,13 @@ def render_highlighted_article_panel(html_text):
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(f'<div class="highlight-article">{sanitize_highlighted_article(html_text)}</div>', unsafe_allow_html=True)
+    sanitized_html = sanitize_highlighted_article(html_text)
+    render_rich_html_copy_button(sanitized_html, "highlighted_article_step6")
+    st.markdown(f'<div class="highlight-article">{sanitized_html}</div>', unsafe_allow_html=True)
 
 def generate_script_for_current_article(api_key, base_url, model_name, script_duration):
-    if not st.session_state.get("final_article"):
+    final_article_body = get_article_body_text(st.session_state.get("final_article", ""))
+    if not final_article_body:
         st.session_state.spoken_script = ""
         return
     script_sys_prompt = get_script_sys_prompt(script_duration)
@@ -1410,10 +1835,12 @@ def generate_script_for_current_article(api_key, base_url, model_name, script_du
         base_url=base_url,
         model_name=model_name,
         system_prompt=script_sys_prompt,
-        user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
+        user_content=f"\u3010\u8bf7\u5c06\u4ee5\u4e0b\u6df1\u5ea6\u6587\u7ae0\u8f6c\u5316\u4e3a\u4f9b\u526a\u6620AI\u89e3\u6790\u7684{script_duration}\u53e3\u64ad\u4e0e\u5206\u955c\u811a\u672c\uff1a\u3011\n\n{final_article_body}"
     )
 
 # ==========================================
+
+
 # 1. API 与外部推送函数
 # ==========================================
 def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None, temperature=None):
@@ -1427,6 +1854,8 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
         history = []
 
     current_stage = st.session_state.get("pending_ai_stage", "")
+    retry_delays = (0.8, 1.6)
+    attempt_count = 0
 
     try:
         timeout_config = build_openai_timeout(base_url, model_name)
@@ -1455,43 +1884,27 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
             "temperature": 0.3 if temperature is None else temperature,
         }
 
-        try:
-            with build_openai_http_client(timeout_config) as raw_http_client:
-                client = OpenAI(
+        last_error = None
+        for attempt_index in range(len(retry_delays) + 1):
+            attempt_count = attempt_index + 1
+            try:
+                content = execute_llm_request_once(
                     api_key=api_key,
                     base_url=base_url,
-                    max_retries=0,
-                    timeout=timeout_config,
-                    http_client=raw_http_client,
+                    model_name=model_name,
+                    request_kwargs=request_kwargs,
+                    timeout_config=timeout_config,
+                    use_stream=use_stream,
                 )
+                st.session_state.last_ai_error = ""
+                return content
+            except Exception as attempt_error:
+                last_error = attempt_error
+                if attempt_index >= len(retry_delays) or not should_retry_with_requests_fallback(attempt_error):
+                    raise
+                time.sleep(retry_delays[attempt_index])
 
-                if use_stream:
-                    parts = []
-                    with client.chat.completions.create(stream=True, **request_kwargs) as stream:
-                        for chunk in stream:
-                            if not getattr(chunk, "choices", None):
-                                continue
-                            for choice in chunk.choices:
-                                delta = getattr(choice, "delta", None)
-                                delta_content = getattr(delta, "content", None) if delta else None
-                                if delta_content:
-                                    parts.append(delta_content)
-                    content = "".join(parts).strip()
-                else:
-                    response = client.chat.completions.create(**request_kwargs)
-                    if not getattr(response, "choices", None):
-                        raise ValueError("Model returned no choices.")
-                    message = response.choices[0].message if response.choices else None
-                    content = normalize_llm_response_content(getattr(message, "content", None))
-        except Exception as sdk_error:
-            if not should_retry_with_requests_fallback(sdk_error):
-                raise
-            content = call_llm_via_requests(api_key, base_url, request_kwargs, timeout_config)
-
-        if not content.strip():
-            raise ValueError("Model returned an empty message body.")
-        st.session_state.last_ai_error = ""
-        return content
+        raise last_error if last_error else RuntimeError("Unknown LLM request failure.")
     except Exception as e:
         formatted_error = format_llm_exception(e)
         st.session_state.last_ai_error = formatted_error
@@ -1504,10 +1917,16 @@ def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_u
             user_content,
             image_count=len(image_urls),
             history_count=len(history),
+            extra_details={
+                **build_proxy_diagnostic_snapshot(),
+                "attempt_count": attempt_count,
+            },
         )
         save_draft()
+        play_ai_error_sound()
         st.error(f"API call failed: {formatted_error}")
         st.stop()
+
 
 def push_to_feishu(article_text, script_text=None):
     webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/a0f50778-0dd2-4963-a0b2-0c7b68e113d8"
@@ -1907,6 +2326,8 @@ def init_state():
         st.session_state.modified_article = ""
     if 'final_article' not in st.session_state:
         st.session_state.final_article = ""
+    if 'title_candidates' not in st.session_state:
+        st.session_state.title_candidates = []
     if 'highlighted_article' not in st.session_state:
         st.session_state.highlighted_article = ""
     if 'spoken_script' not in st.session_state:
@@ -1920,10 +2341,21 @@ def init_state():
         )
         if st.session_state.de_ai_model not in DE_AI_MODELS:
             st.session_state.de_ai_model = DE_AI_MODELS[0]
+    if 'de_ai_variant' not in st.session_state:
+        st.session_state.de_ai_variant = DE_AI_VARIANT_DEFAULT
+    elif st.session_state.de_ai_variant not in DE_AI_VARIANTS:
+        st.session_state.de_ai_variant = DE_AI_VARIANT_DEFAULT
     if 'de_ai_temperature' not in st.session_state:
         st.session_state.de_ai_temperature = 0.75
     if 'de_ai_prompt_template' not in st.session_state:
         st.session_state.de_ai_prompt_template = ""
+    st.session_state.title_candidates = normalize_title_candidates(st.session_state.get("title_candidates", []))
+    if not st.session_state.title_candidates:
+        for article_key in ("final_article", "modified_article", "draft_article"):
+            recovered_titles, _ = split_structured_article_sections(st.session_state.get(article_key, ""))
+            if recovered_titles:
+                st.session_state.title_candidates = recovered_titles
+                break
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'image_keywords' not in st.session_state:
@@ -2147,16 +2579,38 @@ def get_article_version_by_id(version_id):
     return None
 
 
-def append_article_version(content, stage, role=None, model=None, parent_id=None):
+def restore_article_version_to_session(version_item, fallback_titles=None):
+    if not isinstance(version_item, dict):
+        return False
+
+    selected_titles, _, selected_article_text = parse_article_generation_response(
+        version_item.get("content", ""),
+        fallback_titles,
+    )
+    st.session_state.title_candidates = selected_titles
+    st.session_state.final_article = selected_article_text
+    st.session_state.highlighted_article = (version_item.get("highlighted_article") or "").strip()
+    st.session_state.spoken_script = ""
+    reset_podcast_outputs(delete_audio=True)
+    if version_item.get("id"):
+        st.session_state.active_article_version_id = version_item.get("id")
+    refresh_obsidian_influence_map(force=True)
+    return True
+
+
+def append_article_version(content, stage, role=None, model=None, parent_id=None, highlighted_article=None):
     ensure_article_version_state()
     clean_content = (content or "").strip()
     if not clean_content:
         return None
 
+    clean_highlighted_article = (highlighted_article or "").strip()
     versions = st.session_state.article_versions
     if versions:
         last_version = versions[-1]
         if last_version.get("stage") == stage and (last_version.get("content") or "").strip() == clean_content:
+            if clean_highlighted_article or "highlighted_article" not in last_version:
+                last_version["highlighted_article"] = clean_highlighted_article
             st.session_state.active_article_version_id = last_version.get("id")
             return last_version.get("id")
 
@@ -2171,6 +2625,7 @@ def append_article_version(content, stage, role=None, model=None, parent_id=None
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "word_count": len(clean_content),
         "parent_id": resolved_parent_id,
+        "highlighted_article": clean_highlighted_article,
     }
 
     versions.append(version_item)
@@ -2193,7 +2648,12 @@ def bootstrap_article_versions():
 
     final_text = (st.session_state.get("final_article") or "").strip()
     if final_text:
-        append_article_version(final_text, "历史恢复定稿", model="")
+        append_article_version(
+            final_text,
+            "历史恢复定稿",
+            model="",
+            highlighted_article=st.session_state.get("highlighted_article", ""),
+        )
         return
 
     draft_text = (st.session_state.get("draft_article") or "").strip()
@@ -2285,6 +2745,46 @@ def play_step_completion_sound():
     )
 
 
+def play_ai_error_sound():
+    render_html_iframe(
+        """
+        <script>
+        (function () {
+            try {
+                const AudioContextRef = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextRef) return;
+                const ctx = new AudioContextRef();
+                const playAlert = (startOffset, startFreq, endFreq, duration, peakGain, type) => {
+                    const startAt = ctx.currentTime + startOffset;
+                    const endAt = startAt + duration;
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = type || "sawtooth";
+                    osc.frequency.setValueAtTime(startFreq, startAt);
+                    osc.frequency.exponentialRampToValueAtTime(endFreq, endAt);
+                    gain.gain.setValueAtTime(0.0001, startAt);
+                    gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.015);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(startAt);
+                    osc.stop(endAt + 0.03);
+                };
+
+                playAlert(0.00, 880.0, 440.0, 0.22, 0.09, "square");
+                playAlert(0.20, 880.0, 440.0, 0.22, 0.09, "square");
+                playAlert(0.42, 660.0, 330.0, 0.32, 0.08, "sawtooth");
+                setTimeout(() => {
+                    try { ctx.close(); } catch (e) {}
+                }, 1200);
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def normalize_copy_text(text):
     normalized = (text or "")
     normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
@@ -2300,17 +2800,156 @@ def _render_inline_markdown_for_clipboard(text):
     return escaped.replace("\n", "<br/>")
 
 
+def build_clipboard_html_document(fragment_html):
+    fragment = fragment_html or "<div><br/></div>"
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+        "<!--StartFragment-->"
+        f"{fragment}"
+        "<!--EndFragment-->"
+        "</body></html>"
+    )
+
+
+HTML_CLIPBOARD_FORMAT_NAME = "HTML Format"
+
+
+def build_windows_html_clipboard_payload(document_html):
+    html_text = (document_html or "").strip()
+    if not html_text:
+        html_text = build_clipboard_html_document("<div><br/></div>")
+
+    html_bytes = html_text.encode("utf-8")
+    start_fragment_marker = b"<!--StartFragment-->"
+    end_fragment_marker = b"<!--EndFragment-->"
+    start_fragment_index = html_bytes.find(start_fragment_marker)
+    end_fragment_index = html_bytes.find(end_fragment_marker)
+    if start_fragment_index == -1 or end_fragment_index == -1:
+        raise ValueError("Clipboard HTML is missing fragment markers.")
+
+    header_template = (
+        "Version:0.9\r\n"
+        "StartHTML:{start_html:010d}\r\n"
+        "EndHTML:{end_html:010d}\r\n"
+        "StartFragment:{start_fragment:010d}\r\n"
+        "EndFragment:{end_fragment:010d}\r\n"
+        "StartSelection:{start_fragment:010d}\r\n"
+        "EndSelection:{end_fragment:010d}\r\n"
+    )
+
+    placeholder_header = header_template.format(
+        start_html=0,
+        end_html=0,
+        start_fragment=0,
+        end_fragment=0,
+    )
+    start_html = len(placeholder_header.encode("ascii"))
+    start_fragment = start_html + start_fragment_index + len(start_fragment_marker)
+    end_fragment = start_html + end_fragment_index
+    end_html = start_html + len(html_bytes)
+    header = header_template.format(
+        start_html=start_html,
+        end_html=end_html,
+        start_fragment=start_fragment,
+        end_fragment=end_fragment,
+    )
+    return header.encode("ascii") + html_bytes
+
+
+def prepare_highlighted_html_for_clipboard(html_text):
+    normalized = sanitize_highlighted_article(html_text)
+    if not normalized:
+        return ""
+
+    normalized = re.sub(
+        r'<span\s+class="highlight-positive">(.*?)</span>',
+        lambda match: '<span style="background-color:#d8e7ff;color:#1f57b8;font-weight:600;">{}</span>'.format(match.group(1)),
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized = re.sub(
+        r'<span\s+class="highlight-risk">(.*?)</span>',
+        lambda match: '<span style="background-color:#fde1e1;color:#b3261e;font-weight:600;">{}</span>'.format(match.group(1)),
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    normalized = re.sub(r'<h2>', '<h2 style="font-size:28px;line-height:1.35;font-weight:800;margin:0 0 16px 0;color:#16211c;">', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'<h3>', '<h3 style="font-size:22px;line-height:1.4;font-weight:700;margin:0 0 14px 0;color:#16211c;">', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'<p>', '<p style="margin:0 0 16px 0;line-height:1.9;color:#16211c;">', normalized, flags=re.IGNORECASE)
+    return build_clipboard_html_document(normalized)
+
+
+def copy_rich_content_to_system_clipboard(plain_text, html_document=""):
+    plain_text = normalize_copy_text(plain_text)
+    html_document = (html_document or "").strip()
+    if not plain_text:
+        return False, "\u6ca1\u6709\u53ef\u590d\u5236\u7684\u5185\u5bb9\u3002"
+
+    if os.name != "nt":
+        return False, "\u5f53\u524d\u4ec5\u4e3a Windows \u672c\u673a\u526a\u8d34\u677f\u63d0\u4f9b\u4e00\u952e\u590d\u5236\u3002"
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    gm_moveable = 0x0002
+    cf_unicode_text = 13
+    user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+    user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_bool
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = ctypes.c_bool
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = ctypes.c_bool
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    html_format = user32.RegisterClipboardFormatW(HTML_CLIPBOARD_FORMAT_NAME)
+
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_bool
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+    user32.SetClipboardData.restype = ctypes.c_void_p
+
+    def set_clipboard_block(fmt, payload):
+        handle = kernel32.GlobalAlloc(gm_moveable, len(payload))
+        if not handle:
+            raise OSError("GlobalAlloc failed")
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            kernel32.GlobalFree(handle)
+            raise OSError("GlobalLock failed")
+        ctypes.memmove(locked, payload, len(payload))
+        kernel32.GlobalUnlock(handle)
+        if not user32.SetClipboardData(fmt, handle):
+            kernel32.GlobalFree(handle)
+            raise OSError("SetClipboardData failed")
+
+    plain_payload = plain_text.encode("utf-16le") + b"\\x00\\x00".decode("unicode_escape").encode("latin1")
+    html_payload = build_windows_html_clipboard_payload(html_document) if html_document else b""
+
+    if not user32.OpenClipboard(None):
+        return False, "\u65e0\u6cd5\u6253\u5f00\u7cfb\u7edf\u526a\u8d34\u677f\u3002"
+    try:
+        if not user32.EmptyClipboard():
+            return False, "\u65e0\u6cd5\u6253\u5f00\u7cfb\u7edf\u526a\u8d34\u677f\u3002"
+        set_clipboard_block(cf_unicode_text, plain_payload)
+        if html_payload and html_format:
+            set_clipboard_block(html_format, html_payload)
+    except Exception as exc:
+        return False, f"\u590d\u5236\u5931\u8d25\uff1a{exc}"
+    finally:
+        user32.CloseClipboard()
+
+    return True, "\u5df2\u590d\u5236\u5230\u7cfb\u7edf\u526a\u8d34\u677f\uff0c\u53ef\u76f4\u63a5\u7c98\u8d34\u5230\u5bcc\u6587\u672c\u7f16\u8f91\u5668\u3002"
+
+
 def markdown_to_editor_html(markdown_text):
     normalized = normalize_copy_text(markdown_text)
     if not normalized:
-        fragment = "<div><br/></div>"
-        return (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
-            "<!--StartFragment-->"
-            f"{fragment}"
-            "<!--EndFragment-->"
-            "</body></html>"
-        )
+        return build_clipboard_html_document("<div><br/></div>")
 
     paragraphs = [item.strip() for item in re.split(r"\n{2,}", normalized) if item.strip()]
     if not paragraphs:
@@ -2323,29 +2962,43 @@ def markdown_to_editor_html(markdown_text):
         html_parts.append(f"<div>{rendered_paragraph}</div>")
 
     fragment = "".join(html_parts)
-    return (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
-        "<!--StartFragment-->"
-        f"{fragment}"
-        "<!--EndFragment-->"
-        "</body></html>"
-    )
+    return build_clipboard_html_document(fragment)
 
 
-def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制（保留段落）"):
-    plain_text = normalize_copy_text(text)
-    if not plain_text:
+def html_fragment_to_plain_text(html_text):
+    normalized = (html_text or "").strip()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(r"<\s*br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"</\s*(p|div|h1|h2|h3|li)\s*>", "\n\n", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"<\s*li\b[^>]*>", "- ", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"<[^>]+>", "", normalized)
+    normalized = html_lib.unescape(normalized)
+    normalized = normalize_copy_text(normalized)
+    return normalized
+
+
+def html_fragment_to_editor_html(html_text):
+    normalized = (html_text or "").strip()
+    if not normalized:
+        return build_clipboard_html_document("<div><br/></div>")
+    return build_clipboard_html_document(normalized)
+
+
+def _build_copy_button_iframe(copy_key, label, plain_text, html_payload):
+    if not plain_text and not html_payload:
         return
 
     safe_key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(copy_key))
     safe_label = html_lib.escape(label)
-    plain_text_b64 = base64.b64encode(plain_text.encode("utf-8")).decode("ascii")
-    html_text_b64 = base64.b64encode(markdown_to_editor_html(plain_text).encode("utf-8")).decode("ascii")
+    plain_text_b64 = base64.b64encode((plain_text or "").encode("utf-8")).decode("ascii")
+    html_text_b64 = base64.b64encode((html_payload or "").encode("utf-8")).decode("ascii")
 
-    render_html_iframe(
-        f"""
+    html_renderer = getattr(components, "html", None)
+    html_payload = f"""
         <div style="display:flex;align-items:center;gap:10px;margin:6px 0 0 0;">
-          <button id="copy-btn-{safe_key}" style="border:1px solid #d9d9df;background:#ffffff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">
+          <button id="copy-btn-{safe_key}" onclick="window.__copyRichText_{safe_key} && window.__copyRichText_{safe_key}(); return false;" style="border:1px solid #d9d9df;background:#ffffff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;">
             {safe_label}
           </button>
           <span id="copy-status-{safe_key}" style="font-size:12px;color:#667085;"></span>
@@ -2354,7 +3007,6 @@ def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制�
         (function () {{
             const plainBase64 = "{plain_text_b64}";
             const htmlBase64 = "{html_text_b64}";
-            const btn = document.getElementById("copy-btn-{safe_key}");
             const status = document.getElementById("copy-status-{safe_key}");
 
             function decodeBase64Utf8(input) {{
@@ -2373,42 +3025,148 @@ def render_editor_friendly_copy_button(text, copy_key, label="📋 兼容复制�
                 return decodeURIComponent(encoded);
             }}
 
-            async function copyRichText() {{
-                const plainText = decodeBase64Utf8(plainBase64).replace(/\\n/g, "\\r\\n");
-                const htmlText = decodeBase64Utf8(htmlBase64);
+            function setStatus(message) {{
+                if (status) {{
+                    status.textContent = message;
+                }}
+            }}
+
+            function getParentDocument() {{
                 try {{
-                    if (navigator.clipboard && window.ClipboardItem) {{
+                    if (window.parent && window.parent.document) {{
+                        return window.parent.document;
+                    }}
+                }} catch (err) {{}}
+                return null;
+            }}
+
+            function getParentClipboard() {{
+                try {{
+                    if (window.parent && window.parent.navigator && window.parent.navigator.clipboard) {{
+                        return window.parent.navigator.clipboard;
+                    }}
+                }} catch (err) {{}}
+                return null;
+            }}
+
+            function copyViaExecCommand(targetDocument, htmlText, plainText) {{
+                if (!targetDocument || !targetDocument.body || !targetDocument.execCommand) {{
+                    return false;
+                }}
+                const listener = function (event) {{
+                    event.preventDefault();
+                    if (event.clipboardData) {{
+                        event.clipboardData.setData("text/plain", plainText);
+                        if (htmlText) {{
+                            event.clipboardData.setData("text/html", htmlText);
+                        }}
+                    }}
+                }};
+                targetDocument.addEventListener("copy", listener);
+                let copied = false;
+                try {{
+                    copied = targetDocument.execCommand("copy");
+                }} catch (err) {{
+                    copied = false;
+                }}
+                targetDocument.removeEventListener("copy", listener);
+                return copied;
+            }}
+
+            async function copyViaClipboardApi(clipboard, htmlText, plainText) {{
+                if (!clipboard) {{
+                    return false;
+                }}
+                try {{
+                    if (window.ClipboardItem && htmlText && clipboard.write) {{
                         const payload = new ClipboardItem({{
                             "text/plain": new Blob([plainText], {{ type: "text/plain" }}),
                             "text/html": new Blob([htmlText], {{ type: "text/html" }})
                         }});
-                        await navigator.clipboard.write([payload]);
-                    }} else if (navigator.clipboard && navigator.clipboard.writeText) {{
-                        await navigator.clipboard.writeText(plainText);
-                    }} else {{
-                        const ta = document.createElement("textarea");
-                        ta.value = plainText;
-                        ta.style.position = "fixed";
-                        ta.style.left = "-9999px";
-                        document.body.appendChild(ta);
-                        ta.focus();
-                        ta.select();
-                        document.execCommand("copy");
-                        document.body.removeChild(ta);
+                        await clipboard.write([payload]);
+                        return true;
                     }}
-                    status.textContent = "已复制，可直接粘贴到富文本编辑器。";
-                }} catch (err) {{
-                    status.textContent = "复制失败，请手动 Ctrl+C。";
-                }}
+                    if (clipboard.writeText) {{
+                        await clipboard.writeText(plainText);
+                        return true;
+                    }}
+                }} catch (err) {{}}
+                return false;
             }}
 
-            btn.addEventListener("click", copyRichText);
+            window.__copyRichText_{safe_key} = async function () {{
+                const plainText = decodeBase64Utf8(plainBase64).replace(/\n/g, "\r\n");
+                const htmlText = decodeBase64Utf8(htmlBase64);
+                const parentDocument = getParentDocument();
+                const parentClipboard = getParentClipboard();
+
+                if (copyViaExecCommand(document, htmlText, plainText) || copyViaExecCommand(parentDocument, htmlText, plainText)) {{
+                    setStatus("?????????????????");
+                    return;
+                }}
+                if (await copyViaClipboardApi(parentClipboard, htmlText, plainText) || await copyViaClipboardApi(navigator.clipboard, htmlText, plainText)) {{
+                    setStatus("?????????????????");
+                    return;
+                }}
+                setStatus("???????? Ctrl+C?");
+            }};
         }})();
         </script>
-        """,
-        height=56,
-    )
+        """
+    if callable(html_renderer):
+        try:
+            html_renderer(html_payload, height=56)
+            return
+        except TypeError:
+            html_renderer(html_payload)
+            return
+    render_html_iframe(html_payload, height=56)
+
+
+def render_editor_friendly_copy_button(text, copy_key, label="\U0001F4CB \u517c\u5bb9\u590d\u5236\uff08\u4fdd\u7559\u6bb5\u843d\uff09"):
+    plain_text = normalize_copy_text(text)
+    if not plain_text:
+        return
+
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(copy_key))
+    status_key = f"copy_status_{safe_key}"
+    if st.button(label, key=f"copy_btn_{safe_key}"):
+        success, message = copy_rich_content_to_system_clipboard(plain_text, markdown_to_editor_html(plain_text))
+        st.session_state[status_key] = ("success" if success else "error", message)
+
+    status = st.session_state.get(status_key)
+    if status:
+        level, message = status
+        if level == "success":
+            st.caption(message)
+        else:
+            st.caption(message)
+
+
+def render_rich_html_copy_button(html_text, copy_key, label="\U0001F4CB \u590d\u5236\u9ad8\u4eae\u9605\u8bfb\u7248\uff08\u4fdd\u7559\u683c\u5f0f\uff09"):
+    sanitized_html = sanitize_highlighted_article(html_text)
+    plain_text = html_fragment_to_plain_text(sanitized_html)
+    if not plain_text:
+        return
+
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(copy_key))
+    status_key = f"copy_status_{safe_key}"
+    if st.button(label, key=f"copy_btn_{safe_key}"):
+        success, message = copy_rich_content_to_system_clipboard(plain_text, prepare_highlighted_html_for_clipboard(sanitized_html))
+        st.session_state[status_key] = ("success" if success else "error", message)
+
+    status = st.session_state.get(status_key)
+    if status:
+        level, message = status
+        if level == "success":
+            st.caption(message)
+        else:
+            st.caption(message)
+
+
 def notify_step_completed(defer_until_rerun=False):
+
+
     if defer_until_rerun:
         st.session_state.pending_completion_sound = True
     else:
@@ -3126,22 +3884,29 @@ if st.session_state.current_step == 1:
                             st.session_state.get("obsidian_research_brief", ""),
                             use_images=bool(st.session_state.source_images)
                         )
-                        st.session_state.draft_article = call_llm(
+                        draft_response = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
                         )
+                        draft_titles, _, draft_article_text = parse_article_generation_response(
+                            draft_response,
+                            st.session_state.get("title_candidates", []),
+                        )
+                        st.session_state.title_candidates = draft_titles
+                        st.session_state.draft_article = draft_article_text
                         append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=chosen_editor, model=selected_model)
                         save_draft()
 
                         st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
                         reviewer_prompt = prompts_data["reviewer"]
                         anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
-                        final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
+                        final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
 
                         combined_content = build_reviewer_user_content(
                             st.session_state.source_content,
                             st.session_state.draft_article,
-                            st.session_state.get("obsidian_research_brief", "")
+                            st.session_state.get("obsidian_research_brief", ""),
+                            title_candidates=st.session_state.get("title_candidates", []),
                         )
                         st.session_state.review_feedback = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
@@ -3151,12 +3916,28 @@ if st.session_state.current_step == 1:
                         save_draft()
                         st.write("✨ 接收修改意见，正在进行最终打磨...")
                         modification_prompt = build_modification_system_prompt(global_instruction)
-                        content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
+                        content_to_modify = build_modification_user_content(
+                    st.session_state.review_feedback,
+                    st.session_state.draft_article,
+                    title_candidates=st.session_state.get("title_candidates", []),
+                )
 
-                        st.session_state.final_article = call_llm(
+                        final_response = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
+
+                        final_titles, _, final_article_text = parse_article_generation_response(
+
+                            final_response,
+
+                            st.session_state.get("title_candidates", []),
+
+                        )
+
+                        st.session_state.title_candidates = final_titles
+
+                        st.session_state.final_article = final_article_text
                         append_article_version(st.session_state.final_article, "自动驾驶定稿", role=chosen_editor, model=selected_model)
                         save_draft()
 
@@ -3233,7 +4014,7 @@ elif st.session_state.current_step == 2:
                     use_images=bool(st.session_state.source_images)
                 )
 
-                st.session_state.draft_article = call_llm(
+                draft_response = call_llm(
                     api_key=api_key, 
                     base_url=current_base_url,
                     model_name=selected_model, 
@@ -3241,6 +4022,18 @@ elif st.session_state.current_step == 2:
                     user_content=editor_user_content,
                     image_urls=st.session_state.source_images
                 )
+
+                draft_titles, _, draft_article_text = parse_article_generation_response(
+
+                    draft_response,
+
+                    st.session_state.get("title_candidates", []),
+
+                )
+
+                st.session_state.title_candidates = draft_titles
+
+                st.session_state.draft_article = draft_article_text
                 append_article_version(st.session_state.draft_article, "手动初稿", role=editor_role, model=selected_model)
                 checkpoint_ai_stage("draft_generation", target_step=3)
                 save_draft()
@@ -3286,7 +4079,8 @@ elif st.session_state.current_step == 3:
                     combined_content = build_reviewer_user_content(
                         st.session_state.source_content,
                         st.session_state.draft_article,
-                        st.session_state.get("obsidian_research_brief", "")
+                        st.session_state.get("obsidian_research_brief", ""),
+                        title_candidates=st.session_state.get("title_candidates", []),
                     )
                 else:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
@@ -3294,10 +4088,11 @@ elif st.session_state.current_step == 3:
                     combined_content = build_reviewer_user_content(
                         st.session_state.source_content,
                         st.session_state.draft_article,
-                        st.session_state.get("obsidian_research_brief", "")
+                        st.session_state.get("obsidian_research_brief", ""),
+                        title_candidates=st.session_state.get("title_candidates", []),
                     )
                 
-                final_reviewer_system_prompt = reviewer_prompt + anti_hallucination_instruction
+                final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
                 
                 st.session_state.review_feedback = call_llm(
                     api_key=api_key, 
@@ -3351,15 +4146,31 @@ elif st.session_state.current_step == 4:
                 global_instruction = prompts_data.get("global_instruction", "")
                 modification_prompt = build_modification_system_prompt(global_instruction)
 
-                content_to_modify = f"【审稿意见】：\n{st.session_state.review_feedback}\n\n================\n\n【初稿】：\n{st.session_state.draft_article}"
+                content_to_modify = build_modification_user_content(
+                    st.session_state.review_feedback,
+                    st.session_state.draft_article,
+                    title_candidates=st.session_state.get("title_candidates", []),
+                )
 
-                st.session_state.modified_article = call_llm(
+                modified_response = call_llm(
                     api_key=api_key,
                     base_url=current_base_url,
                     model_name=selected_model,
                     system_prompt=modification_prompt,
                     user_content=content_to_modify
                 )
+
+                modified_titles, _, modified_article_text = parse_article_generation_response(
+
+                    modified_response,
+
+                    st.session_state.get("title_candidates", []),
+
+                )
+
+                st.session_state.title_candidates = modified_titles
+
+                st.session_state.modified_article = modified_article_text
                 st.session_state.final_article = ""
                 st.session_state.highlighted_article = ""
                 st.session_state.spoken_script = ""
@@ -3370,35 +4181,44 @@ elif st.session_state.current_step == 4:
                 go_to_step(5)
                 st.rerun()
 
-# --- Step 5 (手动模式) ---
+# --- Step 5 (manual mode) ---
 elif st.session_state.current_step == 5:
-    render_section_intro("去 AI 味", "在定稿前选择专用模型，把修改稿重写得更像真人专家输出。", "Step 05")
-    render_context_strip([f"修改稿来源模型：{selected_model}", f"专用模型：{st.session_state.get('de_ai_model', DE_AI_MODELS[0])}", f"Temperature：{st.session_state.get('de_ai_temperature', 0.75):.2f}", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
-
     current_role = st.session_state.get("selected_role", "")
     current_editor_prompt = prompts_data["editors"].get(current_role, "") if current_role in prompts_data["editors"] else ""
-    st.session_state.de_ai_prompt_template = build_de_ai_prompt_template(current_role, current_editor_prompt, st.session_state.get("source_content", ""))
+    de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
+    de_ai_button_suffix = (
+        "（社区版）"
+        if de_ai_variant == DE_AI_VARIANT_COMMUNITY
+        else "（唠嗑版）" if de_ai_variant == DE_AI_VARIANT_CHAT else ""
+    )
+
+    render_section_intro("去 AI 味", "在定稿前选择专用模型，把修改稿重写得更像真人专家输出。", "Step 05")
+    render_context_strip([
+        f"修改稿来源模型：{selected_model}",
+        f"专用模型：{st.session_state.get('de_ai_model', DE_AI_MODELS[0])}",
+        f"风格版本：{de_ai_variant}",
+        f"Temperature：{st.session_state.get('de_ai_temperature', 0.75):.2f}",
+        f"分镜脚本：{'开启' if enable_script else '关闭'}",
+    ])
 
     st.markdown("### 当前修改稿")
     st.code(st.session_state.modified_article, language="markdown")
     render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step5")
 
-    with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
-        st.text_area(
-            "去 AI 味 Prompt 模板",
-            value=st.session_state.de_ai_prompt_template,
-            height=360,
-            disabled=True,
-            key="de_ai_prompt_template_preview"
+    col_variant, col_model, col_temp = st.columns([1.15, 1.2, 1])
+    with col_variant:
+        st.selectbox(
+            "去 AI 风格版本",
+            DE_AI_VARIANTS,
+            key="de_ai_variant",
+            on_change=save_draft,
         )
-
-    col_model, col_temp = st.columns([1.2, 1])
     with col_model:
         st.selectbox(
             "去 AI 味专用大模型",
             DE_AI_MODELS,
             key="de_ai_model",
-            on_change=save_draft
+            on_change=save_draft,
         )
     with col_temp:
         st.slider(
@@ -3407,19 +4227,46 @@ elif st.session_state.current_step == 5:
             max_value=0.85,
             step=0.05,
             key="de_ai_temperature",
-            on_change=save_draft
+            on_change=save_draft,
+        )
+
+    de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
+    de_ai_button_suffix = (
+        "（社区版）"
+        if de_ai_variant == DE_AI_VARIANT_COMMUNITY
+        else "（唠嗑版）" if de_ai_variant == DE_AI_VARIANT_CHAT else ""
+    )
+    st.session_state.de_ai_prompt_template = build_de_ai_prompt_template(
+        current_role,
+        current_editor_prompt,
+        st.session_state.get("source_content", ""),
+        variant=de_ai_variant,
+    )
+
+    with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
+        st.text_area(
+            "去 AI 味 Prompt 模板",
+            value=st.session_state.de_ai_prompt_template,
+            height=360,
+            disabled=True,
+            key="de_ai_prompt_template_preview",
         )
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🔙 返回修改稿步骤"):
+        if st.button("返回修改稿步骤"):
             go_to_step(4)
             st.rerun()
     with col2:
-        if st.button("⏭️ 跳过去 AI 味，直接定稿"):
+        if st.button("跳过去 AI 味，直接定稿"):
             spinner_msg = f"正在将修改稿设为定稿，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "正在将修改稿设为定稿..."
             with st.spinner(spinner_msg):
-                st.session_state.final_article = st.session_state.modified_article
+                skip_titles, _, skip_article_text = parse_article_generation_response(
+                    st.session_state.modified_article,
+                    st.session_state.get("title_candidates", []),
+                )
+                st.session_state.title_candidates = skip_titles
+                st.session_state.final_article = skip_article_text
                 st.session_state.highlighted_article = ""
                 append_article_version(st.session_state.final_article, "跳过去AI味定稿", role=current_role, model=selected_model)
                 if enable_script:
@@ -3441,9 +4288,13 @@ elif st.session_state.current_step == 5:
                 go_to_step(6)
                 st.rerun()
     with col3:
-        if st.button(f"✨ 使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写"):
+        if st.button(f"使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写{de_ai_button_suffix}"):
             mark_ai_stage_started("de_ai_generation")
-            spinner_msg = f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味，并生成【{script_duration}口播及分镜脚本】..." if enable_script else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写..."
+            spinner_msg = (
+                f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味{de_ai_button_suffix}，并生成【{script_duration}口播及分镜脚本】..."
+                if enable_script
+                else f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写{de_ai_button_suffix}..."
+            )
             with st.spinner(spinner_msg):
                 de_ai_response = call_llm(
                     api_key=api_key,
@@ -3451,12 +4302,28 @@ elif st.session_state.current_step == 5:
                     model_name=st.session_state.get('de_ai_model', DE_AI_MODELS[0]),
                     system_prompt=st.session_state.de_ai_prompt_template,
                     user_content=st.session_state.modified_article,
-                    temperature=st.session_state.get('de_ai_temperature', 0.75)
+                    temperature=st.session_state.get('de_ai_temperature', 0.75),
                 )
-                pure_article, highlighted_article = parse_de_ai_dual_output(de_ai_response)
-                st.session_state.final_article = pure_article or (de_ai_response or "").strip()
+                pure_titles, pure_article, highlighted_article = parse_de_ai_dual_output(
+                    de_ai_response,
+                    fallback_titles=st.session_state.get("title_candidates", []),
+                )
+                st.session_state.title_candidates = pure_titles
+                st.session_state.final_article = build_structured_article_text(pure_titles, pure_article) or (de_ai_response or "").strip()
                 st.session_state.highlighted_article = highlighted_article
-                append_article_version(st.session_state.final_article, "去AI味定稿", role=current_role, model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]))
+                if de_ai_variant == DE_AI_VARIANT_COMMUNITY:
+                    de_ai_stage_label = "去AI味定稿（社区版）"
+                elif de_ai_variant == DE_AI_VARIANT_CHAT:
+                    de_ai_stage_label = "去AI味定稿（唠嗑版）"
+                else:
+                    de_ai_stage_label = "去AI味定稿"
+                append_article_version(
+                    st.session_state.final_article,
+                    de_ai_stage_label,
+                    role=current_role,
+                    model=st.session_state.get('de_ai_model', DE_AI_MODELS[0]),
+                    highlighted_article=highlighted_article,
+                )
                 save_draft()
                 if enable_script:
                     generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
@@ -3479,11 +4346,20 @@ elif st.session_state.current_step == 5:
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
                 st.rerun()
+                checkpoint_ai_stage("de_ai_generation", target_step=6)
+                save_draft()
+                notify_step_completed(defer_until_rerun=True)
+                go_to_step(6)
+                st.rerun()
 # --- Step 6：终极版分栏 UI ---
 
 elif st.session_state.current_step == 6:
     refresh_obsidian_influence_map()
     render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
+    display_final_article = build_display_article_text(
+        st.session_state.get("final_article", ""),
+        st.session_state.get("title_candidates", []),
+    )
     render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
     st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.98])
@@ -3517,12 +4393,10 @@ elif st.session_state.current_step == 6:
                 st.caption(f"当前阶段：{selected_version.get('stage', '未命名')}｜角色：{selected_version.get('role', '未记录')}｜模型：{selected_version.get('model', '未记录')}")
 
                 if st.button("将此版本设为当前定稿", key="use_selected_version_as_final", use_container_width=True):
-                    st.session_state.final_article = selected_version.get("content", "")
-                    st.session_state.highlighted_article = ""
-                    st.session_state.spoken_script = ""
-                    reset_podcast_outputs(delete_audio=True)
-                    st.session_state.active_article_version_id = selected_version_id
-                    refresh_obsidian_influence_map(force=True)
+                    restore_article_version_to_session(
+                        selected_version,
+                        fallback_titles=st.session_state.get("title_candidates", []),
+                    )
                     save_draft()
                     notify_step_completed()
                     st.success(f"已切换到版本 {selected_version_id}")
@@ -3534,8 +4408,8 @@ elif st.session_state.current_step == 6:
 
         st.divider()
         st.markdown("### 主稿面板（当前定稿）")
-        st.code(st.session_state.final_article, language="markdown")
-        render_editor_friendly_copy_button(st.session_state.final_article, "final_article_step6")
+        st.code(display_final_article, language="markdown")
+        render_editor_friendly_copy_button(display_final_article, "final_article_step6")
 
         st.divider()
         st.markdown("### 高亮阅读版")
@@ -3656,7 +4530,7 @@ elif st.session_state.current_step == 6:
                 4. 直接用编号 1-10 列出，不要有任何废话解释。
                 
                 【文章定稿内容】：
-                """ + st.session_state.final_article
+                """ + get_article_body_text(st.session_state.final_article)
 
                 st.session_state.image_keywords = call_llm(
                     api_key=api_key,
@@ -3688,7 +4562,7 @@ elif st.session_state.current_step == 6:
             doc.save(bio)
             return bio.getvalue()
             
-        docx_data = create_docx(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
+        docx_data = create_docx(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
         
         btn_col1, btn_col2, btn_col3 = st.columns(3)
         with btn_col1:
@@ -3703,7 +4577,7 @@ elif st.session_state.current_step == 6:
         with btn_col2:
             if st.button("✈️ 推送通知到飞书群", use_container_width=True):
                 with st.spinner("正在推送到飞书..."):
-                    success, msg = push_to_feishu(st.session_state.final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
+                    success, msg = push_to_feishu(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                     if success:
                         st.success("🎉 飞书推送成功！")
                         notify_step_completed()
@@ -3757,7 +4631,7 @@ elif st.session_state.current_step == 6:
                             {st.session_state.source_content}
     
                             [Current final article]
-                            {st.session_state.final_article}
+                            {display_final_article}
     
                             [Background knowledge library]
                             {knowledge_context}
