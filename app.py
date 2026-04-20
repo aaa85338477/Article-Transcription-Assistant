@@ -2924,6 +2924,32 @@ def sync_selected_source_images():
 sync_selected_source_images()
 
 
+def apply_selected_source_images(selected_ids):
+    all_images = st.session_state.get("source_images_all", [])
+    if not isinstance(all_images, list):
+        all_images = []
+
+    normalized_selected = []
+    seen_ids = set()
+    for item in selected_ids:
+        try:
+            idx = int(item)
+        except Exception:
+            continue
+        if idx < 0 or idx >= len(all_images):
+            continue
+        if idx in seen_ids:
+            continue
+        seen_ids.add(idx)
+        normalized_selected.append(idx)
+
+    st.session_state.selected_source_image_ids = normalized_selected
+    st.session_state.source_images = [all_images[idx] for idx in normalized_selected]
+    selected_id_set = set(normalized_selected)
+    for idx in range(len(all_images)):
+        st.session_state[f"source_image_pick_{idx}"] = idx in selected_id_set
+
+
 def ensure_article_version_state():
     if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
         st.session_state.article_versions = []
@@ -4156,25 +4182,42 @@ if st.session_state.current_step == 1:
             all_source_images = st.session_state.get("source_images_all", [])
             if all_source_images:
                 st.markdown("#### 核心配图（勾选纳入 AI 分析）")
+                toolbar_col1, toolbar_col2, _ = st.columns([1, 1, 2.4])
+                with toolbar_col1:
+                    if st.button("一键全选", key="select_all_source_images", use_container_width=True):
+                        apply_selected_source_images(range(len(all_source_images)))
+                        save_draft()
+                        st.rerun()
+                with toolbar_col2:
+                    if st.button("清空勾选", key="clear_source_images", use_container_width=True):
+                        apply_selected_source_images([])
+                        save_draft()
+                        st.rerun()
+
                 previous_selected_ids = set(st.session_state.get("selected_source_image_ids", []))
                 selected_ids = []
-                img_cols = st.columns(3)
                 for idx, img_url in enumerate(all_source_images):
-                    with img_cols[idx % 3]:
-                        preview_image = get_image_preview_payload(img_url)
-                        if preview_image is not None:
-                            render_responsive_image(preview_image)
-                        checked = st.checkbox(
-                            f"图片 {idx + 1} 纳入分析",
-                            value=(idx in previous_selected_ids),
-                            key=f"source_image_pick_{idx}"
-                        )
-                        if checked:
-                            selected_ids.append(idx)
+                    checkbox_key = f"source_image_pick_{idx}"
+                    if checkbox_key not in st.session_state:
+                        st.session_state[checkbox_key] = idx in previous_selected_ids
+                    with st.container(border=True):
+                        action_col, thumb_col = st.columns([1.2, 2.35])
+                        with action_col:
+                            checked = st.checkbox(
+                                f"图片 {idx + 1} 纳入分析",
+                                key=checkbox_key
+                            )
+                            if checked:
+                                selected_ids.append(idx)
+                        with thumb_col:
+                            preview_image = get_image_preview_payload(img_url)
+                            if preview_image is not None:
+                                st.image(preview_image, width=220)
+                            else:
+                                st.caption("该图片暂时无法预览。")
 
                 if selected_ids != st.session_state.get("selected_source_image_ids", []):
-                    st.session_state.selected_source_image_ids = selected_ids
-                    st.session_state.source_images = [all_source_images[i] for i in selected_ids]
+                    apply_selected_source_images(selected_ids)
                     save_draft()
 
                 st.caption(f"当前已勾选 {len(st.session_state.source_images)} / {len(all_source_images)} 张图片进入分析。")

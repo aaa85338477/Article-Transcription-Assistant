@@ -34,6 +34,14 @@ TARGET_FUNCTIONS = {
     "build_term_rules_preview_text",
     "scan_article_terms",
     "summarize_term_scan",
+    "get_expected_h2_range",
+    "split_body_paragraphs",
+    "extract_markdown_h2_sections",
+    "build_publish_quality_gate_report",
+    "extract_de_ai_raw_title_candidates",
+    "detect_auto_retry_issues",
+    "build_auto_retry_instruction",
+    "build_auto_retry_notice",
     "parse_de_ai_dual_output",
     "sanitize_highlighted_article",
 }
@@ -287,6 +295,103 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("<h2>Heading Title</h2>", cleaned)
         self.assertNotIn("🔗", cleaned)
         self.assertNotIn("## Heading Title", cleaned)
+
+    def test_publish_quality_gate_passes_when_structure_is_complete(self):
+        article_text = (
+            f"{TITLE_MARKER}\n"
+            "1. Title A\n"
+            "2. Title B\n"
+            "3. Title C\n\n"
+            f"{BODY_MARKER}\n"
+            "Intro paragraph one.\n\n"
+            "Intro paragraph two.\n\n"
+            "## Section One\n\n"
+            "Section one paragraph one.\n\n"
+            "Section one paragraph two.\n\n"
+            "## Section Two\n\n"
+            "Section two paragraph one.\n\n"
+            "Section two paragraph two.\n\n"
+            "## Section Three\n\n"
+            "Section three paragraph one.\n\n"
+            "Section three paragraph two."
+        )
+        report = self.helpers.build_publish_quality_gate_report(
+            article_text,
+            title_candidates=["Title A", "Title B", "Title C"],
+            highlighted_article="<p>Highlighted</p>",
+            term_scan_summary={
+                "banned_terms": 0,
+                "default_replacement_terms": 0,
+                "suggested_replacement_terms": 0,
+            },
+            target_words=1500,
+        )
+
+        self.assertEqual(report["overall_status"], "pass")
+        self.assertEqual(report["fail_count"], 0)
+        self.assertEqual(report["warn_count"], 0)
+        self.assertEqual(report["h2_count"], 3)
+        self.assertEqual(report["expected_h2_range"], (3, 5))
+
+    def test_publish_quality_gate_blocks_missing_structure_and_banned_terms(self):
+        article_text = (
+            f"{BODY_MARKER}\n"
+            "Direct analysis without enough setup.\n\n"
+            "This paragraph still keeps a banned phrase."
+        )
+        report = self.helpers.build_publish_quality_gate_report(
+            article_text,
+            title_candidates=["Only one title"],
+            highlighted_article="",
+            term_scan_summary={
+                "banned_terms": 1,
+                "default_replacement_terms": 0,
+                "suggested_replacement_terms": 0,
+            },
+            target_words=1500,
+        )
+        item_map = {item["key"]: item for item in report["items"]}
+
+        self.assertEqual(report["overall_status"], "fail")
+        self.assertGreaterEqual(report["fail_count"], 3)
+        self.assertEqual(item_map["titles"]["status"], "fail")
+        self.assertEqual(item_map["h2_count"]["status"], "fail")
+        self.assertEqual(item_map["term_rules"]["status"], "fail")
+        self.assertEqual(item_map["highlight"]["status"], "warn")
+
+
+    def test_detect_auto_retry_issues_flags_missing_titles_intro_h2_and_highlight(self):
+        article_text = (
+            f"{BODY_MARKER}\\n"
+            "Direct analysis without enough setup.\\n\\n"
+            "Still no headings here."
+        )
+        issues = self.helpers.detect_auto_retry_issues(
+            article_text,
+            explicit_title_candidates=[],
+            highlighted_article="",
+            require_highlight=True,
+            target_words=1500,
+        )
+
+        self.assertIn("titles", issues)
+        self.assertIn("h2_count", issues)
+        self.assertIn("highlight", issues)
+
+    def test_auto_retry_instruction_and_notice_reflect_requested_repairs(self):
+        instruction = self.helpers.build_auto_retry_instruction(
+            ["titles", "h2_count", "highlight"],
+            target_words=1500,
+            require_highlight=True,
+        )
+        notice = self.helpers.build_auto_retry_notice("de_ai_generation", ["titles", "highlight"])
+
+        self.assertIn("3-5", instruction)
+        self.assertIn("\u9ad8\u4eae\u9605\u8bfb\u7248", instruction)
+        self.assertIn("`##`", instruction)
+        self.assertIn("\u81ea\u52a8\u8865\u8dd1", notice)
+        self.assertIn("\u6807\u9898\u7ec4", notice)
+        self.assertIn("\u9ad8\u4eae\u9605\u8bfb\u7248", notice)
 
     def test_parse_de_ai_output_returns_titles_body_and_highlight(self):
         response = (
