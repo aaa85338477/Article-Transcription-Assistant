@@ -221,7 +221,12 @@ def save_draft():
         'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
         'source_images_all', 'selected_source_image_ids', 'article_versions',
         'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
-        'de_ai_prompt_template', 'pending_ai_stage', 'last_completed_ai_stage',
+        'de_ai_prompt_template', 'term_rules_enabled', 'term_rules_scope',
+        'banned_terms_text', 'replacement_terms_text', 'default_replacement_terms_text',
+        'suggested_replacement_terms_text', 'article_banned_terms_text', 'article_replacement_terms_text',
+        'article_default_replacement_terms_text', 'article_suggested_replacement_terms_text',
+        'term_scan_result', 'term_scan_summary',
+        'pending_ai_stage', 'last_completed_ai_stage',
         'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice',
         'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
         'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
@@ -452,19 +457,235 @@ def build_editor_system_prompt(editor_prompt, global_instruction):
     return "\n\n".join([part for part in prompt_parts if part])
 
 
-def build_modification_system_prompt(global_instruction):
+def build_modification_system_prompt(global_instruction, term_rules_instruction=""):
     base_prompt = (
-        "You are a professional article editor. Rewrite the draft according to the review feedback. "
-        "Preserve the candidate-title block, preserve the factual order, and output the final revised article directly with no extra explanation."
+        "你是一名资深中文游戏内容编辑，负责根据审稿意见对文章做定向修订。"
+        "请在保留核心事实、分析骨架、标题组和文章结构的前提下完成修改，不要重写成另一篇完全不同的稿子。"
     )
     prompt_parts = [
         base_prompt,
         build_target_length_instruction(),
         build_article_structure_instruction(),
         build_article_output_instruction(),
+        term_rules_instruction.strip() if isinstance(term_rules_instruction, str) else "",
         global_instruction.strip() if isinstance(global_instruction, str) else "",
     ]
     return "\n\n".join([part for part in prompt_parts if part])
+
+
+def parse_banned_terms_text(text):
+    if not isinstance(text, str):
+        return []
+    terms = []
+    seen = set()
+    for raw_line in text.splitlines():
+        term = raw_line.strip()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def parse_replacement_terms_text(text):
+    if not isinstance(text, str):
+        return {}, []
+    replacements = {}
+    invalid_lines = []
+    separators = ("=>", "->", "→")
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        separator = next((sep for sep in separators if sep in stripped), None)
+        if not separator:
+            invalid_lines.append(stripped)
+            continue
+        source, target = stripped.split(separator, 1)
+        source = source.strip()
+        target = target.strip()
+        if not source or not target or source == target:
+            invalid_lines.append(stripped)
+            continue
+        replacements[source] = target
+    return replacements, invalid_lines
+
+
+def merge_term_rules(global_banned_terms, global_replacements, article_banned_terms=None, article_replacements=None):
+    merged_banned_terms = []
+    seen = set()
+    for term in list(global_banned_terms or []) + list(article_banned_terms or []):
+        clean_term = (term or "").strip()
+        if not clean_term or clean_term in seen:
+            continue
+        seen.add(clean_term)
+        merged_banned_terms.append(clean_term)
+
+    merged_replacements = {}
+    for source, target in (global_replacements or {}).items():
+        clean_source = (source or "").strip()
+        clean_target = (target or "").strip()
+        if clean_source and clean_target and clean_source != clean_target:
+            merged_replacements[clean_source] = clean_target
+    for source, target in (article_replacements or {}).items():
+        clean_source = (source or "").strip()
+        clean_target = (target or "").strip()
+        if clean_source and clean_target and clean_source != clean_target:
+            merged_replacements[clean_source] = clean_target
+    return merged_banned_terms, merged_replacements
+
+
+def merge_replacement_terms(global_replacements=None, article_replacements=None):
+    merged_replacements = {}
+    for replacements in (global_replacements or {}, article_replacements or {}):
+        for source, target in replacements.items():
+            clean_source = (source or "").strip()
+            clean_target = (target or "").strip()
+            if clean_source and clean_target and clean_source != clean_target:
+                merged_replacements[clean_source] = clean_target
+    return merged_replacements
+
+
+def build_term_rules_instruction(banned_terms=None, replacement_terms=None):
+    resolved_banned_terms = [term for term in (banned_terms or []) if isinstance(term, str) and term.strip()]
+    resolved_replacement_terms = {
+        source: target
+        for source, target in (replacement_terms or {}).items()
+        if isinstance(source, str) and source.strip() and isinstance(target, str) and target.strip()
+    }
+    if not resolved_banned_terms and not resolved_replacement_terms:
+        return ""
+
+    lines = ["【个人词表约束】"]
+    if resolved_banned_terms:
+        lines.append("以下表达请尽量不要出现：")
+        lines.extend([f"- {term}" for term in resolved_banned_terms])
+    if resolved_replacement_terms:
+        lines.append("如果需要表达相近意思，优先替换为：")
+        lines.extend([f"- {source} -> {target}" for source, target in resolved_replacement_terms.items()])
+    lines.append("这些要求只作用于表达层，不要因此改动事实、逻辑、结构和标题组。")
+    return "\n".join(lines)
+
+
+def build_term_rules_preview_text(banned_terms=None, default_replacement_terms=None, suggested_replacement_terms=None):
+    preview_blocks = []
+    primary_block = build_term_rules_instruction(banned_terms, default_replacement_terms)
+    if primary_block:
+        preview_blocks.append(primary_block)
+
+    resolved_suggested_replacement_terms = {
+        source: target
+        for source, target in (suggested_replacement_terms or {}).items()
+        if isinstance(source, str) and source.strip() and isinstance(target, str) and target.strip()
+    }
+    if resolved_suggested_replacement_terms:
+        lines = [
+            "【建议替换词表】",
+            "以下表达主要用于最终稿阶段的人工优化提示，不强制注入当前 prompt：",
+        ]
+        lines.extend([f"- {source} -> {target}" for source, target in resolved_suggested_replacement_terms.items()])
+        preview_blocks.append("\n".join(lines))
+
+    return "\n\n".join([block for block in preview_blocks if block])
+
+
+def scan_article_terms(article_text, banned_terms=None, replacement_terms=None, suggested_replacement_terms=None):
+    banned_set = {term for term in (banned_terms or []) if isinstance(term, str) and term.strip()}
+    replacement_terms = replacement_terms or {}
+    suggested_replacement_terms = suggested_replacement_terms or {}
+    ordered_terms = []
+    seen = set()
+    for term in list(banned_terms or []) + list(replacement_terms.keys()) + list(suggested_replacement_terms.keys()):
+        clean_term = (term or "").strip()
+        if not clean_term or clean_term in seen:
+            continue
+        seen.add(clean_term)
+        ordered_terms.append(clean_term)
+    if not ordered_terms:
+        return []
+
+    article_body = get_article_body_text(article_text)
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", article_body) if paragraph.strip()]
+    if not paragraphs and article_body.strip():
+        paragraphs = [article_body.strip()]
+
+    scan_result = []
+    for term in ordered_terms:
+        count = 0
+        paragraph_indexes = []
+        for index, paragraph in enumerate(paragraphs, start=1):
+            term_hits = paragraph.count(term)
+            if term_hits:
+                count += term_hits
+                paragraph_indexes.append(index)
+        if count:
+            level = "default" if term in replacement_terms else "suggested" if term in suggested_replacement_terms else ""
+            replacement = replacement_terms.get(term) or suggested_replacement_terms.get(term, "")
+            scan_result.append({
+                "type": "banned" if term in banned_set else "replacement",
+                "level": level,
+                "term": term,
+                "replacement": replacement,
+                "count": count,
+                "paragraph_indexes": paragraph_indexes,
+            })
+    return scan_result
+
+
+def summarize_term_scan(scan_result):
+    result = scan_result if isinstance(scan_result, list) else []
+    return {
+        "matched_terms": len(result),
+        "total_hits": sum(int(item.get("count", 0) or 0) for item in result),
+        "banned_terms": sum(1 for item in result if item.get("type") == "banned"),
+        "default_replacement_terms": sum(
+            1 for item in result if item.get("type") == "replacement" and item.get("level") == "default"
+        ),
+        "suggested_replacement_terms": sum(
+            1 for item in result if item.get("type") == "replacement" and item.get("level") == "suggested"
+        ),
+    }
+
+
+def resolve_active_term_rules(scope=None, respect_enabled=True):
+    global_banned_terms = parse_banned_terms_text(st.session_state.get("banned_terms_text", ""))
+
+    legacy_global_replacement_text = st.session_state.get("replacement_terms_text", "")
+    legacy_article_replacement_text = st.session_state.get("article_replacement_terms_text", "")
+    global_default_replacement_text = st.session_state.get("default_replacement_terms_text", legacy_global_replacement_text)
+    article_default_replacement_text = st.session_state.get("article_default_replacement_terms_text", legacy_article_replacement_text)
+    global_suggested_replacement_text = st.session_state.get("suggested_replacement_terms_text", "")
+    article_suggested_replacement_text = st.session_state.get("article_suggested_replacement_terms_text", "")
+
+    global_default_replacements, global_default_invalid_lines = parse_replacement_terms_text(global_default_replacement_text)
+    article_banned_terms = parse_banned_terms_text(st.session_state.get("article_banned_terms_text", ""))
+    article_default_replacements, article_default_invalid_lines = parse_replacement_terms_text(article_default_replacement_text)
+    global_suggested_replacements, global_suggested_invalid_lines = parse_replacement_terms_text(global_suggested_replacement_text)
+    article_suggested_replacements, article_suggested_invalid_lines = parse_replacement_terms_text(article_suggested_replacement_text)
+
+    merged_banned_terms, merged_default_replacements = merge_term_rules(
+        global_banned_terms,
+        global_default_replacements,
+        article_banned_terms,
+        article_default_replacements,
+    )
+    merged_suggested_replacements = merge_replacement_terms(
+        global_suggested_replacements,
+        article_suggested_replacements,
+    )
+    invalid_lines = (
+        global_default_invalid_lines
+        + article_default_invalid_lines
+        + global_suggested_invalid_lines
+        + article_suggested_invalid_lines
+    )
+    scopes = st.session_state.get("term_rules_scope", TERM_RULE_SCOPE_DEFAULT)
+    if not isinstance(scopes, list):
+        scopes = list(TERM_RULE_SCOPE_DEFAULT)
+    enabled = bool(st.session_state.get("term_rules_enabled", False))
+    if respect_enabled and (not enabled or (scope and scope not in scopes)):
+        return [], {}, {}, invalid_lines
+    return merged_banned_terms, merged_default_replacements, merged_suggested_replacements, invalid_lines
 
 
 OBSIDIAN_CATEGORY_WEIGHTS = {
@@ -569,7 +790,7 @@ def resolve_obsidian_wiki_root(vault_path):
             return str(resolved), ""
         if (resolved / "00_overviews").exists() or (resolved / "01_sources").exists():
             return str(resolved), ""
-    return None, "??????? Obsidian wiki ???????????LLM Wiki ???? LLM Wiki/wiki ???"
+    return None, "未找到有效的 Obsidian wiki 目录。请确认 LLM Wiki 或 LLM Wiki/wiki 路径存在。"
 
 def read_markdown_file(path_obj):
     for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
@@ -1564,6 +1785,95 @@ DE_AI_VARIANTS = ["\u666e\u901a\u7248", "\u793e\u533a\u6587\u7ae0\u53bbAI\u7248"
 DE_AI_VARIANT_DEFAULT = DE_AI_VARIANTS[0]
 DE_AI_VARIANT_COMMUNITY = DE_AI_VARIANTS[1]
 DE_AI_VARIANT_CHAT = DE_AI_VARIANTS[2]
+
+TERM_RULE_SCOPE_LABELS = {
+    "modification": "修改稿",
+    "de_ai": "去AI",
+    "final_check": "最终检查",
+}
+TERM_RULE_SCOPE_DEFAULT = ["modification", "de_ai", "final_check"]
+TERM_RULE_DEFAULT_ENABLED = True
+TERM_RULE_DEFAULT_BANNED_TERMS_TEXT = "\n".join([
+    "综上所述",
+    "总而言之",
+    "毋庸置疑",
+    "毫无疑问",
+    "不可否认",
+    "显而易见",
+    "诚然",
+    "值得一提的是",
+    "众所周知",
+    "从某种意义上说",
+    "令人惊叹",
+    "史无前例",
+    "前所未有",
+    "完美融合",
+    "淋漓尽致",
+    "叹为观止",
+    "不可或缺",
+    "深刻印象",
+    "旨在",
+    "赋能",
+    "织就了一幅",
+    "踏上",
+    "展露无遗",
+    "焕发新机",
+    "引领潮流",
+    "势必会",
+    "进一步来说",
+    "需要指出的是",
+    "有理由相信",
+    "可以预见的是",
+    "归根结底",
+    "归根到底",
+    "在这一过程中",
+    "不止如此",
+])
+TERM_RULE_DEFAULT_REPLACEMENT_TERMS_TEXT = "\n".join([
+    "综上所述 => 整体来看",
+    "总而言之 => 整体来看",
+    "深入探讨 => 拆解",
+    "深入分析 => 拆解",
+    "旨在 => 核心是",
+    "毋庸置疑 => 现实情况是",
+    "毫无疑问 => 现实情况是",
+    "不可否认 => 客观来说",
+    "势必会 => 大概率会",
+    "值得一提的是 => 更值得细看的是",
+    "值得关注 => 更值得细看的是",
+    "诚然 => 确实",
+    "从某种意义上说 => 换个更直接的说法",
+    "进一步来说 => 往下看",
+    "归根结底 => 说到底",
+    "归根到底 => 说到底",
+    "在这一过程中 => 在这个过程里",
+    "史无前例 => 很少见",
+    "前所未有 => 和过去不太一样",
+    "需要指出的是 => 这里还有个关键点",
+])
+TERM_RULE_SUGGESTED_REPLACEMENT_TERMS_TEXT = "\n".join([
+    "不可或缺 => 少不了的一环",
+    "具有重大意义 => 算一个关键变化",
+    "面临着挑战 => 难点在于",
+    "面临困境 => 遇到了明显瓶颈",
+    "创新性地 => 新的地方在于",
+    "核心优势在于 => 真正有优势的地方在于",
+    "引起了广泛关注 => 引发了不少讨论",
+    "优化用户体验 => 减轻负担",
+    "显而易见 => 这点其实很清楚",
+    "众所周知 => 这在圈内基本是常识",
+    "令人惊叹 => 确实很亮眼",
+    "令人瞩目 => 表现很突出",
+    "完美融合 => 结合得比较顺",
+    "打破传统 => 跳出了原来的做法",
+    "提供了强有力的支持 => 提供了很强的支撑",
+    "深刻印象 => 让人记得住",
+    "赋能 => 直接提高了",
+    "引领潮流 => 成了风向标之一",
+    "有理由相信 => 更稳妥的说法是",
+    "可以预见的是 => 后面大概率会出现",
+    "不止如此 => 还不止这些",
+])
 ROLE_AUDIENCE_MAP = {
     "\u53d1\u884c\u4e3b\u7f16": "\u6e38\u620f\u884c\u4e1a\u4ece\u4e1a\u8005",
     "\u7814\u53d1\u4e3b\u7f16": "\u6e38\u620f\u5708\u540c\u884c\u548c\u786c\u6838\u73a9\u5bb6",
@@ -1605,88 +1915,111 @@ def infer_article_topic(source_content):
     return clean_text[:40] + ("..." if len(clean_text) > 40 else "")
 
 
-def build_de_ai_prompt_template(role_name, editor_prompt, source_content, variant=DE_AI_VARIANT_DEFAULT):
+def build_de_ai_prompt_template(role_name, editor_prompt, source_content, variant=DE_AI_VARIANT_DEFAULT, term_rules_instruction=""):
     persona = infer_role_persona(role_name, editor_prompt)
     topic = infer_article_topic(source_content)
     audience = ROLE_AUDIENCE_MAP.get(role_name, "行业读者")
     jargon = ROLE_JARGON_MAP.get(role_name, "ROI, LTV, retention, monetization")
     tone = ROLE_TONE_MAP.get(role_name, "冷静, 尖锐, 有判断")
-    structure_instruction = build_article_structure_instruction()
+    target_words = get_target_article_words()
+    try:
+        target_words = int(target_words)
+    except Exception:
+        target_words = 1500
+    if target_words < 1200:
+        heading_instruction = "短稿默认使用 3 个 `##` 二级标题。"
+    elif target_words <= 2500:
+        heading_instruction = "中等篇幅默认使用 3-5 个 `##` 二级标题，让正文中段有清晰层级。"
+    else:
+        heading_instruction = "中长稿默认使用 4-5 个 `##` 二级标题，只有某一节明显复杂时才补少量 `###`。"
+    structure_instruction = "\n".join([
+        "【文章结构协议｜最高优先级】",
+        "正文必须使用 Markdown 输出。",
+        "开头先用 1-2 段导语交代对象和背景，再进入正文分析。",
+        heading_instruction,
+        "每个 `##` 小节通常保持 2-4 个自然段，不要把正文写成一整堵长墙。",
+        "小节标题必须具体、信息明确，禁止使用“背景介绍”“总结一下”“最后说说”这类空标题。",
+        "结构要清楚，但不要把每一节写成机械等长的模板段落。",
+    ])
     community_instruction = ""
     chatty_instruction = ""
     if variant == DE_AI_VARIANT_COMMUNITY:
         community_instruction = """
-# Community Forum Adaptation
-Apply a light community-forum rewrite for high-quality game-player discussion spaces.
-- Use more natural player-facing wording and reduce newsroom stiffness, documentation tone, and report-like phrasing.
-- Keep viewpoint clarity, but make sentence rhythm feel more like a strong long post in a player forum.
-- Prefer shorter sentences, cleaner pauses, and more natural transitions between paragraphs.
-- Allow moderate player-perspective resonance, but do not turn the article into emotional venting or fan shouting.
-- Convert overly hard, media-style, or industry-report wording into expressions that ordinary players can read smoothly.
-- Reduce jargon stacking. When jargon is necessary, make it understandable in plain language nearby.
-- Make the conclusion land more clearly on what this means for players, expectations, or community discussion.
-- Do not overdo interactivity: avoid frequent rhetorical questions, forced meme tone, tieba slang, or exaggerated emotional catchphrases.
+【社区文章去AI版附加要求】
+请在现有去 AI 约束上，再做一层面向玩家社区的轻口语化改写。
+- 用更自然的玩家向表达，减少媒体稿腔、说明书腔和行业报告腔。
+- 观点要清楚，但句子节奏要更像玩家社区里的高质量长帖。
+- 多用短句和自然停顿，让段落推进更顺，不要一段话拧得太满。
+- 可以适度加入玩家视角的共鸣感，但不要写成情绪宣泄或粉黑大战。
+- 把过硬、过媒体化、过行业黑话化的表达，改成普通玩家也能顺着读下去的话。
+- 减少术语堆叠。必要术语可以保留，但要顺手讲成人话。
+- 结尾要更明确地落到“这对玩家意味着什么”“接下来社区会怎么讨论”。
+- 不要过度互动化：避免频繁反问、硬玩梗、贴吧口癖和夸张情绪词泛滥。
 """
     elif variant == DE_AI_VARIANT_CHAT:
         chatty_instruction = """
-# Natural Conversational Adaptation
-Apply a medium-strength conversational rewrite that sounds like a real, experienced writer talking the reader through the point.
-- Keep the analysis sharp and useful, but make the prose feel like a human explaining things face to face instead of filing a report.
-- Allow natural transitions such as "to be honest", "actually", "in other words", "so the real issue is", or similar conversational pivots in natural Simplified Chinese.
-- Use more sentence-length variation. Let some sentences land short when the point needs emphasis, instead of keeping every sentence evenly shaped.
-- Allow light scene-setting, light self-aware phrasing, or a brief aside in parentheses when it helps the rhythm, but keep it restrained.
-- Replace newsroom tone, report tone, and instruction-manual tone with clearer human phrasing that still respects the reader's intelligence.
-- Keep professional terms when they matter, but explain them in plain language nearby instead of stacking jargon.
-- Make the ending land on what the matter really means, not just that the analysis is complete.
-- Keep this as high-quality long-form writing. Do not turn it into low-grade chatter, meme posting, tieba slang, dense rhetorical questions, or self-indulgent rambling.
-- Do not let first-person phrasing take over the article. The writer may feel present, but the article must stay focused on the topic and argument.
-- Preserve the title structure, opening background, and analytical spine. Conversational does not mean loose or messy.
+【自然唠嗑版附加要求】
+请在现有去 AI 约束上，再做一层中强度口语化改写，让文章像一个有经验、有判断的人在认真把事情讲明白。
+- 保留分析的锋利度和信息量，但整体表达要像真人当面在讲，不要像在交报告。
+- 允许出现“说实话”“其实”“换句话说”“问题就在这儿”这类自然转折，但要放在自然的位置，不要刻意堆叠。
+- 让句子长短更有变化。该短的时候就短，不要每一句都写得一样整齐。
+- 可以有少量场景感、轻微自我补充，或者一句克制的括号插话，但不要喧宾夺主。
+- 把媒体稿腔、报告腔、说明书腔换成更像人话的表达，同时保留对读者的尊重。
+- 专业术语在必要时可以保留，但要顺手解释，不要把术语一层层往上堆。
+- 结尾要落到“这件事到底意味着什么”，而不是只把分析收住。
+- 文章仍然要像高质量长文，不要写成低质水贴、表情包文风、贴吧口癖、密集反问或自我陶醉式絮叨。
+- 第一人称存在感可以有，但不能压过主题本身。核心始终是对象、事实和论证。
+- 标题结构、开头背景和分析骨架都必须保留。唠嗑感不等于松散，也不等于想到哪写到哪。
 """
-    return f"""# Role: {persona}
+    return f"""# 角色
+你现在的身份是：{persona}
 
-# Context
-I have an article draft about [{topic}]. The information gain and analytical spine are already useful, but the language still sounds too synthetic. Rewrite it so it feels like a real human expert from the target audience [{audience}] wrote it in natural Simplified Chinese.
+# 背景
+我现在有一篇关于【{topic}】的文章草稿。它的信息量和分析骨架是有价值的，但语言质感还偏 AI，不够像真人写的成熟中文长文。
+请把它改写成一篇会让目标读者【{audience}】相信是真人作者写出来的自然简体中文文章。
 
-# Task
-Keep every key fact, data point, argument, example, and reasoning step from the draft. Rewrite only the expression, cadence, and sentence texture.
-If the draft opens too abruptly, add a 1-2 paragraph lede so the reader immediately knows which game, event, company, or controversy the article is about, and why this case matters now.
+# 任务
+保留草稿中的关键事实、数据点、观点、例子和推理链条，只改表达方式、句子节奏、段落推进和语言质感。
+如果原稿开头太突兀，请先补 1-2 段导语，让读者一上来就知道这篇文章到底在讲哪款游戏、哪个公司、哪个事件或哪场争议，以及为什么这件事现在值得分析。
 
-# Core Constraints
-1. Output everything in Simplified Chinese.
-2. Do not delete the candidate-title block.
-3. Do not flatten the article back into one long wall of text.
-4. Keep the factual order and analytical direction stable.
-5. Use jargon naturally when appropriate: {jargon}.
-6. Preferred tone: {tone}.
+# 核心约束
+1. 全部输出必须使用简体中文。
+2. 不得删除备选标题组。
+3. 不得把文章重新抹平成一整堵大长段。
+4. 事实顺序和分析方向必须保持稳定，不要擅自改动论证重心。
+5. 需要用到术语时可以自然使用，但要符合中文语境：{jargon}。
+6. 整体语气优先靠近：{tone}。
 
+{term_rules_instruction}
 {community_instruction}
 {chatty_instruction}
-# Structure Preservation
+# 结构保留要求
 {structure_instruction}
-- Preserve existing heading hierarchy when it already works. You may polish heading wording, but you must not delete the hierarchy.
-- Preserve the candidate-title block and keep 3-5 candidate titles in the final output. If the direction has not changed, keep the same title skeleton and only improve wording and punch.
-- If the draft lacks enough background in the opening, repair that with a concise 1-2 paragraph lede before the main analysis begins.
-- De-AI means rewriting expression, not rebuilding the article from scratch.
+- 如果原稿现有标题层级是合理的，可以润色标题措辞，但不能把层级删掉。
+- 最终必须保留备选标题组，并维持 3-5 个备选标题；如果文章方向没有变，优先保留原标题骨架，只优化措辞和传播力。
+- 如果开头背景不够，就在正文分析前补出简洁的 1-2 段导语。
+- 去 AI 的本质是重写表达，不是推翻原稿重新起草。
 
-# Output Protocol
-Output exactly three blocks in this order, with no extra explanation:
+# 输出格式要求
+严格按以下顺序输出 3 个区块，不要添加任何额外解释：
 
 {PURE_TITLE_MARKER}
 1. ...
 2. ...
 3. ...
-Keep 3-5 candidate titles here.
+这里保留 3-5 个备选标题。
 
 {PURE_BODY_MARKER}
-Output only the clean final article body here. Do not repeat the title block. Do not output HTML here.
+这里只输出纯净定稿正文，不要重复标题组，不要输出 HTML。
 
 {HIGHLIGHT_MARKER}
-Output a reading-enhanced HTML version of the same article body.
-Allowed tags: <h2>, <h3>, <p>, <strong>, <span class="highlight-positive">, <span class="highlight-risk">. Prefer <h2>/<h3> instead of Markdown `##` headings when section titles are needed.
-Do not change facts. Do not add or remove content. Highlight only important learning points or risk warnings.
+这里输出同一篇正文的高亮阅读版 HTML。
+允许使用的标签只有：<h2>、<h3>、<p>、<strong>、<span class="highlight-positive">、<span class="highlight-risk">。
+如果需要分节标题，优先使用 <h2>/<h3>，不要继续输出 Markdown 的 `##` 标题。
+不要改动事实，不要凭空增删内容，只高亮真正重要的认知点、判断点或风险提示。
 
-# Draft
-[Paste the full draft here]"""
+# 原始草稿
+[在这里粘贴完整草稿]"""
 
 def parse_de_ai_dual_output(response_text, fallback_titles=None):
     clean_text = (response_text or "").strip()
@@ -2349,6 +2682,33 @@ def init_state():
         st.session_state.de_ai_temperature = 0.75
     if 'de_ai_prompt_template' not in st.session_state:
         st.session_state.de_ai_prompt_template = ""
+    if 'term_rules_enabled' not in st.session_state:
+        st.session_state.term_rules_enabled = TERM_RULE_DEFAULT_ENABLED
+    if 'term_rules_scope' not in st.session_state or not isinstance(st.session_state.term_rules_scope, list):
+        st.session_state.term_rules_scope = list(TERM_RULE_SCOPE_DEFAULT)
+    else:
+        normalized_term_scope = [scope for scope in st.session_state.term_rules_scope if scope in TERM_RULE_SCOPE_LABELS]
+        st.session_state.term_rules_scope = normalized_term_scope or list(TERM_RULE_SCOPE_DEFAULT)
+    if 'banned_terms_text' not in st.session_state or st.session_state.banned_terms_text is None:
+        st.session_state.banned_terms_text = TERM_RULE_DEFAULT_BANNED_TERMS_TEXT
+    legacy_global_replacement_text = st.session_state.get('replacement_terms_text', '')
+    if 'default_replacement_terms_text' not in st.session_state or st.session_state.default_replacement_terms_text is None:
+        st.session_state.default_replacement_terms_text = legacy_global_replacement_text or TERM_RULE_DEFAULT_REPLACEMENT_TERMS_TEXT
+    if 'suggested_replacement_terms_text' not in st.session_state or st.session_state.suggested_replacement_terms_text is None:
+        st.session_state.suggested_replacement_terms_text = TERM_RULE_SUGGESTED_REPLACEMENT_TERMS_TEXT
+    st.session_state.replacement_terms_text = st.session_state.get('default_replacement_terms_text', '') or TERM_RULE_DEFAULT_REPLACEMENT_TERMS_TEXT
+    if 'article_banned_terms_text' not in st.session_state or st.session_state.article_banned_terms_text is None:
+        st.session_state.article_banned_terms_text = ""
+    legacy_article_replacement_text = st.session_state.get('article_replacement_terms_text', '')
+    if 'article_default_replacement_terms_text' not in st.session_state or st.session_state.article_default_replacement_terms_text is None:
+        st.session_state.article_default_replacement_terms_text = legacy_article_replacement_text or ""
+    if 'article_suggested_replacement_terms_text' not in st.session_state or st.session_state.article_suggested_replacement_terms_text is None:
+        st.session_state.article_suggested_replacement_terms_text = ""
+    st.session_state.article_replacement_terms_text = st.session_state.get('article_default_replacement_terms_text', '') or ""
+    if 'term_scan_result' not in st.session_state or not isinstance(st.session_state.term_scan_result, list):
+        st.session_state.term_scan_result = []
+    if 'term_scan_summary' not in st.session_state or not isinstance(st.session_state.term_scan_summary, dict):
+        st.session_state.term_scan_summary = {}
     st.session_state.title_candidates = normalize_title_candidates(st.session_state.get("title_candidates", []))
     if not st.session_state.title_candidates:
         for article_key in ("final_article", "modified_article", "draft_article"):
@@ -3101,14 +3461,14 @@ def _build_copy_button_iframe(copy_key, label, plain_text, html_payload):
                 const parentClipboard = getParentClipboard();
 
                 if (copyViaExecCommand(document, htmlText, plainText) || copyViaExecCommand(parentDocument, htmlText, plainText)) {{
-                    setStatus("?????????????????");
+                    setStatus("复制成功，已保留格式。");
                     return;
                 }}
                 if (await copyViaClipboardApi(parentClipboard, htmlText, plainText) || await copyViaClipboardApi(navigator.clipboard, htmlText, plainText)) {{
-                    setStatus("?????????????????");
+                    setStatus("复制成功，已保留格式。");
                     return;
                 }}
-                setStatus("???????? Ctrl+C?");
+                setStatus("复制失败，请手动 Ctrl+C。");
             }};
         }})();
         </script>
@@ -3141,6 +3501,15 @@ def render_editor_friendly_copy_button(text, copy_key, label="\U0001F4CB \u517c\
             st.caption(message)
         else:
             st.caption(message)
+
+
+def render_wrapped_article_text(text):
+    normalized = text or ""
+    escaped = html_lib.escape(normalized)
+    st.markdown(
+        f'<div class="article-text-view"><pre>{escaped}</pre></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_rich_html_copy_button(html_text, copy_key, label="\U0001F4CB \u590d\u5236\u9ad8\u4eae\u9605\u8bfb\u7248\uff08\u4fdd\u7559\u683c\u5f0f\uff09"):
@@ -3394,6 +3763,23 @@ def inject_ui_theme():
         .stCodeBlock, [data-testid="stCodeBlock"] {
             border-radius: 16px !important;
             border: 1px solid rgba(22, 33, 28, 0.08);
+        }
+        .article-text-view {
+            padding: 1rem 1.15rem;
+            border-radius: 16px;
+            border: 1px solid rgba(22, 33, 28, 0.08);
+            background: rgba(255, 255, 255, 0.82);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+        }
+        .article-text-view pre {
+            margin: 0;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.97rem;
+            line-height: 1.9;
+            color: var(--text);
         }
         </style>
         """,
@@ -3915,7 +4301,15 @@ if st.session_state.current_step == 1:
 
                         save_draft()
                         st.write("✨ 接收修改意见，正在进行最终打磨...")
-                        modification_prompt = build_modification_system_prompt(global_instruction)
+                        modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
+                        modification_term_rules_instruction = build_term_rules_instruction(
+                            modification_banned_terms,
+                            modification_default_replacements,
+                        )
+                        modification_prompt = build_modification_system_prompt(
+                            global_instruction,
+                            term_rules_instruction=modification_term_rules_instruction,
+                        )
                         content_to_modify = build_modification_user_content(
                     st.session_state.review_feedback,
                     st.session_state.draft_article,
@@ -4047,7 +4441,7 @@ elif st.session_state.current_step == 3:
     render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     with st.expander("📝 查看当前初稿内容 (鼠标移至右上角可一键复制)", expanded=True):
-        st.code(st.session_state.draft_article, language="markdown")
+        render_wrapped_article_text(st.session_state.draft_article)
         render_editor_friendly_copy_button(st.session_state.draft_article, "draft_article_step3")
     
     st.divider()
@@ -4120,7 +4514,7 @@ elif st.session_state.current_step == 4:
     if st.session_state.modified_article:
         st.divider()
         st.markdown("### 当前修改稿预览")
-        st.code(st.session_state.modified_article, language="markdown")
+        render_wrapped_article_text(st.session_state.modified_article)
         render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step4")
 
     col1, col2, col3 = st.columns(3)
@@ -4144,7 +4538,15 @@ elif st.session_state.current_step == 4:
             mark_ai_stage_started("modification_generation")
             with st.spinner("编辑正在根据主编意见生成修改稿..."):
                 global_instruction = prompts_data.get("global_instruction", "")
-                modification_prompt = build_modification_system_prompt(global_instruction)
+                modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
+                modification_term_rules_instruction = build_term_rules_instruction(
+                    modification_banned_terms,
+                    modification_default_replacements,
+                )
+                modification_prompt = build_modification_system_prompt(
+                    global_instruction,
+                    term_rules_instruction=modification_term_rules_instruction,
+                )
 
                 content_to_modify = build_modification_user_content(
                     st.session_state.review_feedback,
@@ -4202,7 +4604,7 @@ elif st.session_state.current_step == 5:
     ])
 
     st.markdown("### 当前修改稿")
-    st.code(st.session_state.modified_article, language="markdown")
+    render_wrapped_article_text(st.session_state.modified_article)
     render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step5")
 
     col_variant, col_model, col_temp = st.columns([1.15, 1.2, 1])
@@ -4230,17 +4632,63 @@ elif st.session_state.current_step == 5:
             on_change=save_draft,
         )
 
+    with st.expander("本文临时词表微调", expanded=False):
+        st.caption("这里适合写这篇稿子临时追加的禁用词、默认替换词和建议替换词。全局词表会一起合并显示。")
+        st.text_area(
+            "本文临时禁用词（每行一个）",
+            key="article_banned_terms_text",
+            height=110,
+            placeholder="进一步来说\n值得一提的是",
+            on_change=save_draft,
+        )
+        st.text_area(
+            "本文临时默认替换词（每行一条：原词 => 新词）",
+            key="article_default_replacement_terms_text",
+            height=120,
+            placeholder="值得关注 => 更值得细看的是\n进一步来说 => 往下看",
+            on_change=save_draft,
+        )
+        st.text_area(
+            "本文临时建议替换词（每行一条：原词 => 新词）",
+            key="article_suggested_replacement_terms_text",
+            height=120,
+            placeholder="核心优势在于 => 真正有优势的地方在于\n显而易见 => 这点其实很清楚",
+            on_change=save_draft,
+        )
+        _, preview_default_invalid_lines = parse_replacement_terms_text(st.session_state.get("article_default_replacement_terms_text", ""))
+        _, preview_suggested_invalid_lines = parse_replacement_terms_text(st.session_state.get("article_suggested_replacement_terms_text", ""))
+        if preview_default_invalid_lines:
+            st.warning("以下本文临时默认替换词格式无法识别：" + "；".join(preview_default_invalid_lines[:6]))
+        if preview_suggested_invalid_lines:
+            st.warning("以下本文临时建议替换词格式无法识别：" + "；".join(preview_suggested_invalid_lines[:6]))
+        preview_banned_terms, preview_default_replacements, preview_suggested_replacements, _ = resolve_active_term_rules(respect_enabled=False)
+        preview_term_instruction = build_term_rules_preview_text(
+            preview_banned_terms,
+            preview_default_replacements,
+            preview_suggested_replacements,
+        )
+        if preview_term_instruction:
+            st.code(preview_term_instruction, language="markdown")
+        else:
+            st.caption("当前这篇稿子还没有生效的词表规则。")
+
     de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
     de_ai_button_suffix = (
         "（社区版）"
         if de_ai_variant == DE_AI_VARIANT_COMMUNITY
         else "（唠嗑版）" if de_ai_variant == DE_AI_VARIANT_CHAT else ""
     )
+    de_ai_banned_terms, de_ai_default_replacements, _, _ = resolve_active_term_rules("de_ai")
+    de_ai_term_rules_instruction = build_term_rules_instruction(
+        de_ai_banned_terms,
+        de_ai_default_replacements,
+    )
     st.session_state.de_ai_prompt_template = build_de_ai_prompt_template(
         current_role,
         current_editor_prompt,
         st.session_state.get("source_content", ""),
         variant=de_ai_variant,
+        term_rules_instruction=de_ai_term_rules_instruction,
     )
 
     with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
@@ -4346,11 +4794,8 @@ elif st.session_state.current_step == 5:
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
                 st.rerun()
-                checkpoint_ai_stage("de_ai_generation", target_step=6)
-                save_draft()
-                notify_step_completed(defer_until_rerun=True)
-                go_to_step(6)
-                st.rerun()
+# --- Step 6：终极版分栏 UI ---
+# --- Step 6：终极版分栏 UI ---
 # --- Step 6：终极版分栏 UI ---
 
 elif st.session_state.current_step == 6:
@@ -4360,7 +4805,24 @@ elif st.session_state.current_step == 6:
         st.session_state.get("final_article", ""),
         st.session_state.get("title_candidates", []),
     )
-    render_context_strip([f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}", f"当前模型：{selected_model}", f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}"])
+    final_check_banned_terms, final_check_default_replacements, final_check_suggested_replacements, final_check_invalid_lines = resolve_active_term_rules("final_check")
+    if final_check_banned_terms or final_check_default_replacements or final_check_suggested_replacements:
+        st.session_state.term_scan_result = scan_article_terms(
+            st.session_state.get("final_article", ""),
+            final_check_banned_terms,
+            final_check_default_replacements,
+            final_check_suggested_replacements,
+        )
+        st.session_state.term_scan_summary = summarize_term_scan(st.session_state.get("term_scan_result", []))
+    else:
+        st.session_state.term_scan_result = []
+        st.session_state.term_scan_summary = summarize_term_scan([])
+
+    render_context_strip([
+        f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}",
+        f"当前模型：{selected_model}",
+        f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}",
+    ])
     st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.98])
     with left_col:
@@ -4381,7 +4843,7 @@ elif st.session_state.current_step == 6:
                 options=version_options,
                 index=default_version_index,
                 format_func=format_version_option,
-                key="article_version_selector"
+                key="article_version_selector",
             )
             selected_version = version_map.get(selected_version_id)
 
@@ -4401,16 +4863,63 @@ elif st.session_state.current_step == 6:
                     notify_step_completed()
                     st.success(f"已切换到版本 {selected_version_id}")
                 with st.expander("查看选中版本全文", expanded=False):
-                    st.code(selected_version.get("content", ""), language="markdown")
+                    render_wrapped_article_text(selected_version.get("content", ""))
                     render_editor_friendly_copy_button(selected_version.get("content", ""), f"version_{selected_version_id}")
         else:
             st.info("暂无版本记录。生成初稿或定稿后会自动写入版本时间线。")
 
         st.divider()
         st.markdown("### 主稿面板（当前定稿）")
-        st.code(display_final_article, language="markdown")
+        render_wrapped_article_text(display_final_article)
         render_editor_friendly_copy_button(display_final_article, "final_article_step6")
 
+        st.divider()
+        st.markdown("### 词表检查")
+        with st.container(border=True):
+            term_rule_scope = st.session_state.get("term_rules_scope", TERM_RULE_SCOPE_DEFAULT)
+            if not st.session_state.get("term_rules_enabled", False):
+                st.caption("当前未启用词表规则。开启后，系统会在修改稿 / 去 AI 阶段提前施压，并在最终稿阶段自动检查。")
+            elif "final_check" not in term_rule_scope:
+                st.caption("当前没有对最终稿启用词表检查。你可以在侧边栏的【个人写作词表】里打开这个范围。")
+            elif final_check_invalid_lines:
+                st.warning("以下替换词格式无法识别：" + "；".join(final_check_invalid_lines[:6]))
+            elif not final_check_banned_terms and not final_check_default_replacements and not final_check_suggested_replacements:
+                st.caption("当前没有生效的禁用词、默认替换词或建议替换词。")
+            elif st.session_state.get("term_scan_result"):
+                term_scan_summary = st.session_state.get("term_scan_summary", {})
+                st.warning(
+                    f"命中 {term_scan_summary.get('matched_terms', 0)} 个词表规则，共 {term_scan_summary.get('total_hits', 0)} 处；"
+                    f"其中禁用词 {term_scan_summary.get('banned_terms', 0)} 个，默认替换 {term_scan_summary.get('default_replacement_terms', 0)} 个，建议替换 {term_scan_summary.get('suggested_replacement_terms', 0)} 个。"
+                )
+                st.caption("段落编号按纯净正文计算，不包含标题组。")
+                term_scan_result = st.session_state.get("term_scan_result", [])
+                banned_hits = [item for item in term_scan_result if item.get("type") == "banned"]
+                default_hits = [
+                    item for item in term_scan_result
+                    if item.get("type") == "replacement" and item.get("level") == "default"
+                ]
+                suggested_hits = [
+                    item for item in term_scan_result
+                    if item.get("type") == "replacement" and item.get("level") == "suggested"
+                ]
+
+                def render_term_hit_group(title, items, empty_text):
+                    st.markdown(f"**{title}**")
+                    if not items:
+                        st.caption(empty_text)
+                        return
+                    for item in items:
+                        paragraph_text = "、".join([f"第{index}段" for index in item.get("paragraph_indexes", [])]) or "正文未知位置"
+                        replacement_text = item.get("replacement") or "无默认替换建议"
+                        st.markdown(
+                            f"- `{item.get('term', '')}` · 命中 **{item.get('count', 0)}** 次 · {paragraph_text} · 建议：{replacement_text}"
+                        )
+
+                render_term_hit_group("禁用词命中", banned_hits, "当前没有命中禁用词。")
+                render_term_hit_group("默认替换命中", default_hits, "当前没有命中默认替换词。")
+                render_term_hit_group("建议替换命中", suggested_hits, "当前没有命中建议替换词。")
+            else:
+                st.success("这篇最终稿没有命中当前词表规则。")
         st.divider()
         st.markdown("### 高亮阅读版")
         render_highlighted_article_panel(st.session_state.get("highlighted_article", ""))
