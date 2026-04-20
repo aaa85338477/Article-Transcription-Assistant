@@ -55,6 +55,8 @@ PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
 DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
 AI_DIAGNOSTIC_LOG = os.path.join(APP_DIR, "ai_diagnostics.log")
 PROMPTS_LOAD_REPORT = ""
+PENDING_DRAFT_RESTORE_KEY = "_pending_draft_restore"
+DRAFT_RESTORE_NOTICE_KEY = "_draft_restore_notice"
 
 
 def get_prompt_file_candidates():
@@ -241,18 +243,39 @@ def save_draft():
     except Exception as e:
         print(f"草稿保存失败: {e}")
 
+def read_draft_data():
+    if not os.path.exists(DRAFT_FILE):
+        return None
+
+    with open(DRAFT_FILE, "r", encoding="utf-8") as f:
+        draft_data = json.load(f)
+
+    if not isinstance(draft_data, dict):
+        raise ValueError("Draft payload must be a JSON object.")
+
+    return draft_data
+
+
 def load_draft():
-    if os.path.exists(DRAFT_FILE):
-        try:
-            with open(DRAFT_FILE, "r", encoding="utf-8") as f:
-                draft_data = json.load(f)
-            for k, v in draft_data.items():
-                st.session_state[k] = v
-            return True
-        except Exception as e:
-            print(f"草稿读取失败: {e}")
+    try:
+        draft_data = read_draft_data()
+        if draft_data is None:
             return False
-    return False
+        st.session_state[PENDING_DRAFT_RESTORE_KEY] = draft_data
+        st.session_state[DRAFT_RESTORE_NOTICE_KEY] = "草稿恢复成功！工作流已复原。"
+        return True
+    except Exception as e:
+        print(f"草稿读取失败: {e}")
+        return False
+
+
+def apply_pending_draft_restore():
+    pending_draft = st.session_state.pop(PENDING_DRAFT_RESTORE_KEY, None)
+    if not isinstance(pending_draft, dict):
+        return
+
+    for k, v in pending_draft.items():
+        st.session_state[k] = v
 
 def clear_draft():
     if os.path.exists(DRAFT_FILE):
@@ -2813,6 +2836,7 @@ def init_state():
         st.session_state.selected_role_widget = current_role
 
 
+apply_pending_draft_restore()
 init_state()
 
 
@@ -2877,6 +2901,10 @@ def format_ai_stage_name(stage_name):
 
 
 def render_ai_progress_banner():
+    draft_restore_notice = st.session_state.pop(DRAFT_RESTORE_NOTICE_KEY, "")
+    if draft_restore_notice:
+        st.success(draft_restore_notice)
+
     recovered_notice = st.session_state.get("recovered_ai_notice", "")
     if recovered_notice:
         st.success(recovered_notice)
@@ -4053,7 +4081,6 @@ if st.session_state.current_step == 1:
             with col_draft1:
                 if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
                     if load_draft():
-                        st.success("草稿恢复成功！工作流已复原。")
                         st.rerun()
                     else:
                         st.error("草稿文件损坏，无法恢复。")
