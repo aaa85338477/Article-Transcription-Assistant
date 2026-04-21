@@ -670,6 +670,217 @@ def summarize_term_scan(scan_result):
     }
 
 
+
+def get_expected_h2_range(target_words=None):
+    resolved_words = target_words
+    if resolved_words in (None, "", 0):
+        getter = globals().get("get_target_article_words")
+        if callable(getter):
+            resolved_words = getter()
+    try:
+        word_count = int(resolved_words or 0)
+    except (TypeError, ValueError):
+        word_count = 0
+    if word_count <= 1200:
+        return (3, 3)
+    if word_count >= 2500:
+        return (4, 5)
+    return (3, 5)
+
+
+def split_body_paragraphs(article_text):
+    article_body = get_article_body_text(article_text)
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", article_body) if paragraph.strip()]
+    if not paragraphs and article_body.strip():
+        paragraphs = [article_body.strip()]
+    return paragraphs
+
+
+def extract_markdown_h2_sections(article_text):
+    article_body = get_article_body_text(article_text)
+    if not article_body.strip():
+        return []
+
+    sections = []
+    current_section = None
+    paragraph_buffer = []
+
+    def flush_paragraph_buffer():
+        nonlocal paragraph_buffer, current_section
+        if current_section is None:
+            paragraph_buffer = []
+            return
+        paragraph_text = "\n".join(paragraph_buffer).strip()
+        if paragraph_text:
+            current_section["paragraphs"].append(paragraph_text)
+        paragraph_buffer = []
+
+    for raw_line in article_body.splitlines():
+        heading_match = re.match(r"^\s*##\s+(.+?)\s*$", raw_line)
+        if heading_match:
+            flush_paragraph_buffer()
+            current_section = {
+                "heading": heading_match.group(1).strip(),
+                "paragraphs": [],
+            }
+            sections.append(current_section)
+            continue
+
+        if not raw_line.strip():
+            flush_paragraph_buffer()
+            continue
+
+        if current_section is not None:
+            paragraph_buffer.append(raw_line.strip())
+
+    flush_paragraph_buffer()
+
+    for section in sections:
+        section["paragraph_count"] = len(section.get("paragraphs", []))
+    return sections
+
+
+def build_publish_quality_gate_report(
+    article_text,
+    title_candidates=None,
+    highlighted_article="",
+    term_scan_summary=None,
+    target_words=None,
+):
+    explicit_titles = normalize_title_candidates(title_candidates)
+    parsed_titles, _ = split_structured_article_sections(article_text)
+    resolved_titles = explicit_titles or parsed_titles
+    title_count = len(resolved_titles)
+
+    article_body = get_article_body_text(article_text)
+    expected_h2_range = get_expected_h2_range(target_words)
+    min_h2, max_h2 = expected_h2_range
+
+    intro_source = re.split(r"^\s*##\s+.+$", article_body, maxsplit=1, flags=re.MULTILINE)[0]
+    intro_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", intro_source) if paragraph.strip()]
+
+    h2_sections = extract_markdown_h2_sections(article_text)
+    h2_count = len(h2_sections)
+    term_summary = term_scan_summary if isinstance(term_scan_summary, dict) else {}
+
+    items = []
+
+    if 3 <= title_count <= 5:
+        items.append({"key": "titles", "label": "标题组", "status": "pass", "detail": f"已保留 {title_count} 个备选标题。"})
+    else:
+        items.append({"key": "titles", "label": "标题组", "status": "fail", "detail": f"当前标题组只有 {title_count} 个，发布前需要补到 3-5 个。"})
+
+    if not intro_paragraphs:
+        items.append({"key": "intro", "label": "开头导语", "status": "fail", "detail": "开头缺少 1-2 段导语，读者还没搞清对象和背景。"})
+    elif len(intro_paragraphs) <= 2:
+        items.append({"key": "intro", "label": "开头导语", "status": "pass", "detail": f"导语段落数为 {len(intro_paragraphs)}，符合当前结构要求。"})
+    else:
+        items.append({"key": "intro", "label": "开头导语", "status": "warn", "detail": f"导语段落数为 {len(intro_paragraphs)}，建议压缩到 1-2 段。"})
+
+    if min_h2 <= h2_count <= max_h2:
+        items.append({"key": "h2_count", "label": "二级标题", "status": "pass", "detail": f"当前共有 {h2_count} 个 `##`，落在建议范围 {min_h2}-{max_h2} 内。"})
+    else:
+        items.append({"key": "h2_count", "label": "二级标题", "status": "fail", "detail": f"当前共有 {h2_count} 个 `##`，建议范围应为 {min_h2}-{max_h2} 个。"})
+
+    if h2_count < 2:
+        items.append({"key": "section_balance", "label": "小节均衡度", "status": "warn", "detail": "当前还没有足够的 `##` 小节，暂时无法判断小节均衡度。"})
+    else:
+        imbalanced_sections = [
+            section.get("heading", "未命名小节")
+            for section in h2_sections
+            if section.get("paragraph_count", 0) < 2 or section.get("paragraph_count", 0) > 4
+        ]
+        if imbalanced_sections:
+            items.append({"key": "section_balance", "label": "小节均衡度", "status": "warn", "detail": "以下小节段落数失衡，建议再修一下：" + "、".join(imbalanced_sections) + "。"})
+        else:
+            items.append({"key": "section_balance", "label": "小节均衡度", "status": "pass", "detail": "各个 `##` 小节段落数基本均衡。"})
+
+    if (highlighted_article or "").strip():
+        items.append({"key": "highlight", "label": "高亮阅读版", "status": "pass", "detail": "高亮阅读版已生成。"})
+    else:
+        items.append({"key": "highlight", "label": "高亮阅读版", "status": "warn", "detail": "当前版本还没有高亮阅读版视图。"})
+
+    banned_hits = int(term_summary.get("banned_terms", 0) or 0)
+    default_hits = int(term_summary.get("default_replacement_terms", 0) or 0)
+    suggested_hits = int(term_summary.get("suggested_replacement_terms", 0) or 0)
+    if banned_hits > 0:
+        items.append({"key": "term_rules", "label": "词表风险", "status": "fail", "detail": f"仍命中 {banned_hits} 个禁用词，发布前建议先处理。"})
+    elif default_hits > 0 or suggested_hits > 0:
+        items.append({"key": "term_rules", "label": "词表风险", "status": "warn", "detail": f"仍命中默认替换 {default_hits} 个、建议替换 {suggested_hits} 个。"})
+    else:
+        items.append({"key": "term_rules", "label": "词表风险", "status": "pass", "detail": "当前没有命中禁用词或替换词风险。"})
+
+    fail_count = sum(1 for item in items if item.get("status") == "fail")
+    warn_count = sum(1 for item in items if item.get("status") == "warn")
+    overall_status = "fail" if fail_count else "warn" if warn_count else "pass"
+    return {
+        "overall_status": overall_status,
+        "fail_count": fail_count,
+        "warn_count": warn_count,
+        "items": items,
+        "h2_count": h2_count,
+        "expected_h2_range": expected_h2_range,
+        "intro_paragraph_count": len(intro_paragraphs),
+        "title_count": title_count,
+    }
+
+
+def detect_auto_retry_issues(
+    article_text,
+    explicit_title_candidates=None,
+    highlighted_article="",
+    require_highlight=False,
+    target_words=None,
+):
+    report = build_publish_quality_gate_report(
+        article_text,
+        title_candidates=explicit_title_candidates,
+        highlighted_article=highlighted_article,
+        term_scan_summary={},
+        target_words=target_words,
+    )
+    issue_keys = []
+    for item in report.get("items", []):
+        if item.get("key") in {"titles", "intro", "h2_count"} and item.get("status") == "fail":
+            issue_keys.append(item.get("key"))
+        if item.get("key") == "highlight" and require_highlight and item.get("status") != "pass":
+            issue_keys.append("highlight")
+    return issue_keys
+
+
+def build_auto_retry_instruction(issue_keys, target_words=None, require_highlight=False):
+    issue_set = set(issue_keys or [])
+    min_h2, max_h2 = get_expected_h2_range(target_words)
+    instructions = ["【自动补跑修正】请只修复下面这些结构问题，再重新完整输出一次。"]
+    if "titles" in issue_set:
+        instructions.append("- 重新补齐备选标题，必须保留 3-5 个标题。")
+    if "intro" in issue_set:
+        instructions.append("- 开头先补 1-2 段导语，先交代对象、事件和分析缘由，再进入正文分析。")
+    if "h2_count" in issue_set:
+        instructions.append(f"- 正文补足 `##` 二级标题，目标范围是 {min_h2}-{max_h2} 个，不要再写成一整堵长段。")
+    if "highlight" in issue_set and require_highlight:
+        instructions.append("- 请同时输出完整的高亮阅读版，不要遗漏“高亮阅读版”区块。")
+    return "\n".join(instructions)
+
+
+def build_auto_retry_notice(stage_name, issue_keys):
+    stage_map = {
+        "draft_generation": "初稿生成",
+        "modification_generation": "修改稿生成",
+        "de_ai_generation": "去 AI 定稿",
+    }
+    label_map = {
+        "titles": "标题组",
+        "intro": "开头导语",
+        "h2_count": "二级标题结构",
+        "highlight": "高亮阅读版",
+    }
+    issue_labels = [label_map.get(key, key) for key in issue_keys or []]
+    if not issue_labels:
+        return ""
+    return f"自动补跑已触发：{stage_map.get(stage_name, stage_name or '当前阶段')}缺少“{'、'.join(issue_labels)}”，系统已追加修正要求并重跑 1 次。"
+
+
 def resolve_active_term_rules(scope=None, respect_enabled=True):
     global_banned_terms = parse_banned_terms_text(st.session_state.get("banned_terms_text", ""))
 
@@ -2043,6 +2254,26 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content, varian
 
 # 原始草稿
 [在这里粘贴完整草稿]"""
+
+
+def parse_de_ai_raw_title_candidates(response_text):
+    clean_text = (response_text or "").strip()
+    if not clean_text:
+        return []
+    if PURE_TITLE_MARKER in clean_text and PURE_BODY_MARKER in clean_text:
+        title_part = clean_text.split(PURE_TITLE_MARKER, 1)[1].split(PURE_BODY_MARKER, 1)[0]
+        return parse_title_candidates_block(title_part)
+    if ARTICLE_TITLE_MARKER in clean_text:
+        title_part = clean_text.split(ARTICLE_TITLE_MARKER, 1)[1]
+        if ARTICLE_BODY_MARKER in title_part:
+            title_part = title_part.split(ARTICLE_BODY_MARKER, 1)[0]
+        return parse_title_candidates_block(title_part)
+    return []
+
+
+def extract_de_ai_raw_title_candidates(response_text):
+    return parse_de_ai_raw_title_candidates(response_text)
+
 
 def parse_de_ai_dual_output(response_text, fallback_titles=None):
     clean_text = (response_text or "").strip()
@@ -4451,8 +4682,8 @@ elif st.session_state.current_step == 2:
         on_change=sync_target_article_words,
         help="本轮稿件统一使用该字数目标；若角色 Prompt 里有固定字数要求，会自动被全局目标覆盖。"
     )
-    with context_strip_placeholder.container():
-        render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+
+    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
     
     editor_prompt = st.text_area(
         "✍️ 编辑 Prompt (支持临时微调)", 
@@ -4888,6 +5119,14 @@ elif st.session_state.current_step == 6:
         st.session_state.term_scan_result = []
         st.session_state.term_scan_summary = summarize_term_scan([])
 
+    publish_quality_gate = build_publish_quality_gate_report(
+        display_final_article,
+        title_candidates=st.session_state.get("title_candidates", []),
+        highlighted_article=st.session_state.get("highlighted_article", ""),
+        term_scan_summary=st.session_state.get("term_scan_summary", {}),
+        target_words=globals().get("get_target_article_words", lambda: 1500)(),
+    )
+
     render_context_strip([
         f"最终角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '自动路由'}",
         f"当前模型：{selected_model}",
@@ -4942,6 +5181,30 @@ elif st.session_state.current_step == 6:
         st.markdown("### 主稿面板（当前定稿）")
         render_wrapped_article_text(display_final_article)
         render_editor_friendly_copy_button(display_final_article, "final_article_step6")
+
+        st.divider()
+        st.markdown("### 发布前质量闸门")
+        with st.container(border=True):
+            if publish_quality_gate.get("overall_status") == "pass":
+                st.success("当前稿件已通过发布前结构闸门。")
+            elif publish_quality_gate.get("overall_status") == "fail":
+                st.error("当前稿件还没过发布前闸门，建议先修完红项再发。")
+            else:
+                st.warning("当前稿件基本可用，但还有一些建议优化项。")
+
+            expected_range = publish_quality_gate.get("expected_h2_range", (3, 5))
+            st.caption(
+                f"红项 {publish_quality_gate.get('fail_count', 0)} 个｜黄项 {publish_quality_gate.get('warn_count', 0)} 个｜当前 `##` 数量 {publish_quality_gate.get('h2_count', 0)}｜建议范围 {expected_range[0]}-{expected_range[1]}"
+            )
+            status_label_map = {
+                "pass": "通过",
+                "warn": "提醒",
+                "fail": "拦截",
+            }
+            for item in publish_quality_gate.get("items", []):
+                st.markdown(
+                    f"- **[{status_label_map.get(item.get('status'), '提示')}] {item.get('label', '')}**：{item.get('detail', '')}"
+                )
 
         st.divider()
         st.markdown("### 词表检查")
@@ -5236,7 +5499,6 @@ elif st.session_state.current_step == 6:
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
-
 
 
 
