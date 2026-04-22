@@ -216,7 +216,7 @@ def save_draft():
     keys_to_save = [
         'current_step', 'article_url', 'video_url', 'source_content',
         'source_images', 'extraction_success', 'draft_article',
-        'review_feedback', 'modified_article', 'final_article', 'title_candidates', 'highlighted_article', 'spoken_script',
+        'review_feedback', 'review_actions', 'accepted_review_items', 'modified_article', 'final_article', 'title_candidates', 'highlighted_article', 'spoken_script',
         'podcast_enabled', 'podcast_duration', 'podcast_script_raw', 'podcast_script_segments',
         'podcast_audio_path', 'podcast_audio_manifest', 'podcast_last_error', 'podcast_voice',
         'podcast_tts_provider', 'podcast_tts_api_key_present',
@@ -444,6 +444,8 @@ def build_reviewer_structure_instruction():
         "Check whether 3-5 candidate titles are still present, aligned with the body, and not drifting in framing.",
         "Check whether any `##` section is too long, whether headings are too vague, and whether the article still reads like one uninterrupted wall of text.",
         "If the structure is good, say so explicitly. If it is not, give concrete repair instructions in the revision feedback.",
+        "Inside `\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011`, every task must be a top-level Markdown bullet item.",
+        "Use this stable shape for each task block: `- \u4efb\u52a1 1\uff5c\u4e00\u53e5\u8bdd\u6458\u8981`, then `\u95ee\u9898\u7c7b\u578b\uff1a...`, `\u5bf9\u5e94\u4f4d\u7f6e\u6216\u539f\u53e5\uff1a...`, `\u4e3a\u4ec0\u4e48\u8981\u6539\uff1a...`, `\u5e94\u8be5\u600e\u4e48\u6539\uff1a...`.",
     ])
 
 
@@ -1617,6 +1619,89 @@ def build_reviewer_user_content(source_content, draft_article, research_brief=""
     return "\n\n".join(parts)
 
 
+def parse_review_actions(review_feedback):
+    clean_feedback = (review_feedback or "").strip()
+    if not clean_feedback:
+        return []
+
+    section_match = re.search(
+        "\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011\\s*(.*?)(?=\\n\\s*\u3010[^\u3011]+\u3011|\\Z)",
+        clean_feedback,
+        flags=re.S,
+    )
+    if not section_match:
+        return []
+
+    task_section = section_match.group(1).strip()
+    if not task_section:
+        return []
+
+    def build_actions_from_blocks(block_matches, strip_pattern):
+        actions = []
+        for idx, match in enumerate(block_matches, start=1):
+            start_idx = match.start()
+            end_idx = block_matches[idx].start() if idx < len(block_matches) else len(task_section)
+            block_text = task_section[start_idx:end_idx].strip()
+            if not block_text:
+                continue
+            first_line = block_text.splitlines()[0].strip()
+            title = re.sub(strip_pattern, "", first_line).strip() or f"review action {len(actions) + 1}"
+            actions.append({
+                "id": f"review_action_{len(actions) + 1}",
+                "title": title,
+                "summary": title,
+                "body": block_text,
+            })
+        return actions
+
+    bullet_matches = list(re.finditer(r"(?m)^(?:[-*+])\s+.+$", task_section))
+    if bullet_matches:
+        actions = build_actions_from_blocks(bullet_matches, r"^(?:[-*+])\s*")
+        if actions:
+            return actions
+
+    numbered_matches = list(re.finditer(r"(?m)^\d+[\.)]\s+.+$", task_section))
+    if numbered_matches:
+        actions = build_actions_from_blocks(numbered_matches, r"^\d+[\.)]\s*")
+        if actions:
+            return actions
+
+    return []
+
+
+def build_selected_review_feedback(review_actions, accepted_review_items):
+    accepted_ids = set(accepted_review_items or [])
+    selected_blocks = [
+        (action.get("body") or "").strip()
+        for action in review_actions or []
+        if action.get("id") in accepted_ids and (action.get("body") or "").strip()
+    ]
+    if not selected_blocks:
+        return ""
+    return "\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011\n" + "\n\n".join(selected_blocks)
+
+
+def hydrate_review_action_state(review_feedback, reset_selection=False):
+    review_actions = parse_review_actions(review_feedback)
+    st.session_state.review_actions = review_actions
+
+    if reset_selection:
+        for key in list(st.session_state.keys()):
+            if isinstance(key, str) and key.startswith("review_action_pick_"):
+                del st.session_state[key]
+
+    action_ids = [action.get("id") for action in review_actions if action.get("id")]
+    current_selection = st.session_state.get("accepted_review_items", [])
+    if reset_selection or not isinstance(current_selection, list):
+        st.session_state.accepted_review_items = action_ids
+        return
+
+    st.session_state.accepted_review_items = [
+        action_id for action_id in current_selection
+        if action_id in action_ids
+    ]
+
+
 def build_modification_user_content(review_feedback, draft_article, title_candidates=None):
     resolved_titles = normalize_title_candidates(title_candidates)
     if not resolved_titles:
@@ -1631,12 +1716,13 @@ def build_modification_user_content(review_feedback, draft_article, title_candid
         "[Current title candidates]\n"
         + title_block
         + "\n\n================\n\n"
-        + "[Review feedback]\n"
+        + "[Review feedback to apply]\n"
         + (review_feedback or "").strip()
         + "\n\n================\n\n"
         + "[Current article body]\n"
         + article_body
         + "\n\n[Editing requirements]\n"
+        + "Only apply the review feedback shown above. Do not absorb review suggestions that are not included in that block.\n"
         + "Keep the title-candidates block alive. If the direction has not changed, preserve the current title skeleton and only improve wording, precision, and communication power."
     ).strip()
 
@@ -3143,6 +3229,10 @@ def init_state():
         st.session_state.draft_article = ""
     if 'review_feedback' not in st.session_state:
         st.session_state.review_feedback = ""
+    if 'review_actions' not in st.session_state:
+        st.session_state.review_actions = []
+    if 'accepted_review_items' not in st.session_state:
+        st.session_state.accepted_review_items = []
     if 'modified_article' not in st.session_state:
         st.session_state.modified_article = ""
     if 'final_article' not in st.session_state:
@@ -4836,6 +4926,7 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
                         )
+                        hydrate_review_action_state(st.session_state.review_feedback, reset_selection=True)
 
                         save_draft()
                         st.write("✨ 接收修改意见，正在进行最终打磨...")
@@ -4848,11 +4939,15 @@ if st.session_state.current_step == 1:
                             global_instruction,
                             term_rules_instruction=modification_term_rules_instruction,
                         )
+                        selected_review_feedback = build_selected_review_feedback(
+                            st.session_state.get("review_actions", []),
+                            st.session_state.get("accepted_review_items", []),
+                        )
                         content_to_modify = build_modification_user_content(
-                    st.session_state.review_feedback,
-                    st.session_state.draft_article,
-                    title_candidates=st.session_state.get("title_candidates", []),
-                )
+                            selected_review_feedback or st.session_state.review_feedback,
+                            st.session_state.draft_article,
+                            title_candidates=st.session_state.get("title_candidates", []),
+                        )
 
                         final_response = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
@@ -5034,6 +5129,7 @@ elif st.session_state.current_step == 3:
                     user_content=combined_content,
                     image_urls=st.session_state.source_images
                 )
+                hydrate_review_action_state(st.session_state.review_feedback, reset_selection=True)
                 checkpoint_ai_stage("review_generation", target_step=4)
                 save_draft()
                 notify_step_completed(defer_until_rerun=True)
@@ -5042,84 +5138,147 @@ elif st.session_state.current_step == 3:
 
 # --- Step 4 (手动模式) ---
 elif st.session_state.current_step == 4:
-    render_section_intro("修改稿确认", "根据主编反馈完成最后一轮修改，先产出修改稿，再决定是否进入去 AI 味步骤。", "Step 04")
-    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    render_section_intro("\u4fee\u6539\u7a3f\u786e\u8ba4", "\u6839\u636e\u4e3b\u7f16\u53cd\u9988\u5b8c\u6210\u6700\u540e\u4e00\u8f6e\u4fee\u6539\uff0c\u5148\u4ea7\u51fa\u4fee\u6539\u7a3f\uff0c\u518d\u51b3\u5b9a\u662f\u5426\u8fdb\u5165\u53bb AI \u5473\u6b65\u9aa4\u3002", "Step 04")
+    render_context_strip([f"\u5f53\u524d\u6a21\u578b\uff1a{selected_model}", f"\u7f16\u8f91\u89d2\u8272\uff1a{st.session_state.selected_role if 'selected_role' in st.session_state else '\u672a\u9009\u62e9'}", f"\u76ee\u6807\u5b57\u6570\uff1a\u7ea6 {get_target_article_words()} \u5b57", f"\u5206\u955c\u811a\u672c\uff1a{'\u5f00\u542f' if enable_script else '\u5173\u95ed'}"])
 
-    st.info("**主编审稿意见 (鼠标移至下方框内右上角可复制)：**")
-    st.code(st.session_state.review_feedback, language="markdown")
-    render_editor_friendly_copy_button(st.session_state.review_feedback, "review_feedback_step4")
+    if st.session_state.review_feedback and not st.session_state.get("review_actions"):
+        hydrate_review_action_state(st.session_state.review_feedback, reset_selection=True)
+        save_draft()
+
+    review_actions = st.session_state.get("review_actions", []) or []
+    accepted_lookup = set(st.session_state.get("accepted_review_items", []))
+
+    st.info("**\u4e3b\u7f16\u5ba1\u7a3f\u610f\u89c1\uff1a**")
+    if review_actions:
+        action_ids = [action.get("id") for action in review_actions if action.get("id")]
+        accepted_count = sum(1 for action_id in action_ids if action_id in accepted_lookup)
+        st.caption(f"\u5df2\u91c7\u7eb3 {accepted_count} / {len(action_ids)} \u6761\u4fee\u6539\u4efb\u52a1\u3002")
+
+        quick_col1, quick_col2, quick_col3 = st.columns(3)
+        with quick_col1:
+            if st.button("\u5168\u9009\u5ba1\u7a3f\u4efb\u52a1"):
+                st.session_state.accepted_review_items = list(action_ids)
+                for action_id in action_ids:
+                    st.session_state[f"review_action_pick_{action_id}"] = True
+                save_draft()
+                st.rerun()
+        with quick_col2:
+            if st.button("\u6e05\u7a7a\u5df2\u91c7\u7eb3\u4efb\u52a1"):
+                st.session_state.accepted_review_items = []
+                for action_id in action_ids:
+                    st.session_state[f"review_action_pick_{action_id}"] = False
+                save_draft()
+                st.rerun()
+        with quick_col3:
+            if st.button("\u6062\u590d\u9ed8\u8ba4\u5168\u9009"):
+                st.session_state.accepted_review_items = list(action_ids)
+                for action_id in action_ids:
+                    st.session_state[f"review_action_pick_{action_id}"] = True
+                save_draft()
+                st.rerun()
+
+        selected_ids = []
+        for action in review_actions:
+            action_id = action.get("id")
+            checkbox_key = f"review_action_pick_{action_id}"
+            if checkbox_key not in st.session_state:
+                st.session_state[checkbox_key] = action_id in accepted_lookup
+            with st.container(border=True):
+                checked = st.checkbox(action.get("summary") or action.get("title") or action_id, key=checkbox_key)
+                if checked:
+                    selected_ids.append(action_id)
+                if action.get("body"):
+                    st.markdown(action["body"])
+
+        if selected_ids != st.session_state.get("accepted_review_items", []):
+            st.session_state.accepted_review_items = selected_ids
+            save_draft()
+
+        with st.expander("\u67e5\u770b\u5b8c\u6574\u5ba1\u7a3f\u62a5\u544a"):
+            st.code(st.session_state.review_feedback, language="markdown")
+            render_editor_friendly_copy_button(st.session_state.review_feedback, "review_feedback_step4")
+    else:
+        st.caption("\u5f53\u524d\u5ba1\u7a3f\u610f\u89c1\u672a\u80fd\u89e3\u6790\u6210\u53ef\u52fe\u9009\u4efb\u52a1\uff0c\u672c\u6b21\u4fee\u6539\u7a3f\u5c06\u7ee7\u7eed\u4f7f\u7528\u5168\u6587\u6a21\u5f0f\u3002")
+        st.code(st.session_state.review_feedback, language="markdown")
+        render_editor_friendly_copy_button(st.session_state.review_feedback, "review_feedback_step4")
 
     if st.session_state.modified_article:
         st.divider()
-        st.markdown("### 当前修改稿预览")
+        st.markdown("### \u5f53\u524d\u4fee\u6539\u7a3f\u9884\u89c8")
         render_wrapped_article_text(st.session_state.modified_article)
         render_editor_friendly_copy_button(st.session_state.modified_article, "modified_article_step4")
 
+    accepted_review_items = st.session_state.get("accepted_review_items", []) or []
+    filtered_review_feedback = build_selected_review_feedback(review_actions, accepted_review_items)
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🔄 意见太水，重新审查"):
+        if st.button("\U0001f527 \u610f\u89c1\u592a\u6c34\uff0c\u91cd\u65b0\u5ba1\u67e5"):
             go_to_step(3)
             st.rerun()
     with col2:
-        if st.button("⏭️ 忽略意见，沿用初稿"):
-            with st.spinner("正在跳过修改，准备进入去 AI 味步骤..."):
+        if st.button("\u23ed\ufe0f \u5ffd\u7565\u610f\u89c1\uff0c\u6cbf\u7528\u521d\u7a3f"):
+            with st.spinner("\u6b63\u5728\u8df3\u8fc7\u4fee\u6539\uff0c\u51c6\u5907\u8fdb\u5165\u53bb AI \u5473\u6b65\u9aa4..."):
                 st.session_state.modified_article = st.session_state.draft_article
                 st.session_state.final_article = ""
                 st.session_state.highlighted_article = ""
                 st.session_state.spoken_script = ""
-                append_article_version(st.session_state.modified_article, "忽略意见修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
+                append_article_version(st.session_state.modified_article, "\u5ffd\u7565\u610f\u89c1\u4fee\u6539\u7a3f", role=st.session_state.get("selected_role", ""), model=selected_model)
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(5)
                 st.rerun()
     with col3:
-        if st.button(f"✨ 使用 {selected_model} 接受意见并生成修改稿"):
-            mark_ai_stage_started("modification_generation")
-            with st.spinner("编辑正在根据主编意见生成修改稿..."):
-                global_instruction = prompts_data.get("global_instruction", "")
-                modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
-                modification_term_rules_instruction = build_term_rules_instruction(
-                    modification_banned_terms,
-                    modification_default_replacements,
-                )
-                modification_prompt = build_modification_system_prompt(
-                    global_instruction,
-                    term_rules_instruction=modification_term_rules_instruction,
-                )
+        if st.button(f"\u2728 \u4f7f\u7528 {selected_model} \u63a5\u53d7\u610f\u89c1\u5e76\u751f\u6210\u4fee\u6539\u7a3f"):
+            if review_actions and not accepted_review_items:
+                st.warning('\u5f53\u524d\u6ca1\u6709\u52fe\u9009\u4efb\u4f55\u5ba1\u7a3f\u4efb\u52a1\u3002\u82e5\u60f3\u5b8c\u5168\u5ffd\u7565\u610f\u89c1\uff0c\u8bf7\u4f7f\u7528"\u5ffd\u7565\u610f\u89c1\uff0c\u6cbf\u7528\u521d\u7a3f"\u3002')
+            else:
+                mark_ai_stage_started("modification_generation")
+                with st.spinner("\u7f16\u8f91\u6b63\u5728\u6839\u636e\u4e3b\u7f16\u610f\u89c1\u751f\u6210\u4fee\u6539\u7a3f..."):
+                    global_instruction = prompts_data.get("global_instruction", "")
+                    modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
+                    modification_term_rules_instruction = build_term_rules_instruction(
+                        modification_banned_terms,
+                        modification_default_replacements,
+                    )
+                    modification_prompt = build_modification_system_prompt(
+                        global_instruction,
+                        term_rules_instruction=modification_term_rules_instruction,
+                    )
 
-                content_to_modify = build_modification_user_content(
-                    st.session_state.review_feedback,
-                    st.session_state.draft_article,
-                    title_candidates=st.session_state.get("title_candidates", []),
-                )
+                    content_to_modify = build_modification_user_content(
+                        filtered_review_feedback or st.session_state.review_feedback,
+                        st.session_state.draft_article,
+                        title_candidates=st.session_state.get("title_candidates", []),
+                    )
 
-                modified_response = call_llm(
-                    api_key=api_key,
-                    base_url=current_base_url,
-                    model_name=selected_model,
-                    system_prompt=modification_prompt,
-                    user_content=content_to_modify
-                )
+                    modified_response = call_llm(
+                        api_key=api_key,
+                        base_url=current_base_url,
+                        model_name=selected_model,
+                        system_prompt=modification_prompt,
+                        user_content=content_to_modify
+                    )
 
-                modified_titles, _, modified_article_text = parse_article_generation_response(
+                    modified_titles, _, modified_article_text = parse_article_generation_response(
 
-                    modified_response,
+                        modified_response,
 
-                    st.session_state.get("title_candidates", []),
+                        st.session_state.get("title_candidates", []),
 
-                )
+                    )
 
-                st.session_state.title_candidates = modified_titles
+                    st.session_state.title_candidates = modified_titles
 
-                st.session_state.modified_article = modified_article_text
-                st.session_state.final_article = ""
-                st.session_state.highlighted_article = ""
-                st.session_state.spoken_script = ""
-                append_article_version(st.session_state.modified_article, "接受审稿修改稿", role=st.session_state.get("selected_role", ""), model=selected_model)
-                checkpoint_ai_stage("modification_generation", target_step=5)
-                save_draft()
-                notify_step_completed(defer_until_rerun=True)
-                go_to_step(5)
-                st.rerun()
+                    st.session_state.modified_article = modified_article_text
+                    st.session_state.final_article = ""
+                    st.session_state.highlighted_article = ""
+                    st.session_state.spoken_script = ""
+                    append_article_version(st.session_state.modified_article, "\u63a5\u53d7\u5ba1\u7a3f\u4fee\u6539\u7a3f", role=st.session_state.get("selected_role", ""), model=selected_model)
+                    checkpoint_ai_stage("modification_generation", target_step=5)
+                    save_draft()
+                    notify_step_completed(defer_until_rerun=True)
+                    go_to_step(5)
+                    st.rerun()
 
 # --- Step 5 (manual mode) ---
 elif st.session_state.current_step == 5:

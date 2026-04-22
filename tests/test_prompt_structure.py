@@ -15,6 +15,9 @@ TARGET_FUNCTIONS = {
     "build_reviewer_system_prompt",
     "build_editor_system_prompt",
     "build_modification_system_prompt",
+    "build_modification_user_content",
+    "parse_review_actions",
+    "build_selected_review_feedback",
     "normalize_title_candidates",
     "parse_title_candidates_block",
     "split_structured_article_sections",
@@ -149,13 +152,15 @@ class PromptStructureTests(unittest.TestCase):
 
         self.assertIn("Base review", reviewer_prompt)
         self.assertIn("Only use source packet", reviewer_prompt)
-        self.assertIn("【结构性检查】", reviewer_prompt)
-        self.assertIn("【背景完整性检查】", reviewer_prompt)
-        self.assertIn("【标题组检查】", reviewer_prompt)
+        self.assertIn("\u3010\u7ed3\u6784\u6027\u68c0\u67e5\u3011", reviewer_prompt)
+        self.assertIn("\u3010\u80cc\u666f\u5b8c\u6574\u6027\u68c0\u67e5\u3011", reviewer_prompt)
+        self.assertIn("\u3010\u6807\u9898\u7ec4\u68c0\u67e5\u3011", reviewer_prompt)
         self.assertIn("[Humanizer Review Requirements]", reviewer_prompt)
         self.assertIn("AI writing patterns", reviewer_prompt)
         self.assertIn("Flag formulaic sentence shapes", reviewer_prompt)
         self.assertIn("three-part parallel structures", reviewer_prompt)
+        self.assertIn("top-level Markdown bullet item", reviewer_prompt)
+        self.assertIn("\u95ee\u9898\u7c7b\u578b\uff1a...", reviewer_prompt)
 
     def test_editor_and_modification_prompts_include_output_protocol(self):
         editor_prompt = self.helpers.build_editor_system_prompt("Role prompt", "Global instruction")
@@ -169,19 +174,19 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("title group", modification_prompt.lower())
 
     def test_de_ai_prompt_template_requires_three_output_blocks(self):
-        template = self.helpers.build_de_ai_prompt_template("发行主编", "# Role: 示例", "示例素材")
+        template = self.helpers.build_de_ai_prompt_template("\u53d1\u884c\u4e3b\u7f16", "# Role: \u793a\u4f8b", "\u793a\u4f8b\u7d20\u6750")
 
         self.assertIn(PURE_TITLE_MARKER, template)
         self.assertIn(PURE_BODY_MARKER, template)
         self.assertIn(HIGHLIGHT_MARKER, template)
-        self.assertIn("如果原稿开头太突兀", template)
-        self.assertIn("保留 3-5 个备选标题", template)
-        self.assertIn("优先使用 <h2>/<h3>", template)
+        self.assertIn("\u5982\u679c\u539f\u7a3f\u5f00\u5934\u592a\u7a81\u5140", template)
+        self.assertIn("\u4fdd\u7559 3-5 \u4e2a\u5907\u9009\u6807\u9898", template)
+        self.assertIn("\u4f18\u5148\u4f7f\u7528 <h2>/<h3>", template)
 
     def test_de_ai_prompt_template_variants_add_style_rules_without_changing_output_protocol(self):
-        role_name = "发行主编"
-        editor_prompt = "# Role: 示例"
-        source_content = "示例素材"
+        role_name = "\u53d1\u884c\u4e3b\u7f16"
+        editor_prompt = "# Role: \u793a\u4f8b"
+        source_content = "\u793a\u4f8b\u7d20\u6750"
         normal_template = self.helpers.build_de_ai_prompt_template(role_name, editor_prompt, source_content)
         community_template = self.helpers.build_de_ai_prompt_template(
             role_name,
@@ -202,40 +207,107 @@ class PromptStructureTests(unittest.TestCase):
             variant=self.helpers.DE_AI_VARIANT_HUMANIZER,
         )
 
-        community_marker = "社区文章去AI版附加要求"
-        chat_marker = "自然唠嗑版附加要求"
-        humanizer_marker = "Humanizer-zh版附加要求"
+        community_marker = "\u793e\u533a\u6587\u7ae0\u53bbAI\u7248\u9644\u52a0\u8981\u6c42"
+        chat_marker = "\u81ea\u7136\u5520\u55d1\u7248\u9644\u52a0\u8981\u6c42"
+        humanizer_marker = "Humanizer-zh\u7248\u9644\u52a0\u8981\u6c42"
 
         self.assertNotIn(community_marker, normal_template)
         self.assertNotIn(chat_marker, normal_template)
         self.assertNotIn(humanizer_marker, normal_template)
         self.assertIn(community_marker, community_template)
-        self.assertIn("玩家社区里的高质量长帖", community_template)
-        self.assertIn("贴吧口癖", community_template)
+        self.assertIn("\u73a9\u5bb6\u793e\u533a\u91cc\u7684\u9ad8\u8d28\u91cf\u957f\u5e16", community_template)
+        self.assertIn("\u8d34\u5427\u53e3\u7656", community_template)
         self.assertNotIn(chat_marker, community_template)
         self.assertNotIn(humanizer_marker, community_template)
         self.assertIn(chat_marker, chat_template)
-        self.assertIn("中强度口语化改写", chat_template)
-        self.assertIn("低质水贴", chat_template)
+        self.assertIn("\u4e2d\u5f3a\u5ea6\u53e3\u8bed\u5316\u6539\u5199", chat_template)
+        self.assertIn("\u4f4e\u8d28\u6c34\u8d34", chat_template)
         self.assertNotIn(community_marker, chat_template)
         self.assertNotIn(humanizer_marker, chat_template)
         self.assertIn(humanizer_marker, humanizer_template)
-        self.assertIn("去模板化", humanizer_template)
-        self.assertIn("宣传腔", humanizer_template)
+        self.assertIn("\u53bb\u6a21\u677f\u5316", humanizer_template)
+        self.assertIn("\u5ba3\u4f20\u8154", humanizer_template)
         self.assertNotIn(community_marker, humanizer_template)
         self.assertNotIn(chat_marker, humanizer_template)
         self.assertEqual(
-            normal_template.split("# 输出格式要求", 1)[1],
-            community_template.split("# 输出格式要求", 1)[1],
+            normal_template.split("# \u8f93\u51fa\u683c\u5f0f\u8981\u6c42", 1)[1],
+            community_template.split("# \u8f93\u51fa\u683c\u5f0f\u8981\u6c42", 1)[1],
         )
         self.assertEqual(
-            normal_template.split("# 输出格式要求", 1)[1],
-            chat_template.split("# 输出格式要求", 1)[1],
+            normal_template.split("# \u8f93\u51fa\u683c\u5f0f\u8981\u6c42", 1)[1],
+            chat_template.split("# \u8f93\u51fa\u683c\u5f0f\u8981\u6c42", 1)[1],
         )
         self.assertEqual(
-            normal_template.split("# 输出格式要求", 1)[1],
-            humanizer_template.split("# 输出格式要求", 1)[1],
+            normal_template.split("# \u8f93\u51fa\u683c\u5f0f\u8981\u6c42", 1)[1],
+            humanizer_template.split("# \u8f93\u51fa\u683c\u5f0f\u8981\u6c42", 1)[1],
         )
+
+    def test_parse_review_actions_handles_markdown_bullet_tasks(self):
+        review_feedback = (
+            "\u3010\u603b\u4f53\u5224\u65ad\u3011\n\u5408\u683c\n\n"
+            "\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011\n"
+            "- \u4efb\u52a1 1\uff5c\u8865\u8db3\u80cc\u666f\u4ea4\u4ee3\n"
+            "\u95ee\u9898\u7c7b\u578b\uff1a\u80cc\u666f\u7f3a\u5931\n"
+            "\u5bf9\u5e94\u4f4d\u7f6e\u6216\u539f\u53e5\uff1a\u5f00\u5934\u7b2c\u4e00\u6bb5\n"
+            "\u4e3a\u4ec0\u4e48\u8981\u6539\uff1a\u8bfb\u8005\u4e0d\u5bb9\u6613\u770b\u61c2\u6765\u9f99\u53bb\u8109\n"
+            "\u5e94\u8be5\u600e\u4e48\u6539\uff1a\u8865\u4e00\u53e5\u80cc\u666f\u8bf4\u660e\n\n"
+            "- \u4efb\u52a1 2\uff5c\u7f29\u77ed\u6807\u9898\n"
+            "\u95ee\u9898\u7c7b\u578b\uff1a\u6807\u9898\u5197\u957f\n"
+            "\u5bf9\u5e94\u4f4d\u7f6e\u6216\u539f\u53e5\uff1a\u6807\u9898\u7ec4\u7b2c\u4e00\u6761\n"
+            "\u4e3a\u4ec0\u4e48\u8981\u6539\uff1a\u4fe1\u606f\u5bc6\u5ea6\u8fc7\u9ad8\n"
+            "\u5e94\u8be5\u600e\u4e48\u6539\uff1a\u4fdd\u7559\u6838\u5fc3\u5224\u65ad\u5373\u53ef\n\n"
+            "\u3010\u5176\u4ed6\u5efa\u8bae\u3011\n1. \u7ef4\u6301\u8282\u594f"
+        )
+
+        actions = self.helpers.parse_review_actions(review_feedback)
+
+        self.assertEqual([action["id"] for action in actions], ["review_action_1", "review_action_2"])
+        self.assertEqual(actions[0]["title"], "\u4efb\u52a1 1\uff5c\u8865\u8db3\u80cc\u666f\u4ea4\u4ee3")
+        self.assertIn("\u95ee\u9898\u7c7b\u578b\uff1a\u80cc\u666f\u7f3a\u5931", actions[0]["body"])
+        self.assertEqual(actions[1]["summary"], "\u4efb\u52a1 2\uff5c\u7f29\u77ed\u6807\u9898")
+
+    def test_parse_review_actions_falls_back_to_numbered_tasks(self):
+        review_feedback = (
+            "\u3010\u603b\u4f53\u5224\u65ad\u3011\n\u5408\u683c\n\n"
+            "\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011\n"
+            "1. \u8865\u8db3\u80cc\u666f\u4ea4\u4ee3\n"
+            "\u95ee\u9898\u7c7b\u578b\uff1a\u80cc\u666f\u7f3a\u5931\n"
+            "\u5e94\u8be5\u600e\u4e48\u6539\uff1a\u5f00\u5934\u5148\u4ea4\u4ee3\u4e8b\u4ef6\u7f18\u7531\n\n"
+            "2. \u538b\u7f29\u603b\u7ed3\n"
+            "\u95ee\u9898\u7c7b\u578b\uff1a\u6536\u675f\u8fc7\u6162\n"
+            "\u5e94\u8be5\u600e\u4e48\u6539\uff1a\u76f4\u63a5\u843d\u5230\u7ed3\u8bba\n"
+        )
+
+        actions = self.helpers.parse_review_actions(review_feedback)
+
+        self.assertEqual(len(actions), 2)
+        self.assertEqual(actions[0]["title"], "\u8865\u8db3\u80cc\u666f\u4ea4\u4ee3")
+        self.assertEqual(actions[1]["title"], "\u538b\u7f29\u603b\u7ed3")
+
+    def test_build_selected_review_feedback_only_keeps_accepted_actions(self):
+        review_actions = [
+            {"id": "review_action_1", "title": "\u4efb\u52a1 1", "summary": "\u4efb\u52a1 1", "body": "- \u4efb\u52a1 1\n\u95ee\u9898\u7c7b\u578b\uff1a\u80cc\u666f\u7f3a\u5931"},
+            {"id": "review_action_2", "title": "\u4efb\u52a1 2", "summary": "\u4efb\u52a1 2", "body": "- \u4efb\u52a1 2\n\u95ee\u9898\u7c7b\u578b\uff1a\u6807\u9898\u5197\u957f"},
+        ]
+
+        filtered = self.helpers.build_selected_review_feedback(review_actions, ["review_action_2"])
+
+        self.assertIn("\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011", filtered)
+        self.assertIn("\u4efb\u52a1 2", filtered)
+        self.assertNotIn("\u4efb\u52a1 1", filtered)
+
+    def test_build_modification_user_content_only_injects_selected_review_feedback(self):
+        selected_feedback = "\u3010\u4fee\u6539\u4efb\u52a1\u6e05\u5355\u3011\n- \u4efb\u52a1 2\uff5c\u7f29\u77ed\u6807\u9898\n\u95ee\u9898\u7c7b\u578b\uff1a\u6807\u9898\u5197\u957f"
+        content = self.helpers.build_modification_user_content(
+            selected_feedback,
+            f"{BODY_MARKER}\n\u793a\u4f8b\u6b63\u6587",
+            title_candidates=["\u6807\u9898A", "\u6807\u9898B", "\u6807\u9898C"],
+        )
+
+        self.assertIn("[Review feedback to apply]", content)
+        self.assertIn("\u4efb\u52a1 2\uff5c\u7f29\u77ed\u6807\u9898", content)
+        self.assertNotIn("\u4efb\u52a1 1\uff5c\u8865\u8db3\u80cc\u666f\u4ea4\u4ee3", content)
+        self.assertIn("Do not absorb review suggestions", content)
 
     def test_term_rule_parsers_and_merge_keep_rules_stable(self):
         banned_terms = self.helpers.parse_banned_terms_text("值得关注\n\n值得关注\n不难发现\n")
