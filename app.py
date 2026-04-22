@@ -2707,11 +2707,140 @@ def extract_article_content(url):
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
 
+def extract_article_content_with_fallback(url):
+    def build_article_request_headers():
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Upgrade-Insecure-Requests": "1",
+        }
+
+    def extract_article_text_and_images_from_html(html_text, page_url):
+        text = trafilatura.extract(html_text)
+        soup = BeautifulSoup(html_text, 'html.parser')
+
+        noise_tags = ['aside', 'nav', 'footer', 'header']
+        for noise in soup.find_all(noise_tags):
+            noise.decompose()
+
+        noise_keywords = ['author', 'related', 'comment', 'share', 'widget', 'sidebar', 'ad-container', 'popup', 'newsletter']
+        for noise in soup.find_all(attrs={'class': lambda c: c and any(k in str(c).lower() for k in noise_keywords)}):
+            noise.decompose()
+        for noise in soup.find_all(attrs={'id': lambda i: i and any(k in str(i).lower() for k in noise_keywords)}):
+            noise.decompose()
+
+        main_content = soup.find('article') or soup.find('main') or soup.find(class_=lambda c: c and 'content' in str(c).lower()) or soup
+
+        images = []
+        for img in main_content.find_all('img'):
+            try:
+                html_w = int(img.get('width', 0))
+                html_h = int(img.get('height', 0))
+            except Exception:
+                html_w, html_h = 0, 0
+
+            src = None
+            srcset = img.get('data-srcset') or img.get('srcset')
+            if srcset:
+                sources = []
+                for s in srcset.split(','):
+                    parts = s.strip().split()
+                    if len(parts) == 2 and parts[1].endswith('w') and parts[1][:-1].isdigit():
+                        sources.append((parts[0], int(parts[1][:-1])))
+                if sources:
+                    sources.sort(key=lambda x: x[1], reverse=True)
+                    src = sources[0][0]
+
+            if not src:
+                for attr in ['data-original', 'data-lazy-src', 'data-src', 'src']:
+                    val = img.get(attr)
+                    if val:
+                        if isinstance(val, list):
+                            val = val[0]
+                        val = str(val).strip()
+                        if not val.startswith('data:image'):
+                            src = val
+                            break
+
+            if not src:
+                continue
+
+            if src.startswith('//'):
+                src = 'https:' + src
+            elif src.startswith('/'):
+                parsed_url = urlparse(page_url)
+                src = f"{parsed_url.scheme}://{parsed_url.netloc}{src}"
+            elif not src.startswith('http'):
+                continue
+
+            src_lower = src.lower()
+            junk_keywords = ['icon', 'spinner', 'svg', 'gif', 'button', 'tracker', 'avatar']
+            if any(junk in src_lower for junk in junk_keywords):
+                continue
+
+            if html_w < 300 and html_h < 300:
+                match = re.search(r'-(\d{2,3})x(\d{2,3})\.(jpg|jpeg|png|webp)', src_lower)
+                if match:
+                    mw, mh = int(match.group(1)), int(match.group(2))
+                    if mw <= 300 or mh <= 300:
+                        continue
+
+            if src not in images:
+                images.append(src)
+                if len(images) >= 8:
+                    break
+
+        if not text:
+            paragraphs = soup.find_all('p')
+            text = '\n'.join([p.get_text() for p in paragraphs])
+
+        return (text or '').strip(), images
+
+    def fetch_article_via_jina_reader(page_url):
+        jina_url = f"https://r.jina.ai/{page_url}"
+        headers = {
+            'Accept': 'text/plain',
+            'User-Agent': build_article_request_headers()['User-Agent'],
+        }
+        response = requests.get(jina_url, headers=headers, timeout=20)
+        response.raise_for_status()
+        text = (response.text or '').strip()
+        if len(text) < 50:
+            raise ValueError('Fallback reader returned insufficient text.')
+        return text
+
+    direct_images = []
+    direct_error = None
+    try:
+        response = requests.get(url, headers=build_article_request_headers(), timeout=15)
+        response.raise_for_status()
+
+        content_type = str(response.headers.get('Content-Type', '') or '').lower()
+        if content_type and 'text/html' not in content_type and 'application/xhtml+xml' not in content_type:
+            raise ValueError(f'Unsupported content type from origin: {content_type}')
+
+        text, direct_images = extract_article_text_and_images_from_html(response.text, url)
+        if text:
+            return text, direct_images, None
+        direct_error = ValueError('Page body was empty after extraction.')
+    except Exception as exc:
+        direct_error = exc
+
+    try:
+        fallback_text = fetch_article_via_jina_reader(url)
+        return fallback_text, direct_images, None
+    except Exception as fallback_exc:
+        return None, [], f'Article fetch failed: origin({str(direct_error)}) | fallback({str(fallback_exc)})'
+
+
 def get_content_from_url(url):
     if "youtube.com" in url or "youtu.be" in url:
         return extract_youtube_transcript(url)
     else:
-        return extract_article_content(url)
+        return extract_article_content_with_fallback(url)
 
 
 MAX_UPLOAD_TEXT_CHARS = 18000
@@ -3183,7 +3312,7 @@ def sync_selected_source_images():
 sync_selected_source_images()
 
 
-def apply_selected_source_images(selected_ids):
+def apply_selected_source_images(selected_ids, reset_widget_state=False):
     all_images = st.session_state.get("source_images_all", [])
     if not isinstance(all_images, list):
         all_images = []
@@ -3204,9 +3333,12 @@ def apply_selected_source_images(selected_ids):
 
     st.session_state.selected_source_image_ids = normalized_selected
     st.session_state.source_images = [all_images[idx] for idx in normalized_selected]
-    selected_id_set = set(normalized_selected)
-    for idx in range(len(all_images)):
-        st.session_state[f"source_image_pick_{idx}"] = idx in selected_id_set
+
+    if reset_widget_state:
+        for idx in range(len(all_images)):
+            checkbox_key = f"source_image_pick_{idx}"
+            if checkbox_key in st.session_state:
+                del st.session_state[checkbox_key]
 
 
 def ensure_article_version_state():
@@ -4443,12 +4575,12 @@ if st.session_state.current_step == 1:
                 toolbar_col1, toolbar_col2, _ = st.columns([1, 1, 2.4])
                 with toolbar_col1:
                     if st.button("一键全选", key="select_all_source_images", use_container_width=True):
-                        apply_selected_source_images(range(len(all_source_images)))
+                        apply_selected_source_images(range(len(all_source_images)), reset_widget_state=True)
                         save_draft()
                         st.rerun()
                 with toolbar_col2:
                     if st.button("清空勾选", key="clear_source_images", use_container_width=True):
-                        apply_selected_source_images([])
+                        apply_selected_source_images([], reset_widget_state=True)
                         save_draft()
                         st.rerun()
 
