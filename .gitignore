@@ -5,3 +5,6 @@
 
 # Local runtime state
 draft_state.json
+ai_diagnostics.log
+runtime_audio/
+.tmp_test_runtime/
