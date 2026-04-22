@@ -2327,26 +2327,57 @@ def ensure_highlighted_article_context(highlighted_text, title_candidates, artic
     if not clean_highlight:
         return ""
 
+    def normalize_plain_text(text):
+        normalized = (text or "").strip()
+        if not normalized:
+            return ""
+        normalized = re.sub(r"<\s*br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"</\s*(p|div|h1|h2|h3|li)\s*>", "\n\n", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"<\s*li\b[^>]*>", "- ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"<[^>]+>", "", normalized)
+        normalized = (
+            normalized
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+        )
+        return re.sub(r"\s+", " ", normalized).strip()
+
     prefix_parts = []
     normalized_titles = normalize_title_candidates(title_candidates)
     intro_source = re.split(r"^\s*##\s+.+$", article_body or "", maxsplit=1, flags=re.MULTILINE)[0].strip()
     intro_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", intro_source) if paragraph.strip()]
-    first_intro_paragraph = intro_paragraphs[0] if intro_paragraphs else ""
 
     if normalized_titles and ARTICLE_TITLE_MARKER not in clean_highlight and PURE_TITLE_MARKER not in clean_highlight:
         title_block = build_title_candidates_block(normalized_titles)
         if title_block:
             prefix_parts.append(title_block)
 
-    highlight_starts_with_heading = bool(re.match(r"^(?:<h[23][^>]*>|##\s+|###\s+)", clean_highlight))
-    intro_missing = bool(first_intro_paragraph and first_intro_paragraph not in clean_highlight)
-    if intro_source and intro_missing and ARTICLE_BODY_MARKER not in clean_highlight and PURE_BODY_MARKER not in clean_highlight:
-        if highlight_starts_with_heading or prefix_parts:
-            prefix_parts.append(f"{ARTICLE_BODY_MARKER}\n{intro_source}")
+    highlight_starts_with_heading = bool(re.match(r"^(?:<h[1-3][^>]*>|##\s+|###\s+)", clean_highlight))
+    missing_intro = ""
+    if intro_source and ARTICLE_BODY_MARKER not in clean_highlight and PURE_BODY_MARKER not in clean_highlight:
+        highlight_plain = normalize_plain_text(clean_highlight)
+        matched_intro = False
+        for start_idx in range(len(intro_paragraphs)):
+            intro_tail = "\n\n".join(intro_paragraphs[start_idx:])
+            intro_tail_plain = normalize_plain_text(intro_tail)
+            if intro_tail_plain and highlight_plain.startswith(intro_tail_plain):
+                missing_intro = "\n\n".join(intro_paragraphs[:start_idx]).strip()
+                matched_intro = True
+                break
+        if not matched_intro:
+            missing_intro = intro_source
+
+    if missing_intro and (highlight_starts_with_heading or prefix_parts):
+        prefix_parts.append(f"{ARTICLE_BODY_MARKER}\n{missing_intro}")
 
     if not prefix_parts:
         return clean_highlight
     return "\n\n".join(prefix_parts + [clean_highlight]).strip()
+
 
 def parse_de_ai_dual_output(response_text, fallback_titles=None):
     clean_text = (response_text or "").strip()
