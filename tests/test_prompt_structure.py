@@ -42,6 +42,7 @@ TARGET_FUNCTIONS = {
     "detect_auto_retry_issues",
     "build_auto_retry_instruction",
     "build_auto_retry_notice",
+    "ensure_highlighted_article_context",
     "parse_de_ai_dual_output",
     "sanitize_highlighted_article",
 }
@@ -58,6 +59,7 @@ TARGET_ASSIGNMENTS = {
     "DE_AI_VARIANT_DEFAULT",
     "DE_AI_VARIANT_COMMUNITY",
     "DE_AI_VARIANT_CHAT",
+    "DE_AI_VARIANT_HUMANIZER",
 }
 
 
@@ -150,6 +152,10 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("【结构性检查】", reviewer_prompt)
         self.assertIn("【背景完整性检查】", reviewer_prompt)
         self.assertIn("【标题组检查】", reviewer_prompt)
+        self.assertIn("[Humanizer Review Requirements]", reviewer_prompt)
+        self.assertIn("AI writing patterns", reviewer_prompt)
+        self.assertIn("Flag formulaic sentence shapes", reviewer_prompt)
+        self.assertIn("three-part parallel structures", reviewer_prompt)
 
     def test_editor_and_modification_prompts_include_output_protocol(self):
         editor_prompt = self.helpers.build_editor_system_prompt("Role prompt", "Global instruction")
@@ -172,31 +178,52 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("保留 3-5 个备选标题", template)
         self.assertIn("优先使用 <h2>/<h3>", template)
 
-    def test_de_ai_prompt_template_community_and_chat_variants_add_style_rules_without_changing_output_protocol(self):
-        normal_template = self.helpers.build_de_ai_prompt_template("发行主编", "# Role: 示例", "示例素材")
+    def test_de_ai_prompt_template_variants_add_style_rules_without_changing_output_protocol(self):
+        role_name = "发行主编"
+        editor_prompt = "# Role: 示例"
+        source_content = "示例素材"
+        normal_template = self.helpers.build_de_ai_prompt_template(role_name, editor_prompt, source_content)
         community_template = self.helpers.build_de_ai_prompt_template(
-            "发行主编",
-            "# Role: 示例",
-            "示例素材",
+            role_name,
+            editor_prompt,
+            source_content,
             variant=self.helpers.DE_AI_VARIANT_COMMUNITY,
         )
         chat_template = self.helpers.build_de_ai_prompt_template(
-            "发行主编",
-            "# Role: 示例",
-            "示例素材",
+            role_name,
+            editor_prompt,
+            source_content,
             variant=self.helpers.DE_AI_VARIANT_CHAT,
         )
+        humanizer_template = self.helpers.build_de_ai_prompt_template(
+            role_name,
+            editor_prompt,
+            source_content,
+            variant=self.helpers.DE_AI_VARIANT_HUMANIZER,
+        )
 
-        self.assertNotIn("社区文章去AI版附加要求", normal_template)
-        self.assertNotIn("自然唠嗑版附加要求", normal_template)
-        self.assertIn("社区文章去AI版附加要求", community_template)
+        community_marker = "社区文章去AI版附加要求"
+        chat_marker = "自然唠嗑版附加要求"
+        humanizer_marker = "Humanizer-zh版附加要求"
+
+        self.assertNotIn(community_marker, normal_template)
+        self.assertNotIn(chat_marker, normal_template)
+        self.assertNotIn(humanizer_marker, normal_template)
+        self.assertIn(community_marker, community_template)
         self.assertIn("玩家社区里的高质量长帖", community_template)
         self.assertIn("贴吧口癖", community_template)
-        self.assertNotIn("自然唠嗑版附加要求", community_template)
-        self.assertIn("自然唠嗑版附加要求", chat_template)
+        self.assertNotIn(chat_marker, community_template)
+        self.assertNotIn(humanizer_marker, community_template)
+        self.assertIn(chat_marker, chat_template)
         self.assertIn("中强度口语化改写", chat_template)
         self.assertIn("低质水贴", chat_template)
-        self.assertNotIn("社区文章去AI版附加要求", chat_template)
+        self.assertNotIn(community_marker, chat_template)
+        self.assertNotIn(humanizer_marker, chat_template)
+        self.assertIn(humanizer_marker, humanizer_template)
+        self.assertIn("去模板化", humanizer_template)
+        self.assertIn("宣传腔", humanizer_template)
+        self.assertNotIn(community_marker, humanizer_template)
+        self.assertNotIn(chat_marker, humanizer_template)
         self.assertEqual(
             normal_template.split("# 输出格式要求", 1)[1],
             community_template.split("# 输出格式要求", 1)[1],
@@ -204,6 +231,10 @@ class PromptStructureTests(unittest.TestCase):
         self.assertEqual(
             normal_template.split("# 输出格式要求", 1)[1],
             chat_template.split("# 输出格式要求", 1)[1],
+        )
+        self.assertEqual(
+            normal_template.split("# 输出格式要求", 1)[1],
+            humanizer_template.split("# 输出格式要求", 1)[1],
         )
 
     def test_term_rule_parsers_and_merge_keep_rules_stable(self):
@@ -296,6 +327,33 @@ class PromptStructureTests(unittest.TestCase):
         self.assertNotIn("🔗", cleaned)
         self.assertNotIn("## Heading Title", cleaned)
 
+    def test_parse_de_ai_dual_output_restores_titles_and_intro_for_highlighted_article(self):
+        response = (
+            f"{PURE_TITLE_MARKER}\n"
+            "1. 标题A\n"
+            "2. 标题B\n"
+            "3. 标题C\n\n"
+            f"{PURE_BODY_MARKER}\n"
+            "导语第一段。\n\n"
+            "导语第二段。\n\n"
+            "## 第一节\n\n"
+            "正文第一节。\n\n"
+            f"{HIGHLIGHT_MARKER}\n"
+            "## 第一节\n\n"
+            "<p>高亮正文第一节。</p>"
+        )
+
+        titles, body, highlighted = self.helpers.parse_de_ai_dual_output(response)
+
+        self.assertEqual(titles, ["标题A", "标题B", "标题C"])
+        self.assertIn("导语第一段", body)
+        self.assertIn(TITLE_MARKER, highlighted)
+        self.assertIn("标题A", highlighted)
+        self.assertIn(BODY_MARKER, highlighted)
+        self.assertIn("导语第一段", highlighted)
+        self.assertIn("## 第一节", highlighted)
+        self.assertIn("高亮正文第一节", highlighted)
+
     def test_publish_quality_gate_passes_when_structure_is_complete(self):
         article_text = (
             f"{TITLE_MARKER}\n"
@@ -360,6 +418,38 @@ class PromptStructureTests(unittest.TestCase):
         self.assertEqual(item_map["highlight"]["status"], "warn")
 
 
+    def test_publish_quality_gate_flags_humanizer_risk_when_ai_patterns_are_obvious(self):
+        article_text = (
+            f"{TITLE_MARKER}\n"
+            "1. Title A\n"
+            "2. Title B\n"
+            "3. Title C\n\n"
+            f"{BODY_MARKER}\n"
+            "导语第一段。\n\n"
+            "导语第二段。\n\n"
+            "## 第一节\n\n"
+            "这不仅仅是一次更新，而是一场革命。此外，专家认为它至关重要。\n\n"
+            "## 第二节\n\n"
+            "众所周知，这也提醒我们未来可期。\n\n"
+            "## 第三节\n\n"
+            "最后一节把结构补齐。"
+        )
+        report = self.helpers.build_publish_quality_gate_report(
+            article_text,
+            title_candidates=["Title A", "Title B", "Title C"],
+            highlighted_article="<p>Highlighted</p>",
+            term_scan_summary={
+                "banned_terms": 0,
+                "default_replacement_terms": 0,
+                "suggested_replacement_terms": 0,
+            },
+            target_words=1500,
+        )
+        item_map = {item["key"]: item for item in report["items"]}
+
+        self.assertEqual(item_map["humanizer_risk"]["status"], "fail")
+        self.assertIn("AI", item_map["humanizer_risk"]["detail"])
+
     def test_detect_auto_retry_issues_flags_missing_titles_intro_h2_and_highlight(self):
         article_text = (
             f"{BODY_MARKER}\\n"
@@ -410,8 +500,12 @@ class PromptStructureTests(unittest.TestCase):
 
         self.assertEqual(titles, ["Clean Title A", "Clean Title B", "Clean Title C"])
         self.assertEqual(body, "正文段落一。\n\n正文段落二。")
-        self.assertEqual(highlighted, "<p>正文段落一。</p>")
 
+
+        self.assertIn(TITLE_MARKER, highlighted)
+        self.assertIn("Clean Title A", highlighted)
+        self.assertIn("<p>", highlighted)
+        self.assertIn("</p>", highlighted)
 
 if __name__ == "__main__":
     unittest.main()

@@ -448,13 +448,21 @@ def build_reviewer_structure_instruction():
 
 
 def build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction=""):
+    humanizer_review_instruction = "\n".join([
+        "[Humanizer Review Requirements]",
+        "Inside your expression review, explicitly check whether the draft still shows obvious AI writing patterns or connector-word stacking.",
+        "Flag formulaic sentence shapes such as `????????`, `????????`, and `???????` when they make the article feel templated.",
+        "Flag empty uplift, promotional tone, fake-depth phrasing, vague authority claims, and generic positive endings that do not add real information.",
+        "Flag overly neat three-part parallel structures or quote-like lines that feel manufactured instead of earned.",
+        "When you identify these issues, explain why they hurt credibility and give concrete rewrite instructions instead of abstract style criticism.",
+    ])
     prompt_parts = [
         reviewer_prompt.strip() if isinstance(reviewer_prompt, str) else "",
         build_reviewer_structure_instruction(),
+        humanizer_review_instruction,
         anti_hallucination_instruction.strip() if isinstance(anti_hallucination_instruction, str) else "",
     ]
     return "\n\n".join([part for part in prompt_parts if part])
-
 
 def build_article_output_instruction():
     return "\n".join([
@@ -762,6 +770,18 @@ def build_publish_quality_gate_report(
     h2_sections = extract_markdown_h2_sections(article_text)
     h2_count = len(h2_sections)
     term_summary = term_scan_summary if isinstance(term_scan_summary, dict) else {}
+    humanizer_fail_patterns = [
+        ("\u6a21\u677f\u8f6c\u6298\u53e5", r"\u4e0d(?:\u662f|\u4ec5|\u4ec5\u4ec5\u662f)[^\u3002\uff01\uff1f\\n]{0,24}(?:\u800c\u662f|\u66f4\u662f)"),
+        ("\u7a7a\u6cdb\u5347\u534e\u53e5", r"(?:\u8fd9|\u5b83)(?:\u4e0d|\u4e0d\u4ec5|\u4e0d\u4ec5\u4ec5)\u662f[^\u3002\uff01\uff1f\\n]{0,24}(?:\u800c\u662f|\u66f4\u662f)"),
+    ]
+    humanizer_warn_patterns = [
+        ("AI\u8fde\u63a5\u8bcd", r"(?:\u6b64\u5916|\u4e0e\u6b64\u540c\u65f6|\u503c\u5f97\u4e00\u63d0\u7684\u662f|\u4ece\u67d0\u79cd\u610f\u4e49\u4e0a\u8bf4|\u4e0d\u53ef\u5426\u8ba4|\u663e\u800c\u6613\u89c1|\u4f17\u6240\u5468\u77e5)"),
+        ("\u5ba3\u4f20\u8154\u8bcd\u6c47", r"(?:\u81f3\u5173\u91cd\u8981|\u5173\u952e\u6027\u7684|\u6301\u4e45\u7684|\u5145\u6ee1\u6d3b\u529b\u7684|\u5b8c\u7f8e\u878d\u5408|\u4ee4\u4eba\u60ca\u53f9|\u53f2\u65e0\u524d\u4f8b|\u524d\u6240\u672a\u6709)"),
+        ("\u6a21\u7cca\u5f52\u56e0", r"(?:\u884c\u4e1a\u62a5\u544a\u663e\u793a|\u4e13\u5bb6\u8ba4\u4e3a|\u6709\u5206\u6790\u8ba4\u4e3a|\u4e00\u4e9b\u6279\u8bc4\u8005\u8ba4\u4e3a|\u89c2\u5bdf\u4eba\u58eb\u6307\u51fa)"),
+        ("\u7a7a\u6cdb\u7ed3\u5c3e", r"(?:\u8fd9\u4e5f\u63d0\u9192\u6211\u4eec|\u672a\u6765\u53ef\u671f|\u503c\u5f97\u6df1\u601d|\u4e0d\u5bb9\u5ffd\u89c6)"),
+    ]
+    humanizer_fail_hits = [label for label, pattern in humanizer_fail_patterns if re.search(pattern, article_body)]
+    humanizer_warn_hits = [label for label, pattern in humanizer_warn_patterns if re.search(pattern, article_body)]
 
     items = []
 
@@ -804,11 +824,23 @@ def build_publish_quality_gate_report(
     default_hits = int(term_summary.get("default_replacement_terms", 0) or 0)
     suggested_hits = int(term_summary.get("suggested_replacement_terms", 0) or 0)
     if banned_hits > 0:
-        items.append({"key": "term_rules", "label": "词表风险", "status": "fail", "detail": f"仍命中 {banned_hits} 个禁用词，发布前建议先处理。"})
+        items.append({"key": "term_rules", "label": "\u8bcd\u8868\u98ce\u9669", "status": "fail", "detail": f"\u4ecd\u547d\u4e2d {banned_hits} \u4e2a\u7981\u7528\u8bcd\uff0c\u53d1\u5e03\u524d\u5efa\u8bae\u5148\u5904\u7406\u3002"})
     elif default_hits > 0 or suggested_hits > 0:
-        items.append({"key": "term_rules", "label": "词表风险", "status": "warn", "detail": f"仍命中默认替换 {default_hits} 个、建议替换 {suggested_hits} 个。"})
+        items.append({"key": "term_rules", "label": "\u8bcd\u8868\u98ce\u9669", "status": "warn", "detail": f"\u4ecd\u547d\u4e2d\u9ed8\u8ba4\u66ff\u6362 {default_hits} \u4e2a\u3001\u5efa\u8bae\u66ff\u6362 {suggested_hits} \u4e2a\u3002"})
     else:
-        items.append({"key": "term_rules", "label": "词表风险", "status": "pass", "detail": "当前没有命中禁用词或替换词风险。"})
+        items.append({"key": "term_rules", "label": "\u8bcd\u8868\u98ce\u9669", "status": "pass", "detail": "\u5f53\u524d\u6ca1\u6709\u547d\u4e2d\u7981\u7528\u8bcd\u6216\u66ff\u6362\u8bcd\u98ce\u9669\u3002"})
+
+    if humanizer_fail_hits or len(humanizer_warn_hits) >= 3:
+        humanizer_detail = "\u5b58\u5728\u660e\u663e\u7684 AI \u5199\u4f5c\u75d5\u8ff9\uff0c\u5efa\u8bae\u518d\u505a\u4e00\u8f6e\u53bb\u6a21\u677f\u5316\u91cd\u5199\u3002"
+        if humanizer_fail_hits:
+            humanizer_detail += " \u91cd\u70b9\u95ee\u9898\uff1a" + "\u3001".join(humanizer_fail_hits) + "\u3002"
+        elif humanizer_warn_hits:
+            humanizer_detail += " \u89e6\u53d1\u4fe1\u53f7\uff1a" + "\u3001".join(humanizer_warn_hits[:4]) + "\u3002"
+        items.append({"key": "humanizer_risk", "label": "AI\u75d5\u8ff9\u98ce\u9669", "status": "fail", "detail": humanizer_detail})
+    elif humanizer_warn_hits:
+        items.append({"key": "humanizer_risk", "label": "AI\u75d5\u8ff9\u98ce\u9669", "status": "warn", "detail": "\u4ecd\u6709\u4e00\u4e9b\u516c\u5f0f\u5316\u8fde\u63a5\u8bcd\u3001\u5ba3\u4f20\u8154\u6216\u7a7a\u6cdb\u7ed3\u5c3e\u75d5\u8ff9\uff0c\u5efa\u8bae\u518d\u987a\u4e00\u8f6e\u8868\u8fbe\u3002"})
+    else:
+        items.append({"key": "humanizer_risk", "label": "AI\u75d5\u8ff9\u98ce\u9669", "status": "pass", "detail": "\u5f53\u524d\u6ca1\u6709\u660e\u663e\u7684\u6a21\u677f\u53e5\u3001\u7a7a\u6cdb\u5347\u534e\u6216\u5ba3\u4f20\u8154\u98ce\u9669\u3002"})
 
     fail_count = sum(1 for item in items if item.get("status") == "fail")
     warn_count = sum(1 for item in items if item.get("status") == "warn")
@@ -2015,10 +2047,11 @@ DE_AI_MODEL_MIGRATION = {
     "deepseek-v3-2-exp": "deepseek-v3.2",
 }
 DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "qwen3.5-plus", "glm-5"]
-DE_AI_VARIANTS = ["\u666e\u901a\u7248", "\u793e\u533a\u6587\u7ae0\u53bbAI\u7248", "\u81ea\u7136\u5520\u55d1\u7248"]
+DE_AI_VARIANTS = ["普通版", "社区文章去AI版", "自然唠嗑版", "Humanizer-zh 版"]
 DE_AI_VARIANT_DEFAULT = DE_AI_VARIANTS[0]
 DE_AI_VARIANT_COMMUNITY = DE_AI_VARIANTS[1]
 DE_AI_VARIANT_CHAT = DE_AI_VARIANTS[2]
+DE_AI_VARIANT_HUMANIZER = DE_AI_VARIANTS[3]
 
 TERM_RULE_SCOPE_LABELS = {
     "modification": "修改稿",
@@ -2177,6 +2210,7 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content, varian
     ])
     community_instruction = ""
     chatty_instruction = ""
+    humanizer_instruction = ""
     if variant == DE_AI_VARIANT_COMMUNITY:
         community_instruction = """
 【社区文章去AI版附加要求】
@@ -2205,6 +2239,18 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content, varian
 - 第一人称存在感可以有，但不能压过主题本身。核心始终是对象、事实和论证。
 - 标题结构、开头背景和分析骨架都必须保留。唠嗑感不等于松散，也不等于想到哪写到哪。
 """
+    elif variant == DE_AI_VARIANT_HUMANIZER:
+        humanizer_instruction = """
+【Humanizer-zh版附加要求】
+请在现有去 AI 约束上，再做一轮面向「去模板化」的精细重写。
+- 删掉 AI 高频填充词、连接词堆叠和听起来很像「标准答案」的过渡句。
+- 主动打破「不是……而是……」、「不仅……而且……」、「这不仅仅是……」这类公式化句式。
+- 减少三项并列、金句感、空泛升华和过度结论化的写法。
+- 去掉宣传腔、报告腔、媒体腔和伪深刻措辞，能用人话说清的地方就不要继续套话化。
+- 遇到模糊归因或虚空权威化表达，请改写得更具体、更像真人在讲话。
+- 保留事实和结构，但让句子节奏更自然，判断更像有人在思考过后写下来的文字。
+- 不要把文章写成故意凹人设的「新文风」，目标是减少机器纹理，不是再造另一种固定腔调。
+"""
     return f"""# 角色
 你现在的身份是：{persona}
 
@@ -2227,6 +2273,7 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content, varian
 {term_rules_instruction}
 {community_instruction}
 {chatty_instruction}
+{humanizer_instruction}
 # 结构保留要求
 {structure_instruction}
 - 如果原稿现有标题层级是合理的，可以润色标题措辞，但不能把层级删掉。
@@ -2275,6 +2322,32 @@ def extract_de_ai_raw_title_candidates(response_text):
     return parse_de_ai_raw_title_candidates(response_text)
 
 
+def ensure_highlighted_article_context(highlighted_text, title_candidates, article_body):
+    clean_highlight = (highlighted_text or "").strip()
+    if not clean_highlight:
+        return ""
+
+    prefix_parts = []
+    normalized_titles = normalize_title_candidates(title_candidates)
+    intro_source = re.split(r"^\s*##\s+.+$", article_body or "", maxsplit=1, flags=re.MULTILINE)[0].strip()
+    intro_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", intro_source) if paragraph.strip()]
+    first_intro_paragraph = intro_paragraphs[0] if intro_paragraphs else ""
+
+    if normalized_titles and ARTICLE_TITLE_MARKER not in clean_highlight and PURE_TITLE_MARKER not in clean_highlight:
+        title_block = build_title_candidates_block(normalized_titles)
+        if title_block:
+            prefix_parts.append(title_block)
+
+    highlight_starts_with_heading = bool(re.match(r"^(?:<h[23][^>]*>|##\s+|###\s+)", clean_highlight))
+    intro_missing = bool(first_intro_paragraph and first_intro_paragraph not in clean_highlight)
+    if intro_source and intro_missing and ARTICLE_BODY_MARKER not in clean_highlight and PURE_BODY_MARKER not in clean_highlight:
+        if highlight_starts_with_heading or prefix_parts:
+            prefix_parts.append(f"{ARTICLE_BODY_MARKER}\n{intro_source}")
+
+    if not prefix_parts:
+        return clean_highlight
+    return "\n\n".join(prefix_parts + [clean_highlight]).strip()
+
 def parse_de_ai_dual_output(response_text, fallback_titles=None):
     clean_text = (response_text or "").strip()
     if not clean_text:
@@ -2302,7 +2375,8 @@ def parse_de_ai_dual_output(response_text, fallback_titles=None):
 
     _, pure_body = split_structured_article_sections(pure_text)
     clean_body = (pure_body or pure_text or "").strip()
-    return resolved_titles, clean_body, highlighted_text.strip()
+    clean_highlighted = ensure_highlighted_article_context(highlighted_text, resolved_titles, clean_body)
+    return resolved_titles, clean_body, clean_highlighted
 
 
 def sanitize_highlighted_article(html_text):
@@ -5022,9 +5096,13 @@ elif st.session_state.current_step == 5:
     current_editor_prompt = prompts_data["editors"].get(current_role, "") if current_role in prompts_data["editors"] else ""
     de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
     de_ai_button_suffix = (
-        "（社区版）"
+        "?????"
         if de_ai_variant == DE_AI_VARIANT_COMMUNITY
-        else "（唠嗑版）" if de_ai_variant == DE_AI_VARIANT_CHAT else ""
+        else "（唠嗑版）"
+        if de_ai_variant == DE_AI_VARIANT_CHAT
+        else "（Humanizer版）"
+        if de_ai_variant == DE_AI_VARIANT_HUMANIZER
+        else ""
     )
 
     render_section_intro("去 AI 味", "在定稿前选择专用模型，把修改稿重写得更像真人专家输出。", "Step 05")
@@ -5107,9 +5185,13 @@ elif st.session_state.current_step == 5:
 
     de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
     de_ai_button_suffix = (
-        "（社区版）"
+        "?????"
         if de_ai_variant == DE_AI_VARIANT_COMMUNITY
-        else "（唠嗑版）" if de_ai_variant == DE_AI_VARIANT_CHAT else ""
+        else "（唠嗑版）"
+        if de_ai_variant == DE_AI_VARIANT_CHAT
+        else "（Humanizer版）"
+        if de_ai_variant == DE_AI_VARIANT_HUMANIZER
+        else ""
     )
     de_ai_banned_terms, de_ai_default_replacements, _, _ = resolve_active_term_rules("de_ai")
     de_ai_term_rules_instruction = build_term_rules_instruction(
@@ -5193,9 +5275,11 @@ elif st.session_state.current_step == 5:
                 st.session_state.final_article = build_structured_article_text(pure_titles, pure_article) or (de_ai_response or "").strip()
                 st.session_state.highlighted_article = highlighted_article
                 if de_ai_variant == DE_AI_VARIANT_COMMUNITY:
-                    de_ai_stage_label = "去AI味定稿（社区版）"
+                    de_ai_stage_label = "去AI味定稿（唠嗑版）"
                 elif de_ai_variant == DE_AI_VARIANT_CHAT:
                     de_ai_stage_label = "去AI味定稿（唠嗑版）"
+                elif de_ai_variant == DE_AI_VARIANT_HUMANIZER:
+                    de_ai_stage_label = "去AI味定稿（Humanizer版）"
                 else:
                     de_ai_stage_label = "去AI味定稿"
                 append_article_version(
