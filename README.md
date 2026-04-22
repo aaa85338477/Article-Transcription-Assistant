@@ -4,9 +4,9 @@ A Streamlit-based editorial workstation for game-industry content teams.
 
 This project combines article scraping, YouTube transcript ingestion, local research files, optional Obsidian knowledge support, multi-stage drafting, review and rewrite flows, de-AI finalization, highlighted reading output, podcast/script generation, and export/distribution tools in a single UI.
 
-## What This Branch Includes
+## Current Features
 
-This branch reflects the current production workflow, including:
+The current app includes:
 
 - Multi-source ingestion:
   - Web articles
@@ -244,3 +244,4 @@ Run a quick syntax check:
 ```bash
 python -m py_compile app.py
 ```
+
