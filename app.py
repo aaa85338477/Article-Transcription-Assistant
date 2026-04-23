@@ -53,10 +53,56 @@ PROMPTS_PATH_CANDIDATES = [
 
 PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
 DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
+TASK_QUEUE_FILE = os.path.join(APP_DIR, "task_queue_state.json")
 AI_DIAGNOSTIC_LOG = os.path.join(APP_DIR, "ai_diagnostics.log")
 PROMPTS_LOAD_REPORT = ""
 PENDING_DRAFT_RESTORE_KEY = "_pending_draft_restore"
 DRAFT_RESTORE_NOTICE_KEY = "_draft_restore_notice"
+TASK_QUEUE_NOTICE_KEY = "_task_queue_notice"
+
+DRAFT_STATE_KEYS = [
+    'current_step', 'article_url', 'video_url', 'source_content',
+    'source_images', 'extraction_success', 'draft_article',
+    'review_feedback', 'review_actions', 'accepted_review_items', 'modified_article', 'final_article', 'title_candidates', 'highlighted_article', 'spoken_script',
+    'podcast_enabled', 'podcast_duration', 'podcast_script_raw', 'podcast_script_segments',
+    'podcast_audio_path', 'podcast_audio_manifest', 'podcast_last_error', 'podcast_voice',
+    'podcast_tts_provider', 'podcast_tts_api_key_present',
+    'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
+    'source_images_all', 'selected_source_image_ids', 'article_versions',
+    'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
+    'de_ai_prompt_template', 'term_rules_enabled', 'term_rules_scope',
+    'banned_terms_text', 'replacement_terms_text', 'default_replacement_terms_text',
+    'suggested_replacement_terms_text', 'article_banned_terms_text', 'article_replacement_terms_text',
+    'article_default_replacement_terms_text', 'article_suggested_replacement_terms_text',
+    'term_scan_result', 'term_scan_summary',
+    'pending_ai_stage', 'last_completed_ai_stage',
+    'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice',
+    'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
+    'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
+    'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
+    'obsidian_last_indexed_at', 'obsidian_retrieval_signature',
+    'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature',
+    'evidence_map', 'evidence_summary', 'evidence_signature'
+]
+
+TASK_TEMPLATE_CONFIG_KEYS = [
+    'selected_role', 'target_article_words',
+    'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
+    'term_rules_enabled', 'term_rules_scope',
+    'banned_terms_text', 'default_replacement_terms_text', 'suggested_replacement_terms_text',
+    'article_banned_terms_text', 'article_default_replacement_terms_text', 'article_suggested_replacement_terms_text',
+    'podcast_enabled', 'podcast_duration', 'podcast_voice',
+    'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits', 'obsidian_show_hits',
+]
+
+TASK_STATUS_LABELS = {
+    "pending": "待处理",
+    "in_progress": "处理中",
+    "needs_review": "待复核",
+    "completed": "已完成",
+    "failed": "失败",
+}
+
 
 
 def get_prompt_file_candidates():
@@ -212,44 +258,575 @@ def load_prompts():
 def save_prompts(data):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-def save_draft():
-    keys_to_save = [
-        'current_step', 'article_url', 'video_url', 'source_content',
-        'source_images', 'extraction_success', 'draft_article',
-        'review_feedback', 'review_actions', 'accepted_review_items', 'modified_article', 'final_article', 'title_candidates', 'highlighted_article', 'spoken_script',
-        'podcast_enabled', 'podcast_duration', 'podcast_script_raw', 'podcast_script_segments',
-        'podcast_audio_path', 'podcast_audio_manifest', 'podcast_last_error', 'podcast_voice',
-        'podcast_tts_provider', 'podcast_tts_api_key_present',
-        'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
-        'source_images_all', 'selected_source_image_ids', 'article_versions',
-        'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
-        'de_ai_prompt_template', 'term_rules_enabled', 'term_rules_scope',
-        'banned_terms_text', 'replacement_terms_text', 'default_replacement_terms_text',
-        'suggested_replacement_terms_text', 'article_banned_terms_text', 'article_replacement_terms_text',
-        'article_default_replacement_terms_text', 'article_suggested_replacement_terms_text',
-        'term_scan_result', 'term_scan_summary',
-        'pending_ai_stage', 'last_completed_ai_stage',
-        'last_completed_ai_target_step', 'last_ai_error', 'recovered_ai_notice',
-        'obsidian_enabled', 'obsidian_vault_path', 'obsidian_max_hits',
-        'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
-        'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
-        'obsidian_last_indexed_at', 'obsidian_retrieval_signature',
-        'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature',
-        'evidence_map', 'evidence_summary', 'evidence_signature'
-    ]
-    draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
+def clone_json_data(data):
     try:
-        with open(DRAFT_FILE, "w", encoding="utf-8") as f:
-            json.dump(draft_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"草稿保存失败: {e}")
+        return json.loads(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        return data
+
+
+def build_draft_data():
+    return {key: clone_json_data(st.session_state[key]) for key in DRAFT_STATE_KEYS if key in st.session_state}
+
+
+def queue_draft_restore(draft_data, notice=""):
+    snapshot = clone_json_data(draft_data or {})
+    st.session_state[PENDING_DRAFT_RESTORE_KEY] = snapshot
+    if notice:
+        st.session_state[DRAFT_RESTORE_NOTICE_KEY] = notice
+    try:
+        with open(DRAFT_FILE, "w", encoding="utf-8") as file_obj:
+            json.dump(snapshot, file_obj, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"读取草稿失败: {exc}")
+
+
+def apply_draft_data(draft_data):
+    for key, value in (draft_data or {}).items():
+        st.session_state[key] = clone_json_data(value)
+
+    current_role = st.session_state.get("selected_role", "")
+    if isinstance(current_role, str):
+        st.session_state.selected_role_widget = current_role
+    st.session_state.target_article_words_slider = st.session_state.get("target_article_words", 1500)
+    for stale_key in [key for key in list(st.session_state.keys()) if key.startswith("source_image_pick_")]:
+        del st.session_state[stale_key]
+
+
+def build_task_fallback_name(entity_id, default_suffix="001"):
+    suffix = str(entity_id or "").replace("T", "") or default_suffix
+    return f"{chr(0x4EFB)}{chr(0x52A1)} {suffix}"
+
+
+def build_task_title(task_snapshot, fallback_name="\u4efb\u52a1"):
+    snapshot = task_snapshot or {}
+    titles = normalize_title_candidates(snapshot.get("title_candidates", []))
+    if titles:
+        return titles[0][:60]
+
+    for field_name in ("article_url", "video_url"):
+        raw_value = str(snapshot.get(field_name, "") or "")
+        items = [line.strip() for line in raw_value.splitlines() if line.strip()]
+        if items:
+            first_url = items[0]
+            host = urlparse(first_url).netloc.replace("www.", "") or first_url
+            if len(items) > 1:
+                return f"{host} \u7b49{len(items)}\u6761"[:60]
+            return host[:60]
+
+    article_candidates = [
+        get_article_body_text((snapshot.get("final_article") or "").strip()),
+        get_article_body_text((snapshot.get("modified_article") or "").strip()),
+        get_article_body_text((snapshot.get("draft_article") or "").strip()),
+        (snapshot.get("source_content") or "").strip(),
+    ]
+    for candidate in article_candidates:
+        lines = [line.strip() for line in str(candidate).splitlines() if line.strip()]
+        if lines:
+            clean_line = re.sub(r"^[#>*\-\d\.)\s]+", "", lines[0]).strip()
+            if clean_line:
+                return clean_line[:60]
+
+    return fallback_name
+
+
+def derive_task_status(task_snapshot, explicit_error=""):
+    snapshot = task_snapshot or {}
+    last_error = (explicit_error or snapshot.get("last_ai_error", "") or "").strip()
+    if last_error:
+        return "failed"
+    if (snapshot.get("final_article") or "").strip():
+        return "completed"
+    if snapshot.get("review_feedback") or snapshot.get("review_actions"):
+        return "needs_review"
+    if (
+        snapshot.get("current_step", 1) > 1
+        or (snapshot.get("source_content") or "").strip()
+        or (snapshot.get("draft_article") or "").strip()
+        or (snapshot.get("modified_article") or "").strip()
+    ):
+        return "in_progress"
+    return "pending"
+
+
+def build_task_metrics(task_snapshot):
+    snapshot = task_snapshot or {}
+    article_text = get_article_body_text(
+        (snapshot.get("final_article") or snapshot.get("modified_article") or snapshot.get("draft_article") or "").strip()
+    )
+    return {
+        "word_count": len((article_text or "").strip()),
+        "version_count": len(snapshot.get("article_versions", []) or []),
+        "has_highlight": bool((snapshot.get("highlighted_article") or "").strip()),
+        "has_podcast": bool((snapshot.get("podcast_script_raw") or "").strip() or (snapshot.get("podcast_audio_path") or "").strip()),
+    }
+
+
+def build_task_queue_metrics(tasks):
+    summary = {
+        "total": 0,
+        "pending": 0,
+        "in_progress": 0,
+        "needs_review": 0,
+        "completed": 0,
+        "failed": 0,
+    }
+    for task in tasks or []:
+        summary["total"] += 1
+        status = task.get("status", "pending")
+        if status not in summary:
+            continue
+        summary[status] += 1
+    return summary
+
+
+def build_task_template_config(task_snapshot):
+    snapshot = task_snapshot or {}
+    return {key: clone_json_data(snapshot.get(key)) for key in TASK_TEMPLATE_CONFIG_KEYS if key in snapshot}
+
+
+def apply_task_template_config(task_snapshot, template_config):
+    snapshot = clone_json_data(task_snapshot or {})
+    for key, value in (template_config or {}).items():
+        snapshot[key] = clone_json_data(value)
+    return snapshot
+
+
+def get_next_entity_id(prefix, items):
+    highest = 0
+    for item in items or []:
+        match = re.search(r"(\d+)$", str(item.get("id", "")))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{prefix}{highest + 1:03d}"
+
+
+def get_task_by_id(task_id):
+    for task in st.session_state.get("task_queue", []) or []:
+        if task.get("id") == task_id:
+            return task
+    return None
+
+
+def get_template_by_id(template_id):
+    for template in st.session_state.get("task_templates", []) or []:
+        if template.get("id") == template_id:
+            return template
+    return None
+
+
+def is_placeholder_task_name(task_name):
+    clean_name = str(task_name or "").strip()
+    if not clean_name:
+        return True
+    placeholder_prefixes = (
+        "任务 ",
+        "?? ",
+        "浠诬姟 ",
+        "ÈÎÎñ ",
+        "??? ",
+    )
+    return clean_name.startswith(placeholder_prefixes)
+
+
+def refresh_task_record(task_record, task_snapshot=None):
+    snapshot = clone_json_data(task_snapshot if task_snapshot is not None else task_record.get("snapshot", {}))
+    task_record["snapshot"] = snapshot
+    task_record["status"] = derive_task_status(snapshot, task_record.get("last_error", ""))
+    task_record["current_step"] = int(snapshot.get("current_step", 1) or 1)
+    task_record["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    task_record["resume_stage"] = snapshot.get("pending_ai_stage") or snapshot.get("last_completed_ai_stage") or ""
+    task_record["last_error"] = (snapshot.get("last_ai_error", "") or "").strip()
+    task_record["metrics"] = build_task_metrics(snapshot)
+    if is_placeholder_task_name(task_record.get("name", "")):
+        fallback_name = build_task_fallback_name(task_record.get('id', ''))
+        task_record["name"] = build_task_title(snapshot, fallback_name=fallback_name)
+    return task_record
+
+
+def read_task_queue_data():
+    if not os.path.exists(TASK_QUEUE_FILE):
+        return None
+    with open(TASK_QUEUE_FILE, "r", encoding="utf-8") as file_obj:
+        queue_data = json.load(file_obj)
+    if not isinstance(queue_data, dict):
+        raise ValueError("Task queue payload must be a JSON object.")
+    return queue_data
+
+
+def save_task_queue_state():
+    queue_payload = {
+        "active_task_id": st.session_state.get("active_task_id", ""),
+        "tasks": clone_json_data(st.session_state.get("task_queue", [])),
+        "templates": clone_json_data(st.session_state.get("task_templates", [])),
+    }
+    with open(TASK_QUEUE_FILE, "w", encoding="utf-8") as file_obj:
+        json.dump(queue_payload, file_obj, ensure_ascii=False, indent=2)
+
+
+def init_task_queue_state():
+    if st.session_state.get("_task_queue_loaded"):
+        return
+
+    tasks = []
+    templates = []
+    active_task_id = ""
+    try:
+        queue_data = read_task_queue_data() or {}
+        tasks = [item for item in queue_data.get("tasks", []) if isinstance(item, dict)]
+        templates = [item for item in queue_data.get("templates", []) if isinstance(item, dict)]
+        active_task_id = queue_data.get("active_task_id", "") or ""
+    except Exception:
+        tasks = []
+        templates = []
+        active_task_id = ""
+
+    normalized_tasks = []
+    queue_changed = False
+    for task in tasks:
+        original_name = task.get("name", "")
+        refresh_task_record(task)
+        normalized_tasks.append(task)
+        if task.get("name", "") != original_name:
+            queue_changed = True
+
+    st.session_state.task_queue = normalized_tasks
+    st.session_state.task_templates = templates
+    st.session_state.active_task_id = active_task_id
+    st.session_state._task_queue_loaded = True
+    if queue_changed:
+        save_task_queue_state()
+
+
+def persist_active_task_snapshot(draft_data=None):
+    init_task_queue_state()
+    active_task_id = st.session_state.get("active_task_id", "")
+    if not active_task_id:
+        return
+
+    tasks = st.session_state.get("task_queue", []) or []
+    snapshot = clone_json_data(draft_data if draft_data is not None else build_draft_data())
+    task_record = next((item for item in tasks if item.get("id") == active_task_id), None)
+    if task_record is None:
+        task_record = {
+            "id": active_task_id,
+            "name": build_task_title(snapshot, fallback_name=build_task_fallback_name(active_task_id)),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        tasks.append(task_record)
+    refresh_task_record(task_record, snapshot)
+    st.session_state.task_queue = tasks
+    save_task_queue_state()
+
+
+def build_blank_task_snapshot(base_snapshot=None):
+    snapshot = clone_json_data(base_snapshot or {})
+    reset_defaults = {
+        "current_step": 1,
+        "article_url": "",
+        "video_url": "",
+        "source_content": "",
+        "source_images": [],
+        "source_images_all": [],
+        "selected_source_image_ids": [],
+        "extraction_success": False,
+        "draft_article": "",
+        "review_feedback": "",
+        "review_actions": [],
+        "accepted_review_items": [],
+        "modified_article": "",
+        "final_article": "",
+        "title_candidates": [],
+        "highlighted_article": "",
+        "spoken_script": "",
+        "podcast_script_raw": "",
+        "podcast_script_segments": [],
+        "podcast_audio_path": "",
+        "podcast_audio_manifest": {},
+        "podcast_last_error": "",
+        "chat_history": [],
+        "image_keywords": "",
+        "article_versions": [],
+        "active_article_version_id": None,
+        "term_scan_result": [],
+        "term_scan_summary": {},
+        "pending_ai_stage": "",
+        "last_completed_ai_stage": "",
+        "last_completed_ai_target_step": 0,
+        "last_ai_error": "",
+        "recovered_ai_notice": "",
+        "obsidian_hits": [],
+        "obsidian_research_brief": "",
+        "obsidian_retrieval_error": "",
+        "obsidian_query_terms": [],
+        "obsidian_wiki_root": "",
+        "obsidian_last_indexed_at": "",
+        "obsidian_retrieval_signature": "",
+        "obsidian_influence_map": [],
+        "obsidian_influence_summary": "",
+        "obsidian_influence_signature": "",
+        "evidence_map": [],
+        "evidence_summary": "",
+        "evidence_signature": "",
+    }
+    for key, value in reset_defaults.items():
+        snapshot[key] = clone_json_data(value)
+    return snapshot
+
+
+def draft_has_meaningful_content(draft_data):
+    if not isinstance(draft_data, dict):
+        return False
+    if int(draft_data.get("current_step", 1) or 1) > 1:
+        return True
+
+    text_keys = (
+        "article_url",
+        "video_url",
+        "source_content",
+        "draft_article",
+        "review_feedback",
+        "modified_article",
+        "final_article",
+        "highlighted_article",
+        "spoken_script",
+        "podcast_script_raw",
+        "image_keywords",
+        "obsidian_research_brief",
+    )
+    for key in text_keys:
+        if str(draft_data.get(key, "") or "").strip():
+            return True
+
+    list_keys = (
+        "source_images",
+        "source_images_all",
+        "selected_source_image_ids",
+        "title_candidates",
+        "review_actions",
+        "accepted_review_items",
+        "article_versions",
+        "podcast_script_segments",
+        "chat_history",
+        "obsidian_hits",
+        "evidence_map",
+    )
+    for key in list_keys:
+        if draft_data.get(key):
+            return True
+    return False
+
+
+def snapshots_equivalent(left_snapshot, right_snapshot):
+    try:
+        return json.dumps(left_snapshot or {}, ensure_ascii=False, sort_keys=True) == json.dumps(right_snapshot or {}, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return clone_json_data(left_snapshot or {}) == clone_json_data(right_snapshot or {})
+
+
+def should_offer_draft_restore():
+    try:
+        draft_data = read_draft_data()
+    except Exception:
+        return False
+    if not draft_has_meaningful_content(draft_data):
+        return False
+    return not snapshots_equivalent(draft_data, build_draft_data())
+
+
+def reset_active_task_to_blank():
+    init_task_queue_state()
+    active_task_id = st.session_state.get("active_task_id", "")
+    if not active_task_id:
+        return False
+
+    task_record = get_task_by_id(active_task_id)
+    if not task_record:
+        return False
+
+    blank_snapshot = build_blank_task_snapshot(build_draft_data())
+    task_record["name"] = build_task_fallback_name(active_task_id)
+    refresh_task_record(task_record, blank_snapshot)
+    st.session_state.task_queue = st.session_state.get("task_queue", []) or []
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已重置当前任务：{task_record.get('name', active_task_id)}"
+    save_task_queue_state()
+    queue_draft_restore(blank_snapshot)
+    return True
+
+
+def ensure_task_queue_bootstrap():
+    init_task_queue_state()
+    tasks = st.session_state.get("task_queue", []) or []
+    active_task_id = st.session_state.get("active_task_id", "")
+
+    if tasks:
+        if not active_task_id or not any(task.get("id") == active_task_id for task in tasks):
+            st.session_state.active_task_id = tasks[0].get("id", "")
+        if not os.path.exists(DRAFT_FILE):
+            active_task = get_task_by_id(st.session_state.get("active_task_id", ""))
+            if active_task and isinstance(active_task.get("snapshot"), dict):
+                apply_draft_data(active_task.get("snapshot", {}))
+                save_draft()
+        return
+
+    initial_snapshot = build_draft_data()
+    task_id = get_next_entity_id("T", tasks)
+    task_record = {
+        "id": task_id,
+        "name": build_task_title(initial_snapshot, fallback_name=build_task_fallback_name(task_id)),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    refresh_task_record(task_record, initial_snapshot)
+    st.session_state.task_queue = [task_record]
+    st.session_state.active_task_id = task_id
+    save_task_queue_state()
+
+
+def create_task_from_current_state(*, clone_current=False, template_id="", task_name=""):
+    init_task_queue_state()
+    current_snapshot = build_draft_data()
+    task_snapshot = clone_json_data(current_snapshot) if clone_current else build_blank_task_snapshot(current_snapshot)
+
+    template = get_template_by_id(template_id) if template_id else None
+    if template:
+        task_snapshot = apply_task_template_config(task_snapshot, template.get("config_snapshot", {}))
+
+    tasks = st.session_state.get("task_queue", []) or []
+    task_id = get_next_entity_id("T", tasks)
+    task_record = {
+        "id": task_id,
+        "name": (task_name or "").strip() or build_task_title(task_snapshot, fallback_name=build_task_fallback_name(task_id)),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    refresh_task_record(task_record, task_snapshot)
+    tasks.append(task_record)
+    st.session_state.task_queue = tasks
+    st.session_state.active_task_id = task_id
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已创建新任务：{task_record['name']}"
+    save_task_queue_state()
+    queue_draft_restore(task_snapshot)
+    return task_id
+
+
+def switch_to_task(task_id):
+    init_task_queue_state()
+    task_record = get_task_by_id(task_id)
+    if not task_record:
+        return False
+
+    current_active_id = st.session_state.get("active_task_id", "")
+    if current_active_id and current_active_id != task_id:
+        persist_active_task_snapshot()
+
+    st.session_state.active_task_id = task_id
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已切换到任务：{task_record.get('name', task_id)}"
+    save_task_queue_state()
+    queue_draft_restore(task_record.get("snapshot", {}))
+    return True
+
+
+def save_current_config_as_template(template_name):
+    clean_name = (template_name or "").strip()
+    if not clean_name:
+        return None
+
+    init_task_queue_state()
+    templates = st.session_state.get("task_templates", []) or []
+    config_snapshot = build_task_template_config(build_draft_data())
+    existing_template = next((item for item in templates if (item.get("name") or "").strip() == clean_name), None)
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if existing_template:
+        existing_template["config_snapshot"] = config_snapshot
+        existing_template["updated_at"] = now_text
+        template_id = existing_template.get("id")
+    else:
+        template_id = get_next_entity_id("TP", templates)
+        templates.append({
+            "id": template_id,
+            "name": clean_name,
+            "created_at": now_text,
+            "updated_at": now_text,
+            "config_snapshot": config_snapshot,
+        })
+
+    st.session_state.task_templates = templates
+    save_task_queue_state()
+    return template_id
+
+
+def apply_template_to_tasks(template_id, task_ids=None):
+    template = get_template_by_id(template_id)
+    if not template:
+        return 0
+
+    target_ids = list(task_ids or [])
+    if not target_ids and st.session_state.get("active_task_id"):
+        target_ids = [st.session_state.get("active_task_id")]
+    if not target_ids:
+        return 0
+
+    templates_config = template.get("config_snapshot", {})
+    updated_count = 0
+    tasks = st.session_state.get("task_queue", []) or []
+    active_task_id = st.session_state.get("active_task_id", "")
+    active_snapshot = None
+
+    for task_record in tasks:
+        if task_record.get("id") not in target_ids:
+            continue
+        snapshot = apply_task_template_config(task_record.get("snapshot", {}), templates_config)
+        refresh_task_record(task_record, snapshot)
+        updated_count += 1
+        if task_record.get("id") == active_task_id:
+            active_snapshot = snapshot
+
+    st.session_state.task_queue = tasks
+    save_task_queue_state()
+    if active_snapshot is not None:
+        queue_draft_restore(active_snapshot)
+    return updated_count
+
+
+def build_batch_export_markdown(tasks):
+    export_parts = []
+    for task_record in tasks or []:
+        snapshot = task_record.get("snapshot", {}) or {}
+        article_text = (snapshot.get("final_article") or snapshot.get("modified_article") or snapshot.get("draft_article") or "").strip()
+        highlighted_article = (snapshot.get("highlighted_article") or "").strip()
+        part_lines = [
+            f"# {task_record.get('name', task_record.get('id', '任务'))}",
+            "",
+            f"- 任务 ID：{task_record.get('id', '')}",
+            f"- 状态：{TASK_STATUS_LABELS.get(task_record.get('status', 'pending'), task_record.get('status', 'pending'))}",
+            f"- 最后更新时间：{task_record.get('updated_at', '')}",
+            "",
+            "## 正文",
+            "",
+            article_text or "暂无正文内容。",
+        ]
+        if highlighted_article:
+            part_lines.extend(["", "## 高亮阅读版", "", highlighted_article])
+        export_parts.append("\n".join(part_lines).strip())
+    return "\n\n---\n\n".join(part for part in export_parts if part).strip()
+
+
+def save_draft():
+    draft_data = build_draft_data()
+    try:
+        with open(DRAFT_FILE, "w", encoding="utf-8") as file_obj:
+            json.dump(draft_data, file_obj, ensure_ascii=False, indent=2)
+        persist_active_task_snapshot(draft_data)
+    except Exception as exc:
+        print(f"\u8bfb\u53d6\u8349\u7a3f\u5931\u8d25: {exc}")
+
 
 def read_draft_data():
     if not os.path.exists(DRAFT_FILE):
         return None
 
-    with open(DRAFT_FILE, "r", encoding="utf-8") as f:
-        draft_data = json.load(f)
+    with open(DRAFT_FILE, "r", encoding="utf-8") as file_obj:
+        draft_data = json.load(file_obj)
 
     if not isinstance(draft_data, dict):
         raise ValueError("Draft payload must be a JSON object.")
@@ -263,10 +840,10 @@ def load_draft():
         if draft_data is None:
             return False
         st.session_state[PENDING_DRAFT_RESTORE_KEY] = draft_data
-        st.session_state[DRAFT_RESTORE_NOTICE_KEY] = "草稿恢复成功！工作流已复原。"
+        st.session_state[DRAFT_RESTORE_NOTICE_KEY] = "已恢复上次草稿内容。"
         return True
-    except Exception as e:
-        print(f"草稿读取失败: {e}")
+    except Exception as exc:
+        print(f"读取草稿失败: {exc}")
         return False
 
 
@@ -275,14 +852,14 @@ def apply_pending_draft_restore():
     if not isinstance(pending_draft, dict):
         return
 
-    for k, v in pending_draft.items():
-        st.session_state[k] = v
+    apply_draft_data(pending_draft)
+
 
 def clear_draft():
     if os.path.exists(DRAFT_FILE):
         try:
             os.remove(DRAFT_FILE)
-        except:
+        except Exception:
             pass
 
 
@@ -454,7 +1031,7 @@ def build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction
     humanizer_review_instruction = "\n".join([
         "[Humanizer Review Requirements]",
         "Inside your expression review, explicitly check whether the draft still shows obvious AI writing patterns or connector-word stacking.",
-        "Flag formulaic sentence shapes such as `????????`, `????????`, and `???????` when they make the article feel templated.",
+        "Flag formulaic sentence shapes such as `不仅仅是`, `不是……而是……`, and `值得一提的是` when they make the article feel templated.",
         "Flag empty uplift, promotional tone, fake-depth phrasing, vague authority claims, and generic positive endings that do not add real information.",
         "Flag overly neat three-part parallel structures or quote-like lines that feel manufactured instead of earned.",
         "When you identify these issues, explain why they hurt credibility and give concrete rewrite instructions instead of abstract style criticism.",
@@ -2091,9 +2668,9 @@ def normalize_evidence_excerpt(text, max_chars=220):
         bullet_match = re.match(r"^\s*[-*+]\s+(.*)$", clean_line)
         numbered_match = re.match(r"^\s*\d+[.)]\s+(.*)$", clean_line)
         if bullet_match:
-            clean_line = "? " + bullet_match.group(1).strip()
+            clean_line = "- " + bullet_match.group(1).strip()
         elif numbered_match:
-            clean_line = "? " + numbered_match.group(1).strip()
+            clean_line = "- " + numbered_match.group(1).strip()
         clean_line = re.sub(r"\s+", " ", clean_line).strip()
         if clean_line:
             normalized_lines.append(clean_line)
@@ -3751,6 +4328,18 @@ def init_state():
         st.session_state.evidence_summary = ""
     if 'evidence_signature' not in st.session_state:
         st.session_state.evidence_signature = ""
+    if 'task_queue' not in st.session_state or not isinstance(st.session_state.task_queue, list):
+        st.session_state.task_queue = []
+    if 'task_templates' not in st.session_state or not isinstance(st.session_state.task_templates, list):
+        st.session_state.task_templates = []
+    if 'active_task_id' not in st.session_state:
+        st.session_state.active_task_id = ""
+    if '_task_queue_loaded' not in st.session_state:
+        st.session_state._task_queue_loaded = False
+    if 'task_filter_status' not in st.session_state:
+        st.session_state.task_filter_status = "??"
+    if 'task_template_apply_targets' not in st.session_state:
+        st.session_state.task_template_apply_targets = []
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -3839,6 +4428,208 @@ def render_ai_progress_banner():
     if last_error:
         st.warning(f"上一轮 AI 调用未完整收尾：{last_error}")
 
+
+def is_task_action_blocked(pending_stage, confirmed_interrupt=False):
+    return bool(str(pending_stage or "").strip()) and not bool(confirmed_interrupt)
+
+
+def build_task_interrupt_notice(task_name, pending_stage):
+    stage_labels = {
+        "draft_generation": "\u5199\u51fa\u7a3f",
+        "review_generation": "\u4e25\u683c\u5ba1\u7a3f",
+        "modification_generation": "\u4fee\u6539\u7a3f\u4ef6",
+        "de_ai_generation": "\u53bb AI \u5473\u91cd\u5199",
+    }
+    clean_task_name = str(task_name or "\u5f53\u524d\u4efb\u52a1").strip() or "\u5f53\u524d\u4efb\u52a1"
+    clean_stage = str(pending_stage or "").strip()
+    stage_label = stage_labels.get(clean_stage, clean_stage or "AI \u4efb\u52a1")
+    return f"{clean_task_name} \u6b63\u5728\u6267\u884c\u300c{stage_label}\u300d\u3002\u5982\u679c\u73b0\u5728\u5207\u6362\u3001\u65b0\u5efa\u3001\u590d\u5236\u6216\u5957\u7528\u6a21\u677f\uff0c\u8fd9\u4e00\u8f6e\u540c\u6b65\u8c03\u7528\u4f1a\u88ab\u4e2d\u65ad\u3002"
+
+
+def render_task_queue_panel():
+    init_task_queue_state()
+    tasks = st.session_state.get("task_queue", []) or []
+    if not tasks:
+        return
+
+    queue_notice = st.session_state.pop(TASK_QUEUE_NOTICE_KEY, "")
+    if queue_notice:
+        st.success(queue_notice)
+
+    active_task_id = st.session_state.get("active_task_id", "") or tasks[0].get("id", "")
+    st.session_state.active_task_id = active_task_id
+    active_task = get_task_by_id(active_task_id) or tasks[0]
+    metrics = build_task_queue_metrics(tasks)
+    pending_stage = str(st.session_state.get("pending_ai_stage", "") or "").strip()
+
+    render_section_intro("\u4efb\u52a1\u961f\u5217", "\u5c06\u5355\u7bc7\u5de5\u4f5c\u6d41\u5347\u7ea7\u4e3a\u53ef\u8fde\u7eed\u5904\u7406\u7684\u672c\u5730\u751f\u4ea7\u961f\u5217\u3002", "Queue")
+    with st.container(border=True):
+        metric_cols = st.columns(6)
+        metric_values = [
+            ("\u5168\u90e8", metrics.get("total", 0)),
+            ("\u5f85\u5904\u7406", metrics.get("pending", 0)),
+            ("\u8fdb\u884c\u4e2d", metrics.get("in_progress", 0)),
+            ("\u5f85\u4eba\u5de5\u786e\u8ba4", metrics.get("needs_review", 0)),
+            ("\u5df2\u5b8c\u6210", metrics.get("completed", 0)),
+            ("\u5931\u8d25", metrics.get("failed", 0)),
+        ]
+        for col, (label, value) in zip(metric_cols, metric_values):
+            with col:
+                st.metric(label, value)
+
+        interrupt_confirmed = False
+        if pending_stage:
+            st.warning(build_task_interrupt_notice(active_task.get("name", active_task_id), pending_stage))
+            interrupt_confirmed = st.checkbox(
+                "\u6211\u786e\u8ba4\u5207\u6362\u5e76\u4e2d\u65ad\u5f53\u524d\u4efb\u52a1",
+                key="task_queue_interrupt_confirm",
+            )
+        else:
+            st.session_state["task_queue_interrupt_confirm"] = False
+
+        task_action_blocked = is_task_action_blocked(pending_stage, interrupt_confirmed)
+
+        task_options = [task.get("id", "") for task in tasks]
+        task_labels = {
+            task.get("id", ""): f"[{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))}] {task.get('name', task.get('id', '??'))}"
+            for task in tasks
+        }
+        current_index = task_options.index(active_task_id) if active_task_id in task_options else 0
+
+        switch_col, new_col, clone_col, resume_col = st.columns([2.8, 1.1, 1.2, 1.2])
+        with switch_col:
+            selected_task_id = st.selectbox(
+                "\u5207\u6362\u4efb\u52a1",
+                options=task_options,
+                index=current_index,
+                format_func=lambda task_id: task_labels.get(task_id, task_id),
+                key="task_queue_selected_id",
+            )
+        with new_col:
+            if st.button("\u65b0\u5efa\u7a7a\u767d", key="create_blank_task", use_container_width=True, disabled=task_action_blocked):
+                create_task_from_current_state(clone_current=False)
+                st.rerun()
+        with clone_col:
+            if st.button("\u590d\u5236\u5f53\u524d", key="clone_current_task", use_container_width=True, disabled=task_action_blocked):
+                create_task_from_current_state(clone_current=True)
+                st.rerun()
+        with resume_col:
+            resume_label = "\u7ee7\u7eed\u5904\u7406"
+            if active_task.get("status") == "failed":
+                resume_label = "\u5931\u8d25\u91cd\u8bd5"
+            if st.button(resume_label, key="resume_current_task", use_container_width=True):
+                st.session_state.last_ai_error = ""
+                go_to_step(int(active_task.get("current_step", 1) or 1))
+                st.rerun()
+
+        if selected_task_id != active_task_id:
+            action_col1, action_col2 = st.columns([1.2, 4])
+            with action_col1:
+                if st.button(
+                    "\u5207\u6362\u5230\u6240\u9009\u4efb\u52a1",
+                    key="switch_selected_task",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=task_action_blocked,
+                ):
+                    switch_to_task(selected_task_id)
+                    st.rerun()
+            with action_col2:
+                if task_action_blocked:
+                    st.caption("\u8fd0\u884c\u4e2d\u4efb\u52a1\u9700\u8981\u5148\u52fe\u9009\u786e\u8ba4\uff0c\u624d\u80fd\u6267\u884c\u4f1a\u4e2d\u65ad\u5f53\u524d\u8c03\u7528\u7684\u64cd\u4f5c\u3002")
+                else:
+                    st.caption("\u5207\u6362\u540e\u4f1a\u5c06\u5f53\u524d\u7f16\u8f91\u72b6\u6001\u540c\u6b65\u5230\u6240\u9009\u4efb\u52a1\u3002")
+
+        st.caption(
+            f"\u5f53\u524d\u4efb\u52a1\uff1a{active_task.get('name', active_task_id)} | \u72b6\u6001\uff1a{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))} | "
+            f"Step {active_task.get('current_step', 1)} | \u6700\u8fd1\u66f4\u65b0\uff1a{active_task.get('updated_at', '')}"
+        )
+
+        with st.expander("\u4efb\u52a1\u6a21\u677f", expanded=False):
+            template_save_col, template_name_col = st.columns([1.2, 2])
+            with template_name_col:
+                template_name = st.text_input("\u6a21\u677f\u540d\u79f0", key="task_template_name_input", placeholder="\u4f8b\uff1a\u6807\u51c6\u6e38\u620f\u65b0\u95fb\u6d41\u7a0b")
+            with template_save_col:
+                if st.button("\u4fdd\u5b58\u5f53\u524d\u914d\u7f6e", key="save_task_template", use_container_width=True):
+                    saved_template_id = save_current_config_as_template(template_name)
+                    if saved_template_id:
+                        st.session_state[TASK_QUEUE_NOTICE_KEY] = f"\u5df2\u4fdd\u5b58\u6a21\u677f\uff1a{template_name.strip()}"
+                        st.rerun()
+
+            templates = st.session_state.get("task_templates", []) or []
+            if templates:
+                template_options = [item.get("id", "") for item in templates]
+                selected_template_id = st.selectbox(
+                    "\u9009\u62e9\u6a21\u677f",
+                    options=template_options,
+                    format_func=lambda template_id: next((item.get("name", template_id) for item in templates if item.get("id") == template_id), template_id),
+                    key="selected_task_template_id",
+                )
+                apply_targets = st.multiselect(
+                    "\u5e94\u7528\u5230\u4efb\u52a1",
+                    options=task_options,
+                    default=[active_task_id],
+                    format_func=lambda task_id: task_labels.get(task_id, task_id),
+                    key="task_template_apply_targets",
+                )
+                if st.button("\u5e94\u7528\u6a21\u677f", key="apply_task_template_btn", use_container_width=True, disabled=task_action_blocked):
+                    updated_count = apply_template_to_tasks(selected_template_id, apply_targets)
+                    if updated_count:
+                        st.session_state[TASK_QUEUE_NOTICE_KEY] = f"\u5df2\u5c06\u6a21\u677f\u5e94\u7528\u5230 {updated_count} \u4e2a\u4efb\u52a1"
+                        st.rerun()
+            else:
+                st.info("\u6682\u65f6\u8fd8\u6ca1\u6709\u4efb\u52a1\u6a21\u677f\uff0c\u53ef\u4ee5\u5148\u4fdd\u5b58\u4e00\u4e2a\u5e38\u7528\u914d\u7f6e\u3002")
+
+        with st.expander("\u4efb\u52a1\u5217\u8868 / \u4ea4\u4ed8\u53f0", expanded=False):
+            filter_options = ["\u5168\u90e8", "\u5f85\u5904\u7406", "\u8fdb\u884c\u4e2d", "\u5f85\u4eba\u5de5\u786e\u8ba4", "\u5df2\u5b8c\u6210", "\u5931\u8d25"]
+            selected_filter = st.selectbox("\u7b5b\u9009\u72b6\u6001", filter_options, key="task_filter_status")
+            reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
+            filtered_tasks = []
+            for task in tasks:
+                if selected_filter == "\u5168\u90e8":
+                    filtered_tasks.append(task)
+                    continue
+                if task.get("status") == reverse_status_map.get(selected_filter):
+                    filtered_tasks.append(task)
+
+            for task in filtered_tasks:
+                metric_info = task.get("metrics", {}) or {}
+                artifact_flags = []
+                if metric_info.get("has_highlight"):
+                    artifact_flags.append("\u9ad8\u4eae\u7248")
+                if metric_info.get("has_podcast"):
+                    artifact_flags.append("\u64ad\u5ba2")
+                if metric_info.get("version_count"):
+                    artifact_flags.append(f"\u7248\u672c {metric_info.get('version_count')}")
+                artifact_text = " / ".join(artifact_flags) if artifact_flags else "\u6682\u65e0\u4ea7\u7269"
+                st.markdown(
+                    f"**{task.get('name', task.get('id', '??'))}**  \n"
+                    f"\u72b6\u6001\uff1a{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))} | "
+                    f"Step {task.get('current_step', 1)} | \u5b57\u6570\uff1a{metric_info.get('word_count', 0)} | {artifact_text} | \u66f4\u65b0\uff1a{task.get('updated_at', '')}"
+                )
+
+            completed_tasks = [task for task in tasks if task.get("status") == "completed"]
+            if completed_tasks:
+                completed_ids = [task.get("id", "") for task in completed_tasks]
+                selected_export_ids = st.multiselect(
+                    "\u9009\u62e9\u8981\u6279\u91cf\u5bfc\u51fa\u7684\u4efb\u52a1",
+                    options=completed_ids,
+                    format_func=lambda task_id: task_labels.get(task_id, task_id),
+                    key="task_queue_export_ids",
+                )
+                export_targets = [task for task in completed_tasks if task.get("id") in selected_export_ids]
+                export_text = build_batch_export_markdown(export_targets)
+                st.download_button(
+                    "\u5bfc\u51fa Markdown \u5408\u96c6",
+                    data=export_text.encode("utf-8"),
+                    file_name=f"article-task-batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md",
+                    mime="text/markdown",
+                    disabled=not bool(export_targets),
+                    use_container_width=True,
+                    key="download_task_batch_export",
+                )
+            else:
+                st.caption("\u8fd8\u6ca1\u6709\u5df2\u5b8c\u6210\u7684\u4efb\u52a1\uff0c\u6682\u65f6\u65e0\u6cd5\u6279\u91cf\u5bfc\u51fa\u3002")
 
 def go_to_step(step):
     st.session_state.current_step = step
@@ -4002,6 +4793,7 @@ def bootstrap_article_versions():
 
 
 bootstrap_article_versions()
+ensure_task_queue_bootstrap()
 recover_ai_progress_if_needed()
 run_obsidian_retrieval()
 
@@ -4991,6 +5783,7 @@ with st.sidebar:
 render_app_hero()
 render_stepper(st.session_state.current_step)
 render_ai_progress_banner()
+render_task_queue_panel()
 
 # --- Step 1 ---
 if st.session_state.current_step == 1:
@@ -4999,21 +5792,23 @@ if st.session_state.current_step == 1:
     with st.container(border=True):
         st.markdown("""<div class="mode-grid"><div class="mode-card"><strong>批量素材输入</strong><span>支持多篇文章和多个视频链接合并提取，适合做专题与深度整合。</span></div><div class="mode-card"><strong>两种工作流模式</strong><span>手动精调适合逐步把关，全自动驾驶适合快速直达定稿。</span></div><div class="mode-card"><strong>统一定稿工作台</strong><span>脚本、搜图、导出、飞书推送和精修助手都在最后一页集中处理。</span></div></div>""", unsafe_allow_html=True)
 
-    if os.path.exists(DRAFT_FILE):
+    if should_offer_draft_restore():
         with st.container(border=True):
-            render_section_intro("继续上次工作", "如果上次停在中途，可以直接恢复到之前离开的步骤。", "Recovery")
-            st.markdown("<p class='toolbar-note'>恢复草稿会还原素材、初稿、审稿意见和定稿上下文；清空则重新开始新的工作流。</p>", unsafe_allow_html=True)
+            render_section_intro("恢复草稿", "检测到当前任务存在可恢复的旧工作现场。", "Recovery")
+            st.markdown("<p class='toolbar-note'>如果你上次处理中断，可以直接恢复当前草稿；如果想重新开始，也可以清空当前任务后再继续。</p>", unsafe_allow_html=True)
             col_draft1, col_draft2 = st.columns(2)
             with col_draft1:
-                if st.button("⚡ 一键恢复草稿", type="primary", use_container_width=True):
+                if st.button("恢复草稿", type="primary", use_container_width=True):
                     if load_draft():
                         st.rerun()
                     else:
-                        st.error("草稿文件损坏，无法恢复。")
+                        st.error("未找到可恢复的草稿。")
             with col_draft2:
-                if st.button("🗑️ 抛弃旧草稿，全新开始", use_container_width=True):
+                if st.button("抛弃旧草稿并重置当前任务", use_container_width=True):
                     clear_draft()
-                    st.rerun()
+                    if reset_active_task_to_blank():
+                        st.rerun()
+
 
     input_col1, input_col2 = st.columns(2)
     with input_col1:
@@ -6204,8 +6999,7 @@ elif st.session_state.current_step == 6:
         with btn_col3:
             if st.button("🔄 开启新一篇工作流", use_container_width=True):
                 clear_draft()
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
+                create_task_from_current_state(clone_current=False)
                 st.rerun()
 
 

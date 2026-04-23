@@ -644,7 +644,7 @@ class PromptStructureTests(unittest.TestCase):
 
         self.assertNotIn("###", normalized)
         self.assertIn("\u4e09\u7ef4\u627e\u7269\u6d88\u9664", normalized)
-        self.assertIn("? \u7b2c\u4e00\u6761\u89c2\u5bdf", normalized)
+        self.assertIn("- \u7b2c\u4e00\u6761\u89c2\u5bdf", normalized)
 
     def test_parse_source_packet_segments_extracts_labels_and_locators(self):
         source_content = (
