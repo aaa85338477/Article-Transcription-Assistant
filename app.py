@@ -234,7 +234,8 @@ def save_draft():
         'obsidian_show_hits', 'obsidian_hits', 'obsidian_research_brief',
         'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
         'obsidian_last_indexed_at', 'obsidian_retrieval_signature',
-        'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature'
+        'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature',
+        'evidence_map', 'evidence_summary', 'evidence_signature'
     ]
     draft_data = {k: st.session_state[k] for k in keys_to_save if k in st.session_state}
     try:
@@ -1034,6 +1035,9 @@ def reset_obsidian_context():
     st.session_state.obsidian_influence_map = []
     st.session_state.obsidian_influence_summary = ""
     st.session_state.obsidian_influence_signature = ""
+    st.session_state.evidence_map = []
+    st.session_state.evidence_summary = ""
+    st.session_state.evidence_signature = ""
 
 
 def resolve_obsidian_wiki_root(vault_path):
@@ -1839,6 +1843,359 @@ def build_obsidian_influence_map(final_article, hits):
     return influence_items
 
 
+def parse_source_packet_segments(source_content):
+    if not (source_content or "").strip():
+        return []
+
+    type_meta = {
+        "\u6587\u7ae0\u7d20\u6750": ("article", "\u6765\u6e90\u4e8e"),
+        "\u89c6\u9891\u7d20\u6750": ("video", "\u6765\u6e90\u4e8e"),
+        "\u4e0a\u4f20\u6587\u4ef6\u7d20\u6750": ("upload_text", "\u6587\u4ef6\u540d"),
+        "\u4e0a\u4f20\u56fe\u7247\u7d20\u6750": ("upload_image", "\u6587\u4ef6\u540d"),
+    }
+    segments = []
+    blocks = [block.strip() for block in re.split(r"\n\s*=+\s*\n", source_content or "") if block.strip()]
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        header = lines[0]
+        match = re.match(
+            r"^\u3010(?P<label_type>\u6587\u7ae0\u7d20\u6750|\u89c6\u9891\u7d20\u6750|\u4e0a\u4f20\u6587\u4ef6\u7d20\u6750|\u4e0a\u4f20\u56fe\u7247\u7d20\u6750)\s*(?P<index>\d+)\u3011\s*(?P<meta_key>\u6765\u6e90\u4e8e|\u6587\u4ef6\u540d)\s*:\s*(?P<meta_value>.+)$",
+            header,
+        )
+        if not match:
+            continue
+        label_type = match.group("label_type")
+        source_type, expected_meta_key = type_meta[label_type]
+        meta_key = match.group("meta_key")
+        source_locator = match.group("meta_value").strip()
+        if meta_key != expected_meta_key:
+            continue
+        body_text = "\n".join(lines[1:]).strip()
+        paragraphs = split_article_paragraphs(body_text)
+        segments.append({
+            "source_type": source_type,
+            "source_label": f"{label_type} {match.group('index')}",
+            "source_locator": source_locator,
+            "raw_block": block,
+            "paragraphs": paragraphs,
+        })
+    return segments
+
+
+def extract_claim_sentences(paragraph):
+    paragraph = (paragraph or "").strip()
+    if not paragraph:
+        return []
+    sentences = [segment.strip() for segment in re.split(r"(?<=[\u3002\uff01\uff1f!?\uff1b;])\s*|\n+", paragraph) if segment.strip()]
+    if not sentences:
+        return []
+
+    markers = (
+        "\u662f", "\u5c06", "\u610f\u5473\u7740", "\u8868\u660e", "\u663e\u793a", "\u8bf4\u660e", "\u6210\u4e3a", "\u63a8\u52a8", "\u5e26\u6765", "\u5f15\u53d1",
+        "not only", "rather than", "compared", "suggests", "shows", "indicates",
+    )
+    comparators = ("\u66f4", "\u8f83", "\u6bd4", "\u4f4e\u4e8e", "\u9ad8\u4e8e", "\u8d85\u8fc7", "\u81f3\u5c11", "\u6700\u591a", "\u9996\u6b21", "\u7ee7\u7eed", "\u5347\u7ea7", "\u4e0b\u964d")
+    scored = []
+    for idx, sentence in enumerate(sentences):
+        score = 0
+        if re.search(r"\d", sentence):
+            score += 4
+        if any(token in sentence for token in comparators):
+            score += 3
+        if any(token in sentence.lower() for token in markers):
+            score += 2
+        length = len(sentence)
+        if 10 <= length <= 70:
+            score += 2
+        elif length > 70:
+            score += 1
+        if idx == 0:
+            score += 1
+        scored.append((score, idx, sentence))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+
+    selected = []
+    seen = set()
+    for _, _, sentence in scored:
+        if sentence not in seen:
+            seen.add(sentence)
+            selected.append(sentence)
+        if len(selected) >= 2:
+            break
+    return selected or [sentences[0]]
+
+
+def score_paragraph_against_source_segment(paragraph, segment):
+    if not paragraph or not isinstance(segment, dict):
+        return 0, [], ""
+    if segment.get("source_type") == "upload_image":
+        return 0, [], ""
+
+    paragraph_terms = set(extract_obsidian_signal_terms(paragraph))
+    if not paragraph_terms:
+        return 0, [], ""
+
+    candidate_terms = []
+    candidate_terms.extend(extract_obsidian_signal_terms(segment.get("source_label", ""))[:4])
+    candidate_terms.extend(extract_obsidian_signal_terms(segment.get("source_locator", ""))[:4])
+    for source_paragraph in segment.get("paragraphs", [])[:8]:
+        candidate_terms.extend(extract_obsidian_signal_terms(source_paragraph)[:10])
+
+    deduped_terms = []
+    seen_terms = set()
+    for term in candidate_terms:
+        if term and term not in seen_terms:
+            seen_terms.add(term)
+            deduped_terms.append(term)
+    matched_terms = [term for term in deduped_terms if term in paragraph_terms]
+
+    claim_sentences = extract_claim_sentences(paragraph)
+    paragraph_numbers = set(re.findall(r"\d+(?:\.\d+)?", paragraph))
+    best_excerpt = ""
+    best_overlap = 0
+    for source_paragraph in segment.get("paragraphs", []) or [segment.get("raw_block", "")]:
+        overlap = 0
+        normalized_source = source_paragraph.casefold()
+        for claim in claim_sentences:
+            claim_lower = claim.casefold()
+            if claim_lower and claim_lower in normalized_source:
+                overlap += max(6, min(len(claim) // 5, 10))
+        source_terms = set(extract_obsidian_signal_terms(source_paragraph))
+        overlap += len(paragraph_terms & source_terms) * 2
+        number_overlap = paragraph_numbers & set(re.findall(r"\d+(?:\.\d+)?", source_paragraph))
+        overlap += len(number_overlap) * 3
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_excerpt = source_paragraph.strip()
+
+    score = len(matched_terms) * 3 + best_overlap
+    source_locator = (segment.get("source_locator", "") or "").casefold()
+    if any(term in source_locator for term in matched_terms[:3]):
+        score += 1
+    return score, matched_terms[:8], best_excerpt
+
+
+def build_article_evidence_map(final_article, source_segments, obsidian_hits):
+    paragraphs = split_article_paragraphs(final_article)
+    evidence_items = []
+    for idx, paragraph in enumerate(paragraphs, start=1):
+        claim_sentences = extract_claim_sentences(paragraph)
+        support_items = []
+
+        for segment in source_segments or []:
+            score, matched_terms, excerpt = score_paragraph_against_source_segment(paragraph, segment)
+            if score < 8:
+                continue
+            support_items.append({
+                "source_type": "source_packet",
+                "source_label": segment.get("source_label", ""),
+                "source_locator": segment.get("source_locator", ""),
+                "matched_excerpt": excerpt[:180],
+                "matched_terms": matched_terms[:6],
+                "score": score,
+                "confidence": "\u9ad8" if score >= 14 else "\u4e2d" if score >= 10 else "\u4f4e",
+            })
+
+        for hit in obsidian_hits or []:
+            score, matched_terms = score_paragraph_against_obsidian_hit(paragraph, hit)
+            if score < 5:
+                continue
+            support_items.append({
+                "source_type": "obsidian",
+                "source_label": hit.get("title", ""),
+                "source_locator": hit.get("path", ""),
+                "matched_excerpt": (hit.get("excerpt", "") or "")[:180],
+                "matched_terms": matched_terms[:6],
+                "score": score,
+                "confidence": "\u9ad8" if score >= 10 else "\u4e2d" if score >= 7 else "\u4f4e",
+            })
+
+        if not support_items:
+            continue
+        support_items.sort(key=lambda item: (-item.get("score", 0), item.get("source_label", "")))
+        if support_items[0].get("score", 0) < 6:
+            continue
+        top_items = support_items[:3]
+        preview = paragraph if len(paragraph) <= 120 else paragraph[:120].rstrip() + "..."
+        top_score = top_items[0].get("score", 0)
+        source_types = []
+        for item in top_items:
+            source_type = item.get("source_type")
+            if source_type and source_type not in source_types:
+                source_types.append(source_type)
+        evidence_items.append({
+            "paragraph_index": idx,
+            "paragraph_preview": preview,
+            "claim_sentences": claim_sentences[:2],
+            "support_items": top_items,
+            "coverage_level": "\u9ad8" if top_score >= 14 else "\u4e2d" if top_score >= 9 else "\u4f4e",
+            "source_types": source_types,
+        })
+    return evidence_items
+
+
+def refresh_evidence_map(force=False):
+    final_article = get_article_body_text((st.session_state.get("final_article", "") or "").strip())
+    source_content = (st.session_state.get("source_content", "") or "").strip()
+    hits = st.session_state.get("obsidian_hits", []) or []
+    if not final_article or not source_content:
+        st.session_state.evidence_map = []
+        st.session_state.evidence_summary = ""
+        st.session_state.evidence_signature = ""
+        return
+
+    signature_base = final_article + "\n" + source_content + "\n" + json.dumps(
+        [
+            {
+                "title": hit.get("title", ""),
+                "path": hit.get("path", ""),
+                "excerpt": hit.get("excerpt", ""),
+                "matched_terms": hit.get("matched_terms", []),
+            }
+            for hit in hits
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    signature = hashlib.sha1(signature_base.encode("utf-8")).hexdigest()
+    if not force and st.session_state.get("evidence_signature") == signature:
+        return
+
+    source_segments = parse_source_packet_segments(source_content)
+    evidence_map = build_article_evidence_map(final_article, source_segments, hits)
+    high_coverage_count = sum(1 for item in evidence_map if item.get("coverage_level") == "\u9ad8")
+    obsidian_only_count = sum(1 for item in evidence_map if item.get("source_types") == ["obsidian"])
+    st.session_state.evidence_map = evidence_map
+    st.session_state.evidence_summary = (
+        f"\u547d\u4e2d\u6bb5\u843d {len(evidence_map)} \u4e2a\uff1b\u9ad8\u8986\u76d6 {high_coverage_count} \u4e2a\uff1b\u4ec5\u6709 Obsidian \u8865\u5145 {obsidian_only_count} \u4e2a\u3002"
+        if evidence_map else
+        "\u5f53\u524d\u5b9a\u7a3f\u91cc\u8fd8\u6ca1\u6709\u627e\u5230\u8fbe\u5230\u9608\u503c\u7684\u8bba\u636e\u5361\u7247\u3002"
+    )
+    st.session_state.evidence_signature = signature
+
+
+def normalize_evidence_excerpt(text, max_chars=220):
+    raw_text = (text or "").strip()
+    if not raw_text:
+        return ""
+
+    normalized_lines = []
+    for line in raw_text.splitlines():
+        clean_line = line.strip()
+        if not clean_line:
+            continue
+        clean_line = re.sub(r"^\s{0,3}#{1,6}\s*", "", clean_line)
+        clean_line = re.sub(r"^\s*>\s*", "", clean_line)
+        bullet_match = re.match(r"^\s*[-*+]\s+(.*)$", clean_line)
+        numbered_match = re.match(r"^\s*\d+[.)]\s+(.*)$", clean_line)
+        if bullet_match:
+            clean_line = "? " + bullet_match.group(1).strip()
+        elif numbered_match:
+            clean_line = "? " + numbered_match.group(1).strip()
+        clean_line = re.sub(r"\s+", " ", clean_line).strip()
+        if clean_line:
+            normalized_lines.append(clean_line)
+
+    if not normalized_lines:
+        return ""
+    excerpt = "\n".join(normalized_lines[:4])
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars].rstrip() + "..."
+    return excerpt
+
+
+def render_evidence_support_cards(items, empty_text, tone="source"):
+    if not items:
+        st.caption(empty_text)
+        return
+
+    accent = "#0f766e" if tone == "source" else "#64748b"
+    surface = "#f4fbf9" if tone == "source" else "#f7f8fb"
+    pill_bg = "rgba(15, 118, 110, 0.12)" if tone == "source" else "rgba(100, 116, 139, 0.12)"
+    pill_text = accent
+
+    for support in items:
+        title = html_lib.escape((support.get("source_label", "") or "").strip() or "\u672a\u547d\u540d\u6765\u6e90")
+        confidence = html_lib.escape((support.get("confidence", "\u4f4e") or "\u4f4e").strip())
+        locator = html_lib.escape((support.get("source_locator", "") or "").strip())
+        excerpt = normalize_evidence_excerpt(support.get("matched_excerpt", ""))
+        excerpt = html_lib.escape(excerpt or "\u5df2\u547d\u4e2d\u8be5\u6761\u8bba\u636e\uff0c\u4f46\u5f53\u524d\u6ca1\u6709\u53ef\u5c55\u793a\u7684\u6458\u5f55\u3002")
+        matched_terms = [term for term in support.get("matched_terms", [])[:6] if (term or "").strip()]
+        terms_html = ""
+        if matched_terms:
+            pills = "".join(
+                f'<span style="display:inline-block;margin:0 0.35rem 0.35rem 0;padding:0.18rem 0.52rem;border-radius:999px;background:{pill_bg};color:{pill_text};font-size:0.78rem;line-height:1.2;">{html_lib.escape(str(term))}</span>'
+                for term in matched_terms
+            )
+            terms_html = (
+                '<div style="margin-top:0.65rem;">'
+                '<div style="font-size:0.78rem;color:#6b7280;margin-bottom:0.35rem;">\u547d\u4e2d\u8bcd</div>'
+                f'{pills}'
+                '</div>'
+            )
+
+        locator_html = ""
+        if locator:
+            locator_html = (
+                '<div style="margin-top:0.5rem;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;'
+                'font-size:0.76rem;line-height:1.5;color:#64748b;word-break:break-all;">'
+                f'{locator}'
+                '</div>'
+            )
+
+        card_html = f"""<div style=\"margin:0 0 0.85rem 0;padding:0.9rem 0.95rem;border:1px solid #e6ebf0;border-radius:16px;background:{surface};\">
+<div style=\"display:flex;justify-content:space-between;gap:0.8rem;align-items:flex-start;\">
+  <div style=\"font-size:0.98rem;font-weight:700;line-height:1.45;color:#0f172a;\">{title}</div>
+  <div style=\"flex-shrink:0;padding:0.18rem 0.48rem;border-radius:999px;background:{pill_bg};color:{accent};font-size:0.75rem;font-weight:600;\">{confidence}\u7f6e\u4fe1</div>
+</div>
+{locator_html}
+{terms_html}
+<div style=\"margin-top:0.7rem;padding:0.75rem 0.8rem;border-radius:12px;background:#ffffff;border-left:3px solid {accent};font-size:0.92rem;line-height:1.72;color:#475569;white-space:pre-wrap;\">{excerpt}</div>
+</div>"""
+        st.markdown(card_html, unsafe_allow_html=True)
+
+
+def render_evidence_map_panel(evidence_map, summary):
+    render_section_intro("\u8bba\u636e\u6765\u6e90", "\u628a\u6b63\u6587\u91cc\u7684\u5173\u952e\u5224\u65ad\u6620\u5c04\u56de\u7d20\u6750\u4f9d\u636e\u548c Obsidian \u8865\u5145\uff0c\u5e2e\u52a9\u5feb\u901f\u56de\u770b\u51fa\u5178\u3002", "\u8bba\u636e")
+    if summary:
+        st.caption(summary)
+    if not evidence_map:
+        st.info("\u5f53\u524d\u5b9a\u7a3f\u91cc\u8fd8\u6ca1\u6709\u627e\u5230\u8fbe\u5230\u9608\u503c\u7684\u8bba\u636e\u5361\u7247\u3002")
+        return
+
+    for item in evidence_map:
+        label = f"\u7b2c {item.get('paragraph_index', 0)} \u6bb5 \u00b7 {item.get('coverage_level', '\\u4f4e')}\u8986\u76d6"
+        support_items = item.get("support_items", [])
+        source_packet_items = [support for support in support_items if support.get("source_type") == "source_packet"]
+        obsidian_items = [support for support in support_items if support.get("source_type") == "obsidian"]
+        preview = html_lib.escape((item.get("paragraph_preview", "") or "").strip())
+        with st.expander(label, expanded=(item.get("paragraph_index", 0) <= 2)):
+            if preview:
+                preview_html = f'<div style="padding:0.75rem 0.82rem;border-radius:12px;background:#f8fafc;border:1px solid #e7edf3;color:#475569;font-size:0.93rem;line-height:1.72;">{preview}</div>'
+                st.markdown(preview_html, unsafe_allow_html=True)
+            claims = item.get("claim_sentences", [])
+            if claims:
+                st.markdown("**\u5173\u952e\u5224\u65ad**")
+                for claim in claims:
+                    st.markdown(f"- {(claim or '').strip()}")
+            st.markdown("**\u7d20\u6750\u4f9d\u636e**")
+            render_evidence_support_cards(
+                source_packet_items,
+                "\u8fd9\u4e00\u6bb5\u6682\u65f6\u6ca1\u6709\u627e\u5230\u8db3\u591f\u5f3a\u7684\u539f\u59cb\u7d20\u6750\u4f9d\u636e\u3002",
+                tone="source",
+            )
+
+            st.markdown("**Obsidian \u8865\u5145**")
+            st.caption("\u80cc\u666f\u8865\u5145\uff0c\u4e0d\u7b49\u540c\u4e8e\u539f\u59cb\u4e8b\u5b9e\u6765\u6e90\u3002")
+            render_evidence_support_cards(
+                obsidian_items,
+                "\u8fd9\u4e00\u6bb5\u6ca1\u6709\u989d\u5916\u547d\u4e2d Obsidian \u8865\u5145\u3002",
+                tone="obsidian",
+            )
+
+
 def refresh_obsidian_influence_map(force=False):
     final_article = get_article_body_text((st.session_state.get("final_article", "") or "").strip())
     hits = st.session_state.get("obsidian_hits", []) or []
@@ -1886,15 +2243,18 @@ def render_obsidian_influence_panel(influence_map, summary):
 def run_obsidian_retrieval(force=False):
     if not st.session_state.get("obsidian_enabled"):
         reset_obsidian_context()
+        refresh_evidence_map(force=True)
         return
     source_content = (st.session_state.get("source_content", "") or "").strip()
     if not source_content:
         reset_obsidian_context()
+        refresh_evidence_map(force=True)
         return
     wiki_root, resolve_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
     if resolve_error:
         reset_obsidian_context()
         st.session_state.obsidian_retrieval_error = resolve_error
+        refresh_evidence_map(force=True)
         save_draft()
         return
     max_hits = int(st.session_state.get("obsidian_max_hits", 6) or 6)
@@ -1916,6 +2276,7 @@ def run_obsidian_retrieval(force=False):
     st.session_state.obsidian_retrieval_signature = signature
     st.session_state.obsidian_retrieval_error = "部分 Obsidian 笔记读取失败，已跳过异常文件。" if read_errors else ""
     refresh_obsidian_influence_map(force=True)
+    refresh_evidence_map(force=True)
     save_draft()
 
 def build_openai_timeout(base_url, model_name):
@@ -3384,6 +3745,12 @@ def init_state():
         st.session_state.obsidian_influence_summary = ""
     if 'obsidian_influence_signature' not in st.session_state:
         st.session_state.obsidian_influence_signature = ""
+    if 'evidence_map' not in st.session_state:
+        st.session_state.evidence_map = []
+    if 'evidence_summary' not in st.session_state:
+        st.session_state.evidence_summary = ""
+    if 'evidence_signature' not in st.session_state:
+        st.session_state.evidence_signature = ""
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -3567,6 +3934,7 @@ def restore_article_version_to_session(version_item, fallback_titles=None):
     if version_item.get("id"):
         st.session_state.active_article_version_id = version_item.get("id")
     refresh_obsidian_influence_map(force=True)
+    refresh_evidence_map(force=True)
     return True
 
 
@@ -5507,6 +5875,7 @@ elif st.session_state.current_step == 5:
 
 elif st.session_state.current_step == 6:
     refresh_obsidian_influence_map()
+    refresh_evidence_map()
     render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
     display_final_article = build_display_article_text(
         st.session_state.get("final_article", ""),
@@ -5842,19 +6211,30 @@ elif st.session_state.current_step == 6:
 
     
     with right_col:
+        should_show_evidence_map = bool(
+            (st.session_state.get("final_article", "") or "").strip()
+            and (st.session_state.get("source_content", "") or "").strip()
+        )
         should_show_obsidian_influence = bool(
             st.session_state.get("obsidian_enabled")
             and (st.session_state.get("final_article", "") or "").strip()
             and (st.session_state.get("obsidian_hits", []) or [])
         )
-    
+
+        if should_show_evidence_map:
+            with st.container(border=True):
+                render_evidence_map_panel(
+                    st.session_state.get("evidence_map", []),
+                    st.session_state.get("evidence_summary", ""),
+                )
+
         if should_show_obsidian_influence:
             with st.container(border=True):
                 render_obsidian_influence_panel(
                     st.session_state.get("obsidian_influence_map", []),
                     st.session_state.get("obsidian_influence_summary", ""),
                 )
-    
+
         with st.container(border=True):
             render_section_intro("精修对话区", "保留消息历史与输入框，用于继续追问出处或改写段落。", "对话")
             chat_container = st.container(height=360)

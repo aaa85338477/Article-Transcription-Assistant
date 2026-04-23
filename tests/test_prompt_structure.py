@@ -1,4 +1,6 @@
 ﻿import ast
+import hashlib
+import json
 import re
 import types
 import unittest
@@ -48,6 +50,16 @@ TARGET_FUNCTIONS = {
     "ensure_highlighted_article_context",
     "parse_de_ai_dual_output",
     "sanitize_highlighted_article",
+    "normalize_query_token",
+    "split_article_paragraphs",
+    "extract_obsidian_signal_terms",
+    "score_paragraph_against_obsidian_hit",
+    "parse_source_packet_segments",
+    "extract_claim_sentences",
+    "score_paragraph_against_source_segment",
+    "build_article_evidence_map",
+    "refresh_evidence_map",
+    "normalize_evidence_excerpt",
 }
 TARGET_ASSIGNMENTS = {
     "ROLE_AUDIENCE_MAP",
@@ -63,6 +75,9 @@ TARGET_ASSIGNMENTS = {
     "DE_AI_VARIANT_COMMUNITY",
     "DE_AI_VARIANT_CHAT",
     "DE_AI_VARIANT_HUMANIZER",
+    "QUERY_STOPWORDS_EN",
+    "QUERY_STOPWORDS_ZH",
+    "ENGLISH_SIGNAL_HINTS",
 }
 
 
@@ -73,11 +88,27 @@ PURE_BODY_MARKER = "【纯净定稿】"
 HIGHLIGHT_MARKER = "【高亮阅读版】"
 
 
+class SessionState(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
 def load_prompt_helpers():
     source = APP_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(APP_PATH))
     module = types.ModuleType("prompt_helpers")
-    module.__dict__.update({"re": re})
+    module.__dict__.update({
+        "re": re,
+        "json": json,
+        "hashlib": hashlib,
+        "st": types.SimpleNamespace(session_state=SessionState()),
+    })
 
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -605,6 +636,125 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("Clean Title A", highlighted)
         self.assertIn("<p>", highlighted)
         self.assertIn("</p>", highlighted)
+
+    def test_normalize_evidence_excerpt_flattens_markdown_shape(self):
+        raw_excerpt = "### \u4e09\u7ef4\u627e\u7269\u6d88\u9664\uff08Match 3D\uff09\n\n- \u7b2c\u4e00\u6761\u89c2\u5bdf\n- \u7b2c\u4e8c\u6761\u89c2\u5bdf"
+
+        normalized = self.helpers.normalize_evidence_excerpt(raw_excerpt, max_chars=200)
+
+        self.assertNotIn("###", normalized)
+        self.assertIn("\u4e09\u7ef4\u627e\u7269\u6d88\u9664", normalized)
+        self.assertIn("? \u7b2c\u4e00\u6761\u89c2\u5bdf", normalized)
+
+    def test_parse_source_packet_segments_extracts_labels_and_locators(self):
+        source_content = (
+            "\u3010\u6587\u7ae0\u7d20\u6750 1\u3011\u6765\u6e90\u4e8e: https://example.com/a\n"
+            "\u7b2c\u4e00\u6bb5\u5185\u5bb9\u3002\n\n\u7b2c\u4e8c\u6bb5\u5185\u5bb9\u3002\n\n================\n"
+            "\u3010\u89c6\u9891\u7d20\u6750 2\u3011\u6765\u6e90\u4e8e: https://example.com/video\n"
+            "\u89c6\u9891\u6458\u8981\u3002\n\n================\n"
+            "\u3010\u4e0a\u4f20\u6587\u4ef6\u7d20\u6750 3\u3011\u6587\u4ef6\u540d: notes.txt\n"
+            "\u4e0a\u4f20\u6587\u4ef6\u6b63\u6587\u3002\n\n================\n"
+            "\u3010\u4e0a\u4f20\u56fe\u7247\u7d20\u6750 4\u3011\u6587\u4ef6\u540d: chart.png\n"
+            "\u56fe\u7247\u8bf4\u660e\u3002"
+        )
+
+        segments = self.helpers.parse_source_packet_segments(source_content)
+
+        self.assertEqual([segment["source_type"] for segment in segments], ["article", "video", "upload_text", "upload_image"])
+        self.assertEqual(segments[0]["source_label"], "\u6587\u7ae0\u7d20\u6750 1")
+        self.assertEqual(segments[1]["source_locator"], "https://example.com/video")
+        self.assertEqual(segments[2]["paragraphs"], ["\u4e0a\u4f20\u6587\u4ef6\u6b63\u6587\u3002"])
+
+    def test_extract_claim_sentences_prefers_numeric_and_judgment_sentences(self):
+        paragraph = "\u8fd9\u662f\u80cc\u666f\u94fa\u57ab\u3002Atlas Pro \u539a\u5ea6\u4ece 3 \u6beb\u7c73\u964d\u5230 1.9 \u6beb\u7c73\uff0c\u8bf4\u660e\u5b83\u5728\u8f7b\u8584\u65b9\u5411\u7ee7\u7eed\u63a8\u8fdb\u3002\u6700\u540e\u8865\u4e00\u53e5\u3002"
+
+        claims = self.helpers.extract_claim_sentences(paragraph)
+
+        self.assertGreaterEqual(len(claims), 1)
+        self.assertIn("1.9", claims[0])
+
+    def test_build_article_evidence_map_keeps_source_packet_and_obsidian_support(self):
+        final_article = "Atlas Pro thickness drops from 3 mm to 1.9 mm, showing Razer is pushing a thinner glide experience."
+        source_segments = [
+            {
+                "source_type": "article",
+                "source_label": "\u6587\u7ae0\u7d20\u6750 1",
+                "source_locator": "https://example.com/a",
+                "raw_block": "",
+                "paragraphs": ["Atlas Pro thickness drops from 3 mm to 1.9 mm and focuses on thinner glide experience."],
+            }
+        ]
+        obsidian_hits = [
+            {
+                "title": "Glass pad trend notes",
+                "path": "hardware/glass-pads.md",
+                "excerpt": "Writers keep linking thinner glide hardware to a premium experience trend.",
+                "matched_terms": ["thinner", "glide", "experience"],
+            }
+        ]
+
+        evidence_map = self.helpers.build_article_evidence_map(final_article, source_segments, obsidian_hits)
+
+        self.assertEqual(len(evidence_map), 1)
+        source_types = evidence_map[0]["source_types"]
+        self.assertIn("source_packet", source_types)
+        self.assertIn("obsidian", source_types)
+        self.assertLessEqual(len(evidence_map[0]["support_items"]), 3)
+
+    def test_build_article_evidence_map_skips_low_confidence_matches(self):
+        final_article = "This paragraph stays generic and does not overlap with the packet evidence."
+        source_segments = [
+            {
+                "source_type": "article",
+                "source_label": "\u6587\u7ae0\u7d20\u6750 1",
+                "source_locator": "https://example.com/a",
+                "raw_block": "",
+                "paragraphs": ["A totally different sports recap about teams and league standings."],
+            }
+        ]
+
+        evidence_map = self.helpers.build_article_evidence_map(final_article, source_segments, [])
+
+        self.assertEqual(evidence_map, [])
+
+    def test_refresh_evidence_map_ignores_highlighted_article_changes(self):
+        session_state = SessionState({
+            "final_article": "\u3010\u6b63\u6587\u3011\nAtlas Pro thickness drops from 3 mm to 1.9 mm.",
+            "source_content": "\u3010\u6587\u7ae0\u7d20\u6750 1\u3011\u6765\u6e90\u4e8e: https://example.com/a\nAtlas Pro thickness drops from 3 mm to 1.9 mm.",
+            "obsidian_hits": [],
+            "highlighted_article": "<p>old highlight</p>",
+            "evidence_map": [],
+            "evidence_summary": "",
+            "evidence_signature": "",
+        })
+        self.helpers.st.session_state = session_state
+
+        self.helpers.refresh_evidence_map(force=True)
+        first_signature = session_state["evidence_signature"]
+        first_map = list(session_state["evidence_map"])
+
+        session_state["highlighted_article"] = "<p>new highlight</p>"
+        self.helpers.refresh_evidence_map(force=False)
+
+        self.assertEqual(session_state["evidence_signature"], first_signature)
+        self.assertEqual(session_state["evidence_map"], first_map)
+
+    def test_refresh_evidence_map_works_without_obsidian_hits(self):
+        session_state = SessionState({
+            "final_article": "\u3010\u6b63\u6587\u3011\nAtlas Pro thickness drops from 3 mm to 1.9 mm.",
+            "source_content": "\u3010\u6587\u7ae0\u7d20\u6750 1\u3011\u6765\u6e90\u4e8e: https://example.com/a\nAtlas Pro thickness drops from 3 mm to 1.9 mm.",
+            "obsidian_hits": [],
+            "evidence_map": [],
+            "evidence_summary": "",
+            "evidence_signature": "",
+        })
+        self.helpers.st.session_state = session_state
+
+        self.helpers.refresh_evidence_map(force=True)
+
+        self.assertEqual(len(session_state["evidence_map"]), 1)
+        self.assertEqual(session_state["evidence_map"][0]["source_types"], ["source_packet"])
+        self.assertIn("\u547d\u4e2d\u6bb5\u843d", session_state["evidence_summary"])
 
 if __name__ == "__main__":
     unittest.main()

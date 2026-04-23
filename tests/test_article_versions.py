@@ -44,6 +44,7 @@ def load_version_helpers():
         "parse_article_generation_response": lambda content, fallback_titles=None: ([], content, content),
         "reset_podcast_outputs": lambda delete_audio=False: None,
         "refresh_obsidian_influence_map": lambda force=False: None,
+        "refresh_evidence_map": lambda force=False: None,
     })
 
     for node in tree.body:
@@ -88,7 +89,7 @@ class ArticleVersionTests(unittest.TestCase):
         self.assertEqual(saved_version["created_at"], "2026-04-18 12:34:56")
 
     def test_restore_article_version_to_session_restores_highlighted_article(self):
-        calls = {"reset": None, "refresh": None, "fallback_titles": None}
+        calls = {"reset": None, "refresh": None, "evidence_refresh": None, "fallback_titles": None}
 
         def fake_parse(content, fallback_titles=None):
             calls["fallback_titles"] = fallback_titles
@@ -100,9 +101,13 @@ class ArticleVersionTests(unittest.TestCase):
         def fake_refresh(force=False):
             calls["refresh"] = force
 
+        def fake_evidence_refresh(force=False):
+            calls["evidence_refresh"] = force
+
         self.helpers.parse_article_generation_response = fake_parse
         self.helpers.reset_podcast_outputs = fake_reset
         self.helpers.refresh_obsidian_influence_map = fake_refresh
+        self.helpers.refresh_evidence_map = fake_evidence_refresh
 
         restored = self.helpers.restore_article_version_to_session(
             {
@@ -121,6 +126,7 @@ class ArticleVersionTests(unittest.TestCase):
         self.assertEqual(calls["fallback_titles"], ["old title"])
         self.assertTrue(calls["reset"])
         self.assertTrue(calls["refresh"])
+        self.assertTrue(calls["evidence_refresh"])
 
 
 if __name__ == "__main__":
