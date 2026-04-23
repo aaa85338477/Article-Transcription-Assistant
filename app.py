@@ -4889,6 +4889,19 @@ with st.sidebar:
     selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
     
     st.markdown("---")
+    st.header("Obsidian 知识库")
+    st.toggle("启用本地知识增强", key="obsidian_enabled", on_change=save_draft)
+    st.text_input("知识库路径 / wiki 路径", key="obsidian_vault_path", placeholder=r"D:\Obsidian Vault", on_change=save_draft)
+    st.slider("知识命中数", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
+    st.toggle("显示命中详情", key="obsidian_show_hits", on_change=save_draft)
+    wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
+    if st.session_state.get("obsidian_enabled"):
+        if wiki_root_preview:
+            st.caption(f"检测到 wiki 根目录：{wiki_root_preview}")
+        elif wiki_root_error:
+            st.caption(wiki_root_error)
+
+    st.markdown("---")
     st.header("🎬 视频分镜设置")
     enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
     script_duration = st.selectbox(
@@ -4919,19 +4932,6 @@ with st.sidebar:
         on_change=save_draft,
         disabled=not st.session_state.get("podcast_enabled", False)
     )
-
-    st.markdown("---")
-    st.header("Obsidian 知识库")
-    st.toggle("启用本地知识增强", key="obsidian_enabled", on_change=save_draft)
-    st.text_input("知识库路径 / wiki 路径", key="obsidian_vault_path", placeholder=r"D:\Obsidian Vault", on_change=save_draft)
-    st.slider("知识命中数", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
-    st.toggle("显示命中详情", key="obsidian_show_hits", on_change=save_draft)
-    wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
-    if st.session_state.get("obsidian_enabled"):
-        if wiki_root_preview:
-            st.caption(f"检测到 wiki 根目录：{wiki_root_preview}")
-        elif wiki_root_error:
-            st.caption(wiki_root_error)
 
     st.markdown("---")
     st.header("🗂️ 提示词管理中心")
