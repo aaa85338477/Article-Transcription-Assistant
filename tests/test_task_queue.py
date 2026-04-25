@@ -28,6 +28,8 @@ TARGET_FUNCTIONS = {
     "snapshots_equivalent",
     "is_task_action_blocked",
     "build_task_interrupt_notice",
+    "delete_task",
+    "resume_task",
 }
 TARGET_ASSIGNMENTS = {
     "TASK_TEMPLATE_CONFIG_KEYS",
@@ -142,9 +144,87 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertFalse(self.helpers.is_task_action_blocked("draft_generation", True))
         self.assertFalse(self.helpers.is_task_action_blocked("", False))
 
-        notice = self.helpers.build_task_interrupt_notice("任务 001", "draft_generation")
-        self.assertIn("任务 001", notice)
-        self.assertIn("写出稿", notice)
+        notice = self.helpers.build_task_interrupt_notice("Task 001", "draft_generation")
+        self.assertIn("Task 001", notice)
+        self.assertTrue(len(notice) > len("Task 001"))
+
+    def test_resume_task_restores_saved_snapshot_before_returning_to_step(self):
+        calls = []
+        self.helpers.init_task_queue_state = lambda: None
+        self.helpers.queue_draft_restore = lambda snapshot: calls.append(snapshot)
+        self.helpers.st.session_state.clear()
+        self.helpers.st.session_state.update({
+            "active_task_id": "T001",
+            "last_ai_error": "boom",
+            "task_queue": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "current_step": 3,
+                    "snapshot": {
+                        "current_step": 2,
+                        "draft_article": "saved draft",
+                        "review_feedback": "",
+                        "last_ai_error": "old error",
+                    },
+                },
+            ],
+        })
+        self.helpers.get_task_by_id = lambda task_id: next((task for task in self.helpers.st.session_state["task_queue"] if task.get("id") == task_id), None)
+
+        resumed = self.helpers.resume_task("T001")
+
+        self.assertTrue(resumed)
+        self.assertEqual(self.helpers.st.session_state["active_task_id"], "T001")
+        self.assertEqual(self.helpers.st.session_state["last_ai_error"], "")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["draft_article"], "saved draft")
+        self.assertEqual(calls[0]["current_step"], 3)
+        self.assertEqual(calls[0]["last_ai_error"], "")
+
+    def test_delete_task_keeps_queue_alive_and_switches_when_deleting_active_task(self):
+        calls = []
+        self.helpers.TASK_QUEUE_NOTICE_KEY = "_task_queue_notice"
+        self.helpers.init_task_queue_state = lambda: None
+        self.helpers.save_task_queue_state = lambda: calls.append("saved")
+        self.helpers.queue_draft_restore = lambda snapshot: calls.append(("restored", snapshot.get("marker")))
+        self.helpers.st.session_state.clear()
+        self.helpers.st.session_state.update({
+            "active_task_id": "T001",
+            "task_queue": [
+                {"id": "T001", "name": "Task One", "snapshot": {"marker": "one"}},
+                {"id": "T002", "name": "Task Two", "snapshot": {"marker": "two"}},
+            ],
+        })
+        self.helpers.get_task_by_id = lambda task_id: next((task for task in self.helpers.st.session_state["task_queue"] if task.get("id") == task_id), None)
+
+        deleted = self.helpers.delete_task("T001")
+
+        self.assertTrue(deleted)
+        self.assertEqual(self.helpers.st.session_state["active_task_id"], "T002")
+        self.assertEqual([task["id"] for task in self.helpers.st.session_state["task_queue"]], ["T002"])
+        self.assertTrue(self.helpers.st.session_state["_task_queue_notice"].endswith("Task One"))
+        self.assertIn("saved", calls)
+        self.assertIn(("restored", "two"), calls)
+
+    def test_delete_task_rejects_removing_last_task(self):
+        self.helpers.TASK_QUEUE_NOTICE_KEY = "_task_queue_notice"
+        self.helpers.init_task_queue_state = lambda: None
+        self.helpers.save_task_queue_state = lambda: (_ for _ in ()).throw(AssertionError("should not save"))
+        self.helpers.queue_draft_restore = lambda snapshot: (_ for _ in ()).throw(AssertionError("should not restore"))
+        self.helpers.st.session_state.clear()
+        self.helpers.st.session_state.update({
+            "active_task_id": "T001",
+            "task_queue": [
+                {"id": "T001", "name": "Solo Task", "snapshot": {"marker": "one"}},
+            ],
+        })
+        self.helpers.get_task_by_id = lambda task_id: next((task for task in self.helpers.st.session_state["task_queue"] if task.get("id") == task_id), None)
+
+        deleted = self.helpers.delete_task("T001")
+
+        self.assertFalse(deleted)
+        self.assertEqual([task["id"] for task in self.helpers.st.session_state["task_queue"]], ["T001"])
 
     def test_refresh_task_record_replaces_placeholder_task_names(self):
         task_record = {

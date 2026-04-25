@@ -16,6 +16,7 @@ import re
 import streamlit.components.v1 as components
 import base64
 import hashlib
+import textwrap
 from datetime import datetime
 import time
 import ctypes
@@ -719,9 +720,53 @@ def switch_to_task(task_id):
         persist_active_task_snapshot()
 
     st.session_state.active_task_id = task_id
-    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已切换到任务：{task_record.get('name', task_id)}"
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"???????{task_record.get('name', task_id)}"
     save_task_queue_state()
     queue_draft_restore(task_record.get("snapshot", {}))
+    return True
+
+
+def resume_task(task_id=""):
+    init_task_queue_state()
+    target_task_id = task_id or st.session_state.get("active_task_id", "")
+    task_record = get_task_by_id(target_task_id)
+    if not task_record:
+        return False
+
+    snapshot = clone_json_data(task_record.get("snapshot", {}))
+    target_step = int(task_record.get("current_step", snapshot.get("current_step", 1) or 1))
+    snapshot["current_step"] = target_step
+    snapshot["last_ai_error"] = ""
+    st.session_state.active_task_id = target_task_id
+    st.session_state.last_ai_error = ""
+    queue_draft_restore(snapshot)
+    return True
+
+
+def delete_task(task_id):
+    init_task_queue_state()
+    tasks = st.session_state.get("task_queue", []) or []
+    if len(tasks) <= 1:
+        return False
+
+    task_record = get_task_by_id(task_id)
+    if not task_record:
+        return False
+
+    remaining_tasks = [task for task in tasks if task.get("id") != task_id]
+    if len(remaining_tasks) == len(tasks):
+        return False
+
+    st.session_state.task_queue = remaining_tasks
+    active_task_id = st.session_state.get("active_task_id", "")
+    if active_task_id == task_id:
+        next_task = remaining_tasks[0] if remaining_tasks else None
+        st.session_state.active_task_id = next_task.get("id", "") if next_task else ""
+        if next_task:
+            queue_draft_restore(next_task.get("snapshot", {}))
+
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已删除任务：{task_record.get('name', task_id)}"
+    save_task_queue_state()
     return True
 
 
@@ -3051,6 +3096,8 @@ DEERAPI_MODEL_OPTIONS = [
 YUNWU_MODEL_OPTIONS = [
     "qwen3.6-plus",
     "qwen3.5-plus",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
     "kimi-k2.5",
     "gpt-5.4",
     "claude-opus-4-6",
@@ -3070,7 +3117,7 @@ DE_AI_MODEL_MIGRATION = {
     "deepseek-v3-1-terminus": "deepseek-v3.1",
     "deepseek-v3-2-exp": "deepseek-v3.2",
 }
-DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "qwen3.5-plus", "glm-5"]
+DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "deepseek-v4-flash", "deepseek-v4-pro", "qwen3.5-plus", "glm-5"]
 DE_AI_VARIANTS = ["普通版", "社区文章去AI版", "自然唠嗑版", "Humanizer-zh 版"]
 DE_AI_VARIANT_DEFAULT = DE_AI_VARIANTS[0]
 DE_AI_VARIANT_COMMUNITY = DE_AI_VARIANTS[1]
@@ -3524,6 +3571,7 @@ def render_highlighted_article_panel(html_text):
             border-radius: 0.4rem;
             background: rgba(54, 111, 214, 0.15);
             color: #1f57b8;
+            font-weight: 700;
         }
         .highlight-article .highlight-risk {
             display: inline;
@@ -3531,6 +3579,7 @@ def render_highlighted_article_panel(html_text):
             border-radius: 0.4rem;
             background: rgba(214, 76, 76, 0.14);
             color: #b3261e;
+            font-weight: 700;
         }
         </style>
         """,
@@ -4462,16 +4511,16 @@ def render_task_queue_panel():
     metrics = build_task_queue_metrics(tasks)
     pending_stage = str(st.session_state.get("pending_ai_stage", "") or "").strip()
 
-    render_section_intro("\u4efb\u52a1\u961f\u5217", "\u5c06\u5355\u7bc7\u5de5\u4f5c\u6d41\u5347\u7ea7\u4e3a\u53ef\u8fde\u7eed\u5904\u7406\u7684\u672c\u5730\u751f\u4ea7\u961f\u5217\u3002", "Queue")
+    render_section_intro("任务队列", "将单篇工作流升级为可连续处理的本地生产队列。", "Queue")
     with st.container(border=True):
         metric_cols = st.columns(6)
         metric_values = [
-            ("\u5168\u90e8", metrics.get("total", 0)),
-            ("\u5f85\u5904\u7406", metrics.get("pending", 0)),
-            ("\u8fdb\u884c\u4e2d", metrics.get("in_progress", 0)),
-            ("\u5f85\u4eba\u5de5\u786e\u8ba4", metrics.get("needs_review", 0)),
-            ("\u5df2\u5b8c\u6210", metrics.get("completed", 0)),
-            ("\u5931\u8d25", metrics.get("failed", 0)),
+            ("全部", metrics.get("total", 0)),
+            ("待处理", metrics.get("pending", 0)),
+            ("进行中", metrics.get("in_progress", 0)),
+            ("待人工确认", metrics.get("needs_review", 0)),
+            ("已完成", metrics.get("completed", 0)),
+            ("失败", metrics.get("failed", 0)),
         ]
         for col, (label, value) in zip(metric_cols, metric_values):
             with col:
@@ -4481,7 +4530,7 @@ def render_task_queue_panel():
         if pending_stage:
             st.warning(build_task_interrupt_notice(active_task.get("name", active_task_id), pending_stage))
             interrupt_confirmed = st.checkbox(
-                "\u6211\u786e\u8ba4\u5207\u6362\u5e76\u4e2d\u65ad\u5f53\u524d\u4efb\u52a1",
+                "我确认切换并中断当前任务",
                 key="task_queue_interrupt_confirm",
             )
         else:
@@ -4496,97 +4545,134 @@ def render_task_queue_panel():
         }
         current_index = task_options.index(active_task_id) if active_task_id in task_options else 0
 
-        switch_col, new_col, clone_col, resume_col = st.columns([2.8, 1.1, 1.2, 1.2])
-        with switch_col:
-            selected_task_id = st.selectbox(
-                "\u5207\u6362\u4efb\u52a1",
-                options=task_options,
-                index=current_index,
-                format_func=lambda task_id: task_labels.get(task_id, task_id),
-                key="task_queue_selected_id",
-            )
-        with new_col:
-            if st.button("\u65b0\u5efa\u7a7a\u767d", key="create_blank_task", use_container_width=True, disabled=task_action_blocked):
-                create_task_from_current_state(clone_current=False)
-                st.rerun()
-        with clone_col:
-            if st.button("\u590d\u5236\u5f53\u524d", key="clone_current_task", use_container_width=True, disabled=task_action_blocked):
-                create_task_from_current_state(clone_current=True)
-                st.rerun()
-        with resume_col:
-            resume_label = "\u7ee7\u7eed\u5904\u7406"
-            if active_task.get("status") == "failed":
-                resume_label = "\u5931\u8d25\u91cd\u8bd5"
-            if st.button(resume_label, key="resume_current_task", use_container_width=True):
-                st.session_state.last_ai_error = ""
-                go_to_step(int(active_task.get("current_step", 1) or 1))
-                st.rerun()
-
-        if selected_task_id != active_task_id:
-            action_col1, action_col2 = st.columns([1.2, 4])
-            with action_col1:
-                if st.button(
-                    "\u5207\u6362\u5230\u6240\u9009\u4efb\u52a1",
-                    key="switch_selected_task",
-                    type="primary",
-                    use_container_width=True,
-                    disabled=task_action_blocked,
-                ):
-                    switch_to_task(selected_task_id)
-                    st.rerun()
-            with action_col2:
-                if task_action_blocked:
-                    st.caption("\u8fd0\u884c\u4e2d\u4efb\u52a1\u9700\u8981\u5148\u52fe\u9009\u786e\u8ba4\uff0c\u624d\u80fd\u6267\u884c\u4f1a\u4e2d\u65ad\u5f53\u524d\u8c03\u7528\u7684\u64cd\u4f5c\u3002")
-                else:
-                    st.caption("\u5207\u6362\u540e\u4f1a\u5c06\u5f53\u524d\u7f16\u8f91\u72b6\u6001\u540c\u6b65\u5230\u6240\u9009\u4efb\u52a1\u3002")
-
-        st.caption(
-            f"\u5f53\u524d\u4efb\u52a1\uff1a{active_task.get('name', active_task_id)} | \u72b6\u6001\uff1a{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))} | "
-            f"Step {active_task.get('current_step', 1)} | \u6700\u8fd1\u66f4\u65b0\uff1a{active_task.get('updated_at', '')}"
+        selected_task_id = st.selectbox(
+            "切换任务",
+            options=task_options,
+            index=current_index,
+            format_func=lambda task_id: task_labels.get(task_id, task_id),
+            key="task_queue_selected_id",
         )
 
-        with st.expander("\u4efb\u52a1\u6a21\u677f", expanded=False):
-            template_save_col, template_name_col = st.columns([1.2, 2])
+        st.markdown(
+            "<p class='toolbar-note'>先定位任务，再决定是切换、派生新任务，还是沿当前步骤继续处理。</p>",
+            unsafe_allow_html=True,
+        )
+        render_context_strip([
+            f"当前任务：{active_task.get('name', active_task_id)}",
+            f"状态：{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))}",
+            f"Step {active_task.get('current_step', 1)}",
+            f"最近更新：{active_task.get('updated_at', '')}",
+        ])
+
+        switch_disabled = selected_task_id == active_task_id or task_action_blocked
+        action_cols = st.columns([1.15, 0.95, 0.95, 0.95, 0.92])
+        with action_cols[0]:
+            if st.button(
+                "切换到所选任务",
+                key="switch_selected_task",
+                type="primary",
+                use_container_width=True,
+                disabled=switch_disabled,
+            ):
+                switch_to_task(selected_task_id)
+                st.rerun()
+        with action_cols[1]:
+            if st.button("新建空白", key="create_blank_task", use_container_width=True, disabled=task_action_blocked):
+                create_task_from_current_state(clone_current=False)
+                st.rerun()
+        with action_cols[2]:
+            if st.button("复制当前", key="clone_current_task", use_container_width=True, disabled=task_action_blocked):
+                create_task_from_current_state(clone_current=True)
+                st.rerun()
+        with action_cols[3]:
+            resume_label = "继续处理"
+            if active_task.get("status") == "failed":
+                resume_label = "失败重试"
+            if st.button(resume_label, key="resume_current_task", use_container_width=True):
+                if resume_task(active_task_id):
+                    st.rerun()
+        with action_cols[4]:
+            delete_confirmed = st.session_state.get("task_queue_delete_confirm", False)
+            delete_disabled = task_action_blocked or len(tasks) <= 1 or not delete_confirmed
+            if st.button("删除任务", key="delete_selected_task", use_container_width=True, disabled=delete_disabled):
+                if delete_task(selected_task_id):
+                    st.session_state["task_queue_delete_confirm"] = False
+                    st.rerun()
+
+        if len(tasks) <= 1:
+            st.caption("队列里至少保留一个任务；如需重做当前条目，可以直接新建空白后再删除旧任务。")
+        else:
+            delete_target = task_labels.get(selected_task_id, selected_task_id)
+            confirm_label = f"确认删除所选任务：{delete_target}"
+            st.checkbox(confirm_label, key="task_queue_delete_confirm")
+
+        if selected_task_id != active_task_id:
+            if task_action_blocked:
+                st.caption("运行中任务需要先勾选确认，才能执行会中断当前调用的操作。")
+            else:
+                st.caption("切换后会将当前编辑状态同步到所选任务。")
+        else:
+            st.caption("当前已定位到正在编辑的任务，可以直接继续处理或新建旁支任务。")
+
+        with st.expander("任务模板", expanded=False):
+            st.caption("把常用配置存为模板，可以快速复用到后续任务。")
+            st.markdown("**保存为模板**")
+            template_name_col, template_save_col = st.columns([2.4, 1])
             with template_name_col:
-                template_name = st.text_input("\u6a21\u677f\u540d\u79f0", key="task_template_name_input", placeholder="\u4f8b\uff1a\u6807\u51c6\u6e38\u620f\u65b0\u95fb\u6d41\u7a0b")
+                template_name = st.text_input("模板名称", key="task_template_name_input", placeholder="例：标准游戏新闻流程")
             with template_save_col:
-                if st.button("\u4fdd\u5b58\u5f53\u524d\u914d\u7f6e", key="save_task_template", use_container_width=True):
+                st.caption(" ")
+                if st.button("保存当前配置", key="save_task_template", use_container_width=True):
                     saved_template_id = save_current_config_as_template(template_name)
                     if saved_template_id:
-                        st.session_state[TASK_QUEUE_NOTICE_KEY] = f"\u5df2\u4fdd\u5b58\u6a21\u677f\uff1a{template_name.strip()}"
+                        st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已保存模板：{template_name.strip()}"
                         st.rerun()
 
             templates = st.session_state.get("task_templates", []) or []
             if templates:
+                st.markdown("**应用已有模板**")
                 template_options = [item.get("id", "") for item in templates]
-                selected_template_id = st.selectbox(
-                    "\u9009\u62e9\u6a21\u677f",
-                    options=template_options,
-                    format_func=lambda template_id: next((item.get("name", template_id) for item in templates if item.get("id") == template_id), template_id),
-                    key="selected_task_template_id",
-                )
-                apply_targets = st.multiselect(
-                    "\u5e94\u7528\u5230\u4efb\u52a1",
-                    options=task_options,
-                    default=[active_task_id],
-                    format_func=lambda task_id: task_labels.get(task_id, task_id),
-                    key="task_template_apply_targets",
-                )
-                if st.button("\u5e94\u7528\u6a21\u677f", key="apply_task_template_btn", use_container_width=True, disabled=task_action_blocked):
-                    updated_count = apply_template_to_tasks(selected_template_id, apply_targets)
-                    if updated_count:
-                        st.session_state[TASK_QUEUE_NOTICE_KEY] = f"\u5df2\u5c06\u6a21\u677f\u5e94\u7528\u5230 {updated_count} \u4e2a\u4efb\u52a1"
-                        st.rerun()
-            else:
-                st.info("\u6682\u65f6\u8fd8\u6ca1\u6709\u4efb\u52a1\u6a21\u677f\uff0c\u53ef\u4ee5\u5148\u4fdd\u5b58\u4e00\u4e2a\u5e38\u7528\u914d\u7f6e\u3002")
+                render_context_strip([f"可用模板 {len(templates)} 个", "默认会勾选当前任务"])
+                template_picker_col, apply_targets_col = st.columns([1.2, 1.8])
+                with template_picker_col:
+                    selected_template_id = st.selectbox(
+                        "选择模板",
+                        options=template_options,
+                        format_func=lambda template_id: next((item.get("name", template_id) for item in templates if item.get("id") == template_id), template_id),
+                        key="selected_task_template_id",
+                    )
+                with apply_targets_col:
+                    apply_targets = st.multiselect(
+                        "应用到任务",
+                        options=task_options,
+                        default=[active_task_id],
+                        format_func=lambda task_id: task_labels.get(task_id, task_id),
+                        key="task_template_apply_targets",
+                    )
 
-        with st.expander("\u4efb\u52a1\u5217\u8868 / \u4ea4\u4ed8\u53f0", expanded=False):
-            filter_options = ["\u5168\u90e8", "\u5f85\u5904\u7406", "\u8fdb\u884c\u4e2d", "\u5f85\u4eba\u5de5\u786e\u8ba4", "\u5df2\u5b8c\u6210", "\u5931\u8d25"]
-            selected_filter = st.selectbox("\u7b5b\u9009\u72b6\u6001", filter_options, key="task_filter_status")
+                apply_action_col, apply_hint_col = st.columns([1, 2.2])
+                with apply_action_col:
+                    if st.button("应用模板", key="apply_task_template_btn", use_container_width=True, disabled=task_action_blocked):
+                        updated_count = apply_template_to_tasks(selected_template_id, apply_targets)
+                        if updated_count:
+                            st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已将模板应用到 {updated_count} 个任务"
+                            st.rerun()
+                with apply_hint_col:
+                    if task_action_blocked:
+                        st.caption("运行中任务需先确认中断，才能批量套用模板。")
+                    else:
+                        st.caption("模板只会更新配置项，不会覆盖已生成的成果。")
+            else:
+                st.info("暂时还没有任务模板，可以先保存一个常用配置。")
+
+        with st.expander("任务列表 / 交付台", expanded=False):
+            filter_options = ["全部", "待处理", "进行中", "待人工确认", "已完成", "失败"]
+            st.markdown("<p class='toolbar-note'>在这里快速筛选任务状态、检查产物完整度，并按完成项批量导出。</p>", unsafe_allow_html=True)
+            selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
             reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
             filtered_tasks = []
             for task in tasks:
-                if selected_filter == "\u5168\u90e8":
+                if selected_filter == "全部":
                     filtered_tasks.append(task)
                     continue
                 if task.get("status") == reverse_status_map.get(selected_filter):
@@ -4596,23 +4682,23 @@ def render_task_queue_panel():
                 metric_info = task.get("metrics", {}) or {}
                 artifact_flags = []
                 if metric_info.get("has_highlight"):
-                    artifact_flags.append("\u9ad8\u4eae\u7248")
+                    artifact_flags.append("高亮版")
                 if metric_info.get("has_podcast"):
-                    artifact_flags.append("\u64ad\u5ba2")
+                    artifact_flags.append("播客")
                 if metric_info.get("version_count"):
-                    artifact_flags.append(f"\u7248\u672c {metric_info.get('version_count')}")
-                artifact_text = " / ".join(artifact_flags) if artifact_flags else "\u6682\u65e0\u4ea7\u7269"
+                    artifact_flags.append(f"版本 {metric_info.get('version_count')}")
+                artifact_text = " / ".join(artifact_flags) if artifact_flags else "暂无产物"
                 st.markdown(
                     f"**{task.get('name', task.get('id', '??'))}**  \n"
-                    f"\u72b6\u6001\uff1a{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))} | "
-                    f"Step {task.get('current_step', 1)} | \u5b57\u6570\uff1a{metric_info.get('word_count', 0)} | {artifact_text} | \u66f4\u65b0\uff1a{task.get('updated_at', '')}"
+                    f"状态：{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))} | "
+                    f"Step {task.get('current_step', 1)} | 字数：{metric_info.get('word_count', 0)} | {artifact_text} | 更新：{task.get('updated_at', '')}"
                 )
 
             completed_tasks = [task for task in tasks if task.get("status") == "completed"]
             if completed_tasks:
                 completed_ids = [task.get("id", "") for task in completed_tasks]
                 selected_export_ids = st.multiselect(
-                    "\u9009\u62e9\u8981\u6279\u91cf\u5bfc\u51fa\u7684\u4efb\u52a1",
+                    "选择要批量导出的任务",
                     options=completed_ids,
                     format_func=lambda task_id: task_labels.get(task_id, task_id),
                     key="task_queue_export_ids",
@@ -4620,7 +4706,7 @@ def render_task_queue_panel():
                 export_targets = [task for task in completed_tasks if task.get("id") in selected_export_ids]
                 export_text = build_batch_export_markdown(export_targets)
                 st.download_button(
-                    "\u5bfc\u51fa Markdown \u5408\u96c6",
+                    "导出 Markdown 合集",
                     data=export_text.encode("utf-8"),
                     file_name=f"article-task-batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md",
                     mime="text/markdown",
@@ -4629,7 +4715,7 @@ def render_task_queue_panel():
                     key="download_task_batch_export",
                 )
             else:
-                st.caption("\u8fd8\u6ca1\u6709\u5df2\u5b8c\u6210\u7684\u4efb\u52a1\uff0c\u6682\u65f6\u65e0\u6cd5\u6279\u91cf\u5bfc\u51fa\u3002")
+                st.caption("还没有已完成的任务，暂时无法批量导出。")
 
 def go_to_step(step):
     st.session_state.current_step = step
@@ -4993,18 +5079,41 @@ def prepare_highlighted_html_for_clipboard(html_text):
     if not normalized:
         return ""
 
-    normalized = re.sub(
-        r'<span\s+class="highlight-positive">(.*?)</span>',
-        lambda match: '<span style="background-color:#d8e7ff;color:#1f57b8;font-weight:600;">{}</span>'.format(match.group(1)),
-        normalized,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    normalized = re.sub(
-        r'<span\s+class="highlight-risk">(.*?)</span>',
-        lambda match: '<span style="background-color:#fde1e1;color:#b3261e;font-weight:600;">{}</span>'.format(match.group(1)),
-        normalized,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    def replace_highlight_span(match, *, tone):
+        content = (match.group("content") or "").strip()
+        if not content:
+            return ""
+
+        if tone == "positive":
+            background = "#d8e7ff"
+            text_color = "#1f57b8"
+            border = "#9dbdff"
+        else:
+            background = "#fde1e1"
+            text_color = "#b3261e"
+            border = "#f3b2b2"
+
+        return (
+            f'<mark data-highlight-tone="{tone}" '
+            f'style="background:{background};color:{text_color};padding:0.08rem 0.3rem;'
+            f'border-radius:0.38rem;border:1px solid {border};font-weight:700;'
+            f'text-decoration:none;box-decoration-break:clone;-webkit-box-decoration-break:clone;">'
+            f'<strong style="color:{text_color};font-weight:700;">{content}</strong>'
+            f'</mark>'
+        )
+
+    highlight_patterns = {
+        "positive": re.compile(
+            r"<span\b(?=[^>]*\bclass\s*=\s*['\"][^'\"]*\bhighlight-positive\b[^'\"]*['\"])[^>]*>(?P<content>.*?)</span>",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+        "risk": re.compile(
+            r"<span\b(?=[^>]*\bclass\s*=\s*['\"][^'\"]*\bhighlight-risk\b[^'\"]*['\"])[^>]*>(?P<content>.*?)</span>",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
+    }
+    normalized = highlight_patterns["positive"].sub(lambda match: replace_highlight_span(match, tone="positive"), normalized)
+    normalized = highlight_patterns["risk"].sub(lambda match: replace_highlight_span(match, tone="risk"), normalized)
     normalized = re.sub(r'<h2>', '<h2 style="font-size:28px;line-height:1.35;font-weight:800;margin:0 0 16px 0;color:#16211c;">', normalized, flags=re.IGNORECASE)
     normalized = re.sub(r'<h3>', '<h3 style="font-size:22px;line-height:1.4;font-weight:700;margin:0 0 14px 0;color:#16211c;">', normalized, flags=re.IGNORECASE)
     normalized = re.sub(r'<p>', '<p style="margin:0 0 16px 0;line-height:1.9;color:#16211c;">', normalized, flags=re.IGNORECASE)
@@ -5594,7 +5703,6 @@ def render_stepper(current_step):
         ("定稿修订", "接收意见并形成最终版本"),
         ("分发工作台", "脚本、配图、导出与精修")
     ]
-    st.markdown('<section class="stepper">', unsafe_allow_html=True)
     columns = st.columns(len(step_meta))
     for idx, ((label, desc), col) in enumerate(zip(step_meta, columns), start=1):
         if idx < current_step:
@@ -5604,34 +5712,22 @@ def render_stepper(current_step):
         else:
             class_name = "stepper-item"
         with col:
-            st.markdown(
-                f"""
+            card_html = textwrap.dedent(f"""
                 <div class="{class_name}">
                     <div class="step-index">{idx}</div>
                     <span class="step-label">{label}</span>
                     <span class="step-desc">{desc}</span>
                 </div>
-                """,
-                unsafe_allow_html=True
-            )
-    st.markdown("</section>", unsafe_allow_html=True)
+            """).strip()
+            st.markdown(card_html, unsafe_allow_html=True)
 
 
 def render_section_intro(title, subtitle=None, eyebrow=None):
-    eyebrow_html = f'<div class="eyebrow">{eyebrow}</div>' if eyebrow else ""
-    subtitle_html = f'<p class="section-subtitle">{subtitle}</p>' if subtitle else ""
-    st.markdown(
-        f"""
-        <div class="section-head">
-            <div>
-                {eyebrow_html}
-                <h3 class="section-title">{title}</h3>
-                {subtitle_html}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    if eyebrow:
+        st.caption(eyebrow)
+    st.markdown(f"#### {title}")
+    if subtitle:
+        st.caption(subtitle)
 
 
 def render_context_strip(items):
@@ -5787,10 +5883,8 @@ render_task_queue_panel()
 
 # --- Step 1 ---
 if st.session_state.current_step == 1:
-    render_section_intro("素材输入中枢", "在同一界面批量汇聚文章链接、YouTube 链接与图片素材，统一进入后续的编辑与审稿流程。", "Step 01")
-
-    with st.container(border=True):
-        st.markdown("""<div class="mode-grid"><div class="mode-card"><strong>批量素材输入</strong><span>支持多篇文章和多个视频链接合并提取，适合做专题与深度整合。</span></div><div class="mode-card"><strong>两种工作流模式</strong><span>手动精调适合逐步把关，全自动驾驶适合快速直达定稿。</span></div><div class="mode-card"><strong>统一定稿工作台</strong><span>脚本、搜图、导出、飞书推送和精修助手都在最后一页集中处理。</span></div></div>""", unsafe_allow_html=True)
+    st.caption("STEP 01")
+    st.markdown("## 素材输入中枢")
 
     if should_offer_draft_restore():
         with st.container(border=True):
@@ -6449,7 +6543,7 @@ elif st.session_state.current_step == 5:
     current_editor_prompt = prompts_data["editors"].get(current_role, "") if current_role in prompts_data["editors"] else ""
     de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
     de_ai_button_suffix = (
-        "?????"
+        "（社区版）"
         if de_ai_variant == DE_AI_VARIANT_COMMUNITY
         else "（唠嗑版）"
         if de_ai_variant == DE_AI_VARIANT_CHAT
@@ -6538,7 +6632,7 @@ elif st.session_state.current_step == 5:
 
     de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
     de_ai_button_suffix = (
-        "?????"
+        "（社区版）"
         if de_ai_variant == DE_AI_VARIANT_COMMUNITY
         else "（唠嗑版）"
         if de_ai_variant == DE_AI_VARIANT_CHAT
@@ -6628,7 +6722,7 @@ elif st.session_state.current_step == 5:
                 st.session_state.final_article = build_structured_article_text(pure_titles, pure_article) or (de_ai_response or "").strip()
                 st.session_state.highlighted_article = highlighted_article
                 if de_ai_variant == DE_AI_VARIANT_COMMUNITY:
-                    de_ai_stage_label = "去AI味定稿（唠嗑版）"
+                    de_ai_stage_label = "去AI味定稿（社区版）"
                 elif de_ai_variant == DE_AI_VARIANT_CHAT:
                     de_ai_stage_label = "去AI味定稿（唠嗑版）"
                 elif de_ai_variant == DE_AI_VARIANT_HUMANIZER:

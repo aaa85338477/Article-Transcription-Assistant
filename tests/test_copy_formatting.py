@@ -61,13 +61,23 @@ class CopyFormattingTests(unittest.TestCase):
 
 
     def test_prepare_highlighted_html_for_clipboard_inlines_styles(self):
-        source = '<h2>??</h2><p>?? <span class="highlight-positive">???</span></p>'
+        source = '<h2>??</h2><p>?? <span class="highlight-positive">????</span></p>'
         html = self.helpers.prepare_highlighted_html_for_clipboard(source)
         self.assertIn('font-size:28px', html)
-        self.assertIn('background-color:#d8e7ff', html)
-        self.assertIn('???', html)
+        self.assertIn('data-highlight-tone="positive"', html)
+        self.assertIn('background:#d8e7ff', html)
+        self.assertIn('????', html)
+        self.assertIn('<strong style="color:#1f57b8;font-weight:700;">????</strong>', html)
         self.assertNotIn('', html)
         self.assertIn('<!--StartFragment-->', html)
+
+    def test_prepare_highlighted_html_for_clipboard_handles_single_quotes_and_extra_attrs(self):
+        source = "<p>?? <span data-id='1' class='tag highlight-risk extra'>?????</span></p>"
+        html = self.helpers.prepare_highlighted_html_for_clipboard(source)
+        self.assertIn('data-highlight-tone="risk"', html)
+        self.assertIn('background:#fde1e1', html)
+        self.assertIn('<strong style="color:#b3261e;font-weight:700;">?????</strong>', html)
+
 
     def test_markdown_to_editor_html_wraps_each_paragraph_as_block(self):
         source = "第一段第一行\n第一段第二行\n\n第二段 **加粗**"
