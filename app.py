@@ -18,7 +18,7 @@ import base64
 import hashlib
 import textwrap
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import ctypes
 try:
@@ -421,6 +421,36 @@ def get_template_by_id(template_id):
     return None
 
 
+def build_task_source_hosts(task_record):
+    snapshot = (task_record or {}).get("snapshot", {}) or {}
+    hosts = []
+    for field_name in ("article_url", "video_url"):
+        raw_value = str(snapshot.get(field_name, "") or "")
+        for item in [line.strip() for line in raw_value.splitlines() if line.strip()]:
+            host = urlparse(item).netloc.replace("www.", "").strip()
+            if host and host not in hosts:
+                hosts.append(host)
+    return hosts
+
+
+def build_task_search_haystack(task_record):
+    parts = [str((task_record or {}).get("name", "") or "").strip()]
+    parts.extend(build_task_source_hosts(task_record))
+    return " ".join(part.casefold() for part in parts if str(part or "").strip())
+
+
+def filter_tasks_by_query(tasks, query, status_filter=None):
+    clean_query = str(query or "").strip().casefold()
+    filtered = []
+    for task_record in tasks or []:
+        if status_filter and task_record.get("status") != status_filter:
+            continue
+        if clean_query and clean_query not in build_task_search_haystack(task_record):
+            continue
+        filtered.append(task_record)
+    return filtered
+
+
 def is_placeholder_task_name(task_name):
     clean_name = str(task_name or "").strip()
     if not clean_name:
@@ -464,6 +494,7 @@ def save_task_queue_state():
     queue_payload = {
         "active_task_id": st.session_state.get("active_task_id", ""),
         "tasks": clone_json_data(st.session_state.get("task_queue", [])),
+        "archived_tasks": clone_json_data(st.session_state.get("archived_task_queue", [])),
         "templates": clone_json_data(st.session_state.get("task_templates", [])),
     }
     with open(TASK_QUEUE_FILE, "w", encoding="utf-8") as file_obj:
@@ -475,19 +506,23 @@ def init_task_queue_state():
         return
 
     tasks = []
+    archived_tasks = []
     templates = []
     active_task_id = ""
     try:
         queue_data = read_task_queue_data() or {}
         tasks = [item for item in queue_data.get("tasks", []) if isinstance(item, dict)]
+        archived_tasks = [item for item in queue_data.get("archived_tasks", []) if isinstance(item, dict)]
         templates = [item for item in queue_data.get("templates", []) if isinstance(item, dict)]
         active_task_id = queue_data.get("active_task_id", "") or ""
     except Exception:
         tasks = []
+        archived_tasks = []
         templates = []
         active_task_id = ""
 
     normalized_tasks = []
+    normalized_archived_tasks = []
     queue_changed = False
     for task in tasks:
         original_name = task.get("name", "")
@@ -496,11 +531,20 @@ def init_task_queue_state():
         if task.get("name", "") != original_name:
             queue_changed = True
 
+    for task in archived_tasks:
+        original_name = task.get("name", "")
+        refresh_task_record(task)
+        normalized_archived_tasks.append(task)
+        if task.get("name", "") != original_name:
+            queue_changed = True
+
     st.session_state.task_queue = normalized_tasks
+    st.session_state.archived_task_queue = normalized_archived_tasks
     st.session_state.task_templates = templates
     st.session_state.active_task_id = active_task_id
     st.session_state._task_queue_loaded = True
-    if queue_changed:
+    archived_count = auto_archive_completed_tasks()
+    if queue_changed and not archived_count:
         save_task_queue_state()
 
 
@@ -780,6 +824,120 @@ def delete_task(task_id):
 
     st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已删除任务：{task_record.get('name', task_id)}"
     save_task_queue_state()
+    return True
+
+
+
+def bulk_delete_tasks(task_ids):
+    init_task_queue_state()
+    target_ids = {str(task_id or "").strip() for task_id in (task_ids or []) if str(task_id or "").strip()}
+    tasks = st.session_state.get("task_queue", []) or []
+    if not target_ids or not tasks:
+        return 0
+
+    removed_tasks = [task for task in tasks if task.get("id") in target_ids]
+    if not removed_tasks:
+        return 0
+
+    remaining_tasks = [task for task in tasks if task.get("id") not in target_ids]
+    restored_snapshot = None
+    active_task_id = st.session_state.get("active_task_id", "")
+
+    if not remaining_tasks:
+        blank_snapshot = build_blank_task_snapshot({})
+        blank_task_id = get_next_entity_id("T", tasks)
+        blank_task = {
+            "id": blank_task_id,
+            "name": build_task_fallback_name(blank_task_id),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        refresh_task_record(blank_task, blank_snapshot)
+        remaining_tasks = [blank_task]
+        st.session_state.active_task_id = blank_task_id
+        restored_snapshot = blank_snapshot
+    elif active_task_id in target_ids or not any(task.get("id") == active_task_id for task in remaining_tasks):
+        next_task = remaining_tasks[0]
+        st.session_state.active_task_id = next_task.get("id", "")
+        restored_snapshot = next_task.get("snapshot", {})
+
+    st.session_state.task_queue = remaining_tasks
+    if restored_snapshot is not None:
+        queue_draft_restore(restored_snapshot)
+
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已批量清理 {len(removed_tasks)} 个任务"
+    save_task_queue_state()
+    return len(removed_tasks)
+
+
+
+def auto_archive_completed_tasks(now=None, retention_days=7):
+    tasks = st.session_state.get("task_queue", []) or []
+    if not tasks:
+        return 0
+
+    now_dt = now or datetime.now()
+    archived_at = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = now_dt - timedelta(days=retention_days)
+    active_task_id = st.session_state.get("active_task_id", "")
+    archived_tasks = st.session_state.get("archived_task_queue", []) or []
+    remaining_tasks = []
+    moved_tasks = []
+
+    for task_record in tasks:
+        if task_record.get("id") == active_task_id or task_record.get("status") != "completed":
+            remaining_tasks.append(task_record)
+            continue
+        updated_at_text = str(task_record.get("updated_at", "") or "").strip()
+        try:
+            updated_at = datetime.strptime(updated_at_text, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            remaining_tasks.append(task_record)
+            continue
+        if updated_at > cutoff:
+            remaining_tasks.append(task_record)
+            continue
+
+        archived_record = clone_json_data(task_record)
+        archived_record["archived_at"] = archived_at
+        archived_record["archive_reason"] = "auto_completed_retention"
+        archived_tasks.append(archived_record)
+        moved_tasks.append(archived_record)
+
+    if not moved_tasks:
+        return 0
+
+    st.session_state.task_queue = remaining_tasks
+    st.session_state.archived_task_queue = archived_tasks
+    if active_task_id and not any(task.get("id") == active_task_id for task in remaining_tasks):
+        st.session_state.active_task_id = remaining_tasks[0].get("id", "") if remaining_tasks else ""
+
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已自动归档 {len(moved_tasks)} 个超过 {retention_days} 天的已完成任务"
+    save_task_queue_state()
+    return len(moved_tasks)
+
+
+
+def restore_archived_task(task_id):
+    init_task_queue_state()
+    archived_tasks = st.session_state.get("archived_task_queue", []) or []
+    archived_record = next((task for task in archived_tasks if task.get("id") == task_id), None)
+    if not archived_record:
+        return False
+
+    remaining_archived = [task for task in archived_tasks if task.get("id") != task_id]
+    restored_record = clone_json_data(archived_record)
+    restored_record.pop("archived_at", None)
+    restored_record.pop("archive_reason", None)
+    refresh_task_record(restored_record, restored_record.get("snapshot", {}))
+
+    tasks = st.session_state.get("task_queue", []) or []
+    tasks.append(restored_record)
+    st.session_state.task_queue = tasks
+    st.session_state.archived_task_queue = remaining_archived
+    st.session_state.active_task_id = restored_record.get("id", "")
+    save_task_queue_state()
+    queue_draft_restore(restored_record.get("snapshot", {}))
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已恢复归档任务：{restored_record.get('name', task_id)}"
     return True
 
 
@@ -3539,7 +3697,7 @@ def sanitize_highlighted_article(html_text):
         tag = match.group("tag")
         inner = match.group("inner") or ""
         inner = re.sub(r'</?span[^>]*?>', '', inner, flags=re.IGNORECASE)
-        normalized_tag = "h3" if str(tag).lower() == "h2" else tag
+        normalized_tag = str(tag).lower()
         return f"<{normalized_tag}>{inner}</{normalized_tag}>"
 
     clean_text = re.sub(
@@ -4737,6 +4895,8 @@ def init_state():
         st.session_state.evidence_signature = ""
     if 'task_queue' not in st.session_state or not isinstance(st.session_state.task_queue, list):
         st.session_state.task_queue = []
+    if 'archived_task_queue' not in st.session_state or not isinstance(st.session_state.archived_task_queue, list):
+        st.session_state.archived_task_queue = []
     if 'task_templates' not in st.session_state or not isinstance(st.session_state.task_templates, list):
         st.session_state.task_templates = []
     if 'active_task_id' not in st.session_state:
@@ -4744,9 +4904,13 @@ def init_state():
     if '_task_queue_loaded' not in st.session_state:
         st.session_state._task_queue_loaded = False
     if 'task_filter_status' not in st.session_state:
-        st.session_state.task_filter_status = "??"
+        st.session_state.task_filter_status = "全部"
+    if 'task_search_query' not in st.session_state:
+        st.session_state.task_search_query = ""
     if 'task_template_apply_targets' not in st.session_state:
         st.session_state.task_template_apply_targets = []
+    if 'task_queue_bulk_cleanup_confirm' not in st.session_state:
+        st.session_state.task_queue_bulk_cleanup_confirm = False
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -4859,6 +5023,7 @@ def render_task_queue_panel():
     if not tasks:
         return
 
+    archived_tasks = st.session_state.get("archived_task_queue", []) or []
     queue_notice = st.session_state.pop(TASK_QUEUE_NOTICE_KEY, "")
     if queue_notice:
         st.success(queue_notice)
@@ -4887,14 +5052,23 @@ def render_task_queue_panel():
         interrupt_confirmed = False
         if pending_stage:
             st.warning(build_task_interrupt_notice(active_task.get("name", active_task_id), pending_stage))
-            interrupt_confirmed = st.checkbox(
-                "我确认切换并中断当前任务",
-                key="task_queue_interrupt_confirm",
-            )
+            interrupt_confirmed = st.checkbox("我确认切换并中断当前任务", key="task_queue_interrupt_confirm")
         else:
             st.session_state["task_queue_interrupt_confirm"] = False
 
         task_action_blocked = is_task_action_blocked(pending_stage, interrupt_confirmed)
+        search_cols = st.columns([1.6, 1])
+        with search_cols[0]:
+            st.text_input("搜索任务（标题 / 站点）", key="task_search_query", placeholder="PocketGamer / gamigion / King")
+        with search_cols[1]:
+            filter_options = ["全部", "待处理", "进行中", "待人工确认", "已完成", "失败"]
+            selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
+
+        reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
+        selected_status_key = None if selected_filter == "全部" else reverse_status_map.get(selected_filter)
+        search_query = st.session_state.get("task_search_query", "")
+        filtered_tasks = filter_tasks_by_query(tasks, search_query, status_filter=selected_status_key)
+        filtered_archived_tasks = filter_tasks_by_query(archived_tasks, search_query)
 
         task_options = [task.get("id", "") for task in tasks]
         task_labels = {
@@ -4902,19 +5076,8 @@ def render_task_queue_panel():
             for task in tasks
         }
         current_index = task_options.index(active_task_id) if active_task_id in task_options else 0
+        selected_task_id = st.selectbox("切换任务", options=task_options, index=current_index, format_func=lambda task_id: task_labels.get(task_id, task_id), key="task_queue_selected_id")
 
-        selected_task_id = st.selectbox(
-            "切换任务",
-            options=task_options,
-            index=current_index,
-            format_func=lambda task_id: task_labels.get(task_id, task_id),
-            key="task_queue_selected_id",
-        )
-
-        st.markdown(
-            "<p class='toolbar-note'>先定位任务，再决定是切换、派生新任务，还是沿当前步骤继续处理。</p>",
-            unsafe_allow_html=True,
-        )
         render_context_strip([
             f"当前任务：{active_task.get('name', active_task_id)}",
             f"状态：{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))}",
@@ -4923,15 +5086,11 @@ def render_task_queue_panel():
         ])
 
         switch_disabled = selected_task_id == active_task_id or task_action_blocked
-        action_cols = st.columns([1.15, 0.95, 0.95, 0.95, 0.92])
+        cleanup_target_ids = [task.get("id", "") for task in tasks if task.get("status") in {"completed", "failed"}]
+        cleanup_count = len(cleanup_target_ids)
+        action_cols = st.columns([1.15, 0.9, 0.9, 0.9, 0.9, 1.15])
         with action_cols[0]:
-            if st.button(
-                "切换到所选任务",
-                key="switch_selected_task",
-                type="primary",
-                use_container_width=True,
-                disabled=switch_disabled,
-            ):
+            if st.button("切换到所选任务", key="switch_selected_task", type="primary", use_container_width=True, disabled=switch_disabled):
                 switch_to_task(selected_task_id)
                 st.rerun()
         with action_cols[1]:
@@ -4956,21 +5115,34 @@ def render_task_queue_panel():
                 if delete_task(selected_task_id):
                     st.session_state["task_queue_delete_confirm"] = False
                     st.rerun()
+        with action_cols[5]:
+            bulk_cleanup_confirmed = st.session_state.get("task_queue_bulk_cleanup_confirm", False)
+            bulk_cleanup_disabled = task_action_blocked or cleanup_count == 0 or not bulk_cleanup_confirmed
+            if st.button("批量清理已完成 / 失败", key="bulk_cleanup_tasks", use_container_width=True, disabled=bulk_cleanup_disabled):
+                removed_count = bulk_delete_tasks(cleanup_target_ids)
+                if removed_count:
+                    st.session_state["task_queue_bulk_cleanup_confirm"] = False
+                    st.rerun()
 
         if len(tasks) <= 1:
             st.caption("队列里至少保留一个任务；如需重做当前条目，可以直接新建空白后再删除旧任务。")
         else:
             delete_target = task_labels.get(selected_task_id, selected_task_id)
-            confirm_label = f"确认删除所选任务：{delete_target}"
-            st.checkbox(confirm_label, key="task_queue_delete_confirm")
+            st.checkbox(f"确认删除所选任务：{delete_target}", key="task_queue_delete_confirm")
+
+        if cleanup_count:
+            st.checkbox(f"确认批量清理主队列中的已完成 / 失败任务（{cleanup_count} 条）", key="task_queue_bulk_cleanup_confirm")
+        else:
+            st.session_state["task_queue_bulk_cleanup_confirm"] = False
+            st.caption("当前主队列里没有可批量清理的已完成 / 失败任务。")
 
         if selected_task_id != active_task_id:
             if task_action_blocked:
-                st.caption("运行中任务需要先勾选确认，才能执行会中断当前调用的操作。")
+                st.caption("运行中任务需要先勾选确认，才能执行会中断当前 AI 调用的操作。")
             else:
                 st.caption("切换后会将当前编辑状态同步到所选任务。")
         else:
-            st.caption("当前已定位到正在编辑的任务，可以直接继续处理或新建旁支任务。")
+            st.caption("当前已定位到正在编辑的任务，可以直接继续处理或新建支线任务。")
 
         with st.expander("任务模板", expanded=False):
             st.caption("把常用配置存为模板，可以快速复用到后续任务。")
@@ -4993,20 +5165,9 @@ def render_task_queue_panel():
                 render_context_strip([f"可用模板 {len(templates)} 个", "默认会勾选当前任务"])
                 template_picker_col, apply_targets_col = st.columns([1.2, 1.8])
                 with template_picker_col:
-                    selected_template_id = st.selectbox(
-                        "选择模板",
-                        options=template_options,
-                        format_func=lambda template_id: next((item.get("name", template_id) for item in templates if item.get("id") == template_id), template_id),
-                        key="selected_task_template_id",
-                    )
+                    selected_template_id = st.selectbox("选择模板", options=template_options, format_func=lambda template_id: next((item.get("name", template_id) for item in templates if item.get("id") == template_id), template_id), key="selected_task_template_id")
                 with apply_targets_col:
-                    apply_targets = st.multiselect(
-                        "应用到任务",
-                        options=task_options,
-                        default=[active_task_id],
-                        format_func=lambda task_id: task_labels.get(task_id, task_id),
-                        key="task_template_apply_targets",
-                    )
+                    apply_targets = st.multiselect("应用到任务", options=task_options, default=[active_task_id], format_func=lambda task_id: task_labels.get(task_id, task_id), key="task_template_apply_targets")
 
                 apply_action_col, apply_hint_col = st.columns([1, 2.2])
                 with apply_action_col:
@@ -5024,58 +5185,67 @@ def render_task_queue_panel():
                 st.info("暂时还没有任务模板，可以先保存一个常用配置。")
 
         with st.expander("任务列表 / 交付台", expanded=False):
-            filter_options = ["全部", "待处理", "进行中", "待人工确认", "已完成", "失败"]
-            st.markdown("<p class='toolbar-note'>在这里快速筛选任务状态、检查产物完整度，并按完成项批量导出。</p>", unsafe_allow_html=True)
-            selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
-            reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
-            filtered_tasks = []
-            for task in tasks:
-                if selected_filter == "全部":
-                    filtered_tasks.append(task)
-                    continue
-                if task.get("status") == reverse_status_map.get(selected_filter):
-                    filtered_tasks.append(task)
+            if search_query:
+                st.caption(f"当前搜索「{search_query}」，命中 {len(filtered_tasks)} 个主队列任务。")
+            else:
+                st.caption(f"当前主队列共 {len(filtered_tasks)} 个任务。")
 
-            for task in filtered_tasks:
-                metric_info = task.get("metrics", {}) or {}
-                artifact_flags = []
-                if metric_info.get("has_highlight"):
-                    artifact_flags.append("高亮版")
-                if metric_info.get("has_podcast"):
-                    artifact_flags.append("播客")
-                if metric_info.get("has_feishu_doc"):
-                    artifact_flags.append("\u98de\u4e66\u6587\u6863")
-                if metric_info.get("version_count"):
-                    artifact_flags.append(f"版本 {metric_info.get('version_count')}")
-                artifact_text = " / ".join(artifact_flags) if artifact_flags else "暂无产物"
-                st.markdown(
-                    f"**{task.get('name', task.get('id', '??'))}**  \n"
-                    f"状态：{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))} | "
-                    f"Step {task.get('current_step', 1)} | 字数：{metric_info.get('word_count', 0)} | {artifact_text} | 更新：{task.get('updated_at', '')}"
-                )
-
-            completed_tasks = [task for task in tasks if task.get("status") == "completed"]
+            if filtered_tasks:
+                for task in filtered_tasks:
+                    metric_info = task.get("metrics", {}) or {}
+                    source_hosts = build_task_source_hosts(task)
+                    source_label = source_hosts[0] if source_hosts else "\u672a\u8bbe\u7f6e\u7ad9\u70b9"
+                    artifact_flags = []
+                    if metric_info.get("has_highlight"):
+                        artifact_flags.append("\u9ad8\u4eae\u7248")
+                    if metric_info.get("has_podcast"):
+                        artifact_flags.append("\u64ad\u5ba2")
+                    if metric_info.get("has_feishu_doc"):
+                        artifact_flags.append("\u98de\u4e66\u6587\u6863")
+                    if metric_info.get("version_count"):
+                        artifact_flags.append(f"\u7248\u672c {metric_info.get('version_count')}")
+                    artifact_text = " / ".join(artifact_flags) if artifact_flags else "\u6682\u65e0\u4ea7\u7269"
+                    st.markdown(
+                        f"**{task.get('name', task.get('id', '??'))}**  \n"
+                        f"\u72b6\u6001\uff1a{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))} | "
+                        f"Step {task.get('current_step', 1)} | \u7ad9\u70b9\uff1a{source_label} | \u5b57\u6570\uff1a{metric_info.get('word_count', 0)} | {artifact_text} | \u66f4\u65b0\uff1a{task.get('updated_at', '')}"
+                    )
+            else:
+                st.info("\u5f53\u524d\u641c\u7d22\u6761\u4ef6\u4e0b\u6ca1\u6709\u547d\u4e2d\u7684\u4e3b\u961f\u5217\u4efb\u52a1\u3002")
+            completed_tasks = [task for task in filtered_tasks if task.get("status") == "completed"]
             if completed_tasks:
                 completed_ids = [task.get("id", "") for task in completed_tasks]
-                selected_export_ids = st.multiselect(
-                    "选择要批量导出的任务",
-                    options=completed_ids,
-                    format_func=lambda task_id: task_labels.get(task_id, task_id),
-                    key="task_queue_export_ids",
-                )
+                selected_export_ids = st.multiselect("选择要批量导出的任务", options=completed_ids, format_func=lambda task_id: task_labels.get(task_id, task_id), key="task_queue_export_ids")
                 export_targets = [task for task in completed_tasks if task.get("id") in selected_export_ids]
                 export_text = build_batch_export_markdown(export_targets)
-                st.download_button(
-                    "导出 Markdown 合集",
-                    data=export_text.encode("utf-8"),
-                    file_name=f"article-task-batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md",
-                    mime="text/markdown",
-                    disabled=not bool(export_targets),
-                    use_container_width=True,
-                    key="download_task_batch_export",
-                )
+                st.download_button("导出 Markdown 合集", data=export_text.encode("utf-8"), file_name=f"article-task-batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md", mime="text/markdown", disabled=not bool(export_targets), use_container_width=True, key="download_task_batch_export")
             else:
-                st.caption("还没有已完成的任务，暂时无法批量导出。")
+                st.caption("\u5f53\u524d\u641c\u7d22\u8303\u56f4\u91cc\u8fd8\u6ca1\u6709\u53ef\u6279\u91cf\u5bfc\u51fa\u7684\u5df2\u5b8c\u6210\u4efb\u52a1\u3002")
+
+        with st.expander(f"\u5386\u53f2\u5f52\u6863\uff08{len(archived_tasks)}\uff09", expanded=False):
+            st.caption("\u8d85\u8fc7 7 \u5929\u7684\u5df2\u5b8c\u6210\u4efb\u52a1\u4f1a\u81ea\u52a8\u79fb\u5165\u8fd9\u91cc\uff0c\u4fdd\u7559\u641c\u7d22\u4e0e\u6062\u590d\u80fd\u529b\u3002")
+            if search_query:
+                st.caption(f"\u5f53\u524d\u641c\u7d22\u300c{search_query}\u300d\uff0c\u547d\u4e2d {len(filtered_archived_tasks)} \u4e2a\u5f52\u6863\u4efb\u52a1\u3002")
+            if archived_tasks:
+                if filtered_archived_tasks:
+                    for task in filtered_archived_tasks:
+                        source_hosts = build_task_source_hosts(task)
+                        source_label = source_hosts[0] if source_hosts else "\u672a\u8bbe\u7f6e\u7ad9\u70b9"
+                        restore_col, meta_col = st.columns([0.85, 2.15])
+                        with restore_col:
+                            if st.button("\u6062\u590d\u5230\u4e3b\u961f\u5217", key=f"restore_archived_{task.get('id', '')}", use_container_width=True):
+                                if restore_archived_task(task.get("id", "")):
+                                    st.rerun()
+                        with meta_col:
+                            st.markdown(
+                                f"**{task.get('name', task.get('id', '??'))}**  \n"
+                                f"\u72b6\u6001\uff1a{TASK_STATUS_LABELS.get(task.get('status', 'pending'), task.get('status', 'pending'))} | \u7ad9\u70b9\uff1a{source_label} | "
+                                f"\u66f4\u65b0\uff1a{task.get('updated_at', '')} | \u5f52\u6863\uff1a{task.get('archived_at', '')}"
+                            )
+                else:
+                    st.info("\u5f53\u524d\u641c\u7d22\u6761\u4ef6\u4e0b\u6ca1\u6709\u547d\u4e2d\u7684\u5f52\u6863\u4efb\u52a1\u3002")
+            else:
+                st.caption("\u6682\u65f6\u8fd8\u6ca1\u6709\u5f52\u6863\u4efb\u52a1\u3002")
 
 def go_to_step(step):
     st.session_state.current_step = step
@@ -5086,7 +5256,6 @@ def sync_selected_source_images():
     all_images = st.session_state.get("source_images_all", [])
     if not isinstance(all_images, list):
         all_images = []
-
     raw_selected = st.session_state.get("selected_source_image_ids", [])
     normalized_selected = []
     seen_ids = set()
