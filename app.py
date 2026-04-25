@@ -733,7 +733,7 @@ def switch_to_task(task_id):
         persist_active_task_snapshot()
 
     st.session_state.active_task_id = task_id
-    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"???????{task_record.get('name', task_id)}"
+    st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已切换到任务：{task_record.get('name', task_id)}"
     save_task_queue_state()
     queue_draft_restore(task_record.get("snapshot", {}))
     return True
