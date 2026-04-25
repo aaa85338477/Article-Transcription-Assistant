@@ -17,6 +17,7 @@ import streamlit.components.v1 as components
 import base64
 import hashlib
 import textwrap
+import tomllib
 from datetime import datetime
 import time
 import ctypes
@@ -56,6 +57,8 @@ PROMPTS_FILE = PROMPTS_PATH_CANDIDATES[0]
 DRAFT_FILE = os.path.join(APP_DIR, "draft_state.json")
 TASK_QUEUE_FILE = os.path.join(APP_DIR, "task_queue_state.json")
 AI_DIAGNOSTIC_LOG = os.path.join(APP_DIR, "ai_diagnostics.log")
+FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
+FEISHU_DOC_URL_TEMPLATE = "https://feishu.cn/docx/{document_id}"
 PROMPTS_LOAD_REPORT = ""
 PENDING_DRAFT_RESTORE_KEY = "_pending_draft_restore"
 DRAFT_RESTORE_NOTICE_KEY = "_draft_restore_notice"
@@ -71,6 +74,7 @@ DRAFT_STATE_KEYS = [
     'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
     'source_images_all', 'selected_source_image_ids', 'article_versions',
     'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
+    'feishu_doc_url', 'feishu_doc_token', 'feishu_doc_title', 'feishu_published_at', 'feishu_publish_error',
     'de_ai_prompt_template', 'term_rules_enabled', 'term_rules_scope',
     'banned_terms_text', 'replacement_terms_text', 'default_replacement_terms_text',
     'suggested_replacement_terms_text', 'article_banned_terms_text', 'article_replacement_terms_text',
@@ -360,6 +364,7 @@ def build_task_metrics(task_snapshot):
         "version_count": len(snapshot.get("article_versions", []) or []),
         "has_highlight": bool((snapshot.get("highlighted_article") or "").strip()),
         "has_podcast": bool((snapshot.get("podcast_script_raw") or "").strip() or (snapshot.get("podcast_audio_path") or "").strip()),
+        "has_feishu_doc": bool((snapshot.get("feishu_doc_url") or "").strip()),
     }
 
 
@@ -545,6 +550,11 @@ def build_blank_task_snapshot(base_snapshot=None):
         "podcast_audio_path": "",
         "podcast_audio_manifest": {},
         "podcast_last_error": "",
+        "feishu_doc_url": "",
+        "feishu_doc_token": "",
+        "feishu_doc_title": "",
+        "feishu_published_at": "",
+        "feishu_publish_error": "",
         "chat_history": [],
         "image_keywords": "",
         "article_versions": [],
@@ -593,6 +603,9 @@ def draft_has_meaningful_content(draft_data):
         "spoken_script",
         "podcast_script_raw",
         "image_keywords",
+        "feishu_doc_url",
+        "feishu_doc_title",
+        "feishu_publish_error",
         "obsidian_research_brief",
     )
     for key in text_keys:
@@ -3494,7 +3507,7 @@ def sanitize_highlighted_article(html_text):
     clean_text = clean_text.replace("onclick=", "data-onclick=")
     clean_text = clean_text.replace("onload=", "data-onload=")
     clean_text = clean_text.replace("&#x1F517;", "")
-    clean_text = clean_text.replace("\U0001F517", "")
+    clean_text = clean_text.replace("🔗", "")
 
     normalized_lines = []
     for raw_line in clean_text.splitlines():
@@ -3502,7 +3515,7 @@ def sanitize_highlighted_article(html_text):
         heading_match = re.match(r"^(#{2,3})\s+(.+)$", stripped)
         if heading_match:
             level = len(heading_match.group(1))
-            heading_text = heading_match.group(2).replace("\U0001F517", "")
+            heading_text = heading_match.group(2).replace("🔗", "")
             heading_text = re.sub(r"\s*#+\s*$", "", heading_text).strip()
             normalized_lines.append(f"<h{level}>{heading_text}</h{level}>")
         else:
@@ -3518,6 +3531,20 @@ def sanitize_highlighted_article(html_text):
     clean_text = re.sub(
         r'<a[^>]*?href="#.*?"[^>]*>.*?</a>',
         "",
+        clean_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    def unwrap_heading_highlights(match):
+        tag = match.group("tag")
+        inner = match.group("inner") or ""
+        inner = re.sub(r'</?span[^>]*?>', '', inner, flags=re.IGNORECASE)
+        normalized_tag = "h3" if str(tag).lower() == "h2" else tag
+        return f"<{normalized_tag}>{inner}</{normalized_tag}>"
+
+    clean_text = re.sub(
+        r'<(?P<tag>h2|h3)>(?P<inner>.*?)</(?P=tag)>',
+        unwrap_heading_highlights,
         clean_text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -3721,6 +3748,327 @@ def push_to_feishu(article_text, script_text=None):
             return False, f"HTTP 请求失败，状态码: {response.status_code}"
     except Exception as e:
         return False, f"请求发生异常: {str(e)}"
+
+
+
+def get_feishu_config_value(key, default=""):
+    value = os.environ.get(key, "")
+    if str(value or "").strip():
+        return str(value).strip()
+
+    try:
+        secret_value = st.secrets.get(key, default)
+    except Exception:
+        secret_value = default
+    if str(secret_value or "").strip():
+        return str(secret_value).strip()
+
+    try:
+        secrets_path = Path(APP_DIR) / ".streamlit" / "secrets.toml"
+        if secrets_path.exists():
+            secret_text = secrets_path.read_text(encoding="utf-8-sig")
+            secret_data = tomllib.loads(secret_text)
+            file_value = secret_data.get(key, default)
+            if str(file_value or "").strip():
+                return str(file_value).strip()
+    except Exception:
+        pass
+
+    return str(default or "").strip()
+
+
+def build_feishu_doc_title(article_text, title_candidates=None, fallback_title="\u6587\u7ae0\u5b9a\u7a3f"):
+    titles = normalize_title_candidates(title_candidates or [])
+    if not titles:
+        titles, _ = split_structured_article_sections(article_text)
+    if titles:
+        return titles[0][:120]
+
+    body_text = get_article_body_text(article_text)
+    for line in str(body_text or "").splitlines():
+        clean_line = re.sub(r"^#+\s*", "", line).strip()
+        if clean_line:
+            return clean_line[:120]
+
+    active_task = get_task_by_id(st.session_state.get("active_task_id", ""))
+    if active_task:
+        return str(active_task.get("name", fallback_title) or fallback_title)[:120]
+    return fallback_title
+
+
+def feishu_html_to_plain_text(html_text):
+    clean_html = sanitize_highlighted_article(html_text or "")
+    if not clean_html.strip():
+        return ""
+
+    text_value = re.sub(r"<br\s*/?>", "\n", clean_html, flags=re.IGNORECASE)
+    text_value = re.sub(r"</(p|div|h1|h2|h3|li)>", "\n", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"<[^>]+>", "", text_value)
+    text_value = html_lib.unescape(text_value)
+    text_value = text_value.replace("\r\n", "\n").replace("\r", "\n")
+    text_value = re.sub(r"\n{3,}", "\n\n", text_value)
+    return text_value.strip()
+
+
+def build_feishu_elements_from_html(fragment, force_bold=False):
+    html_fragment = str(fragment or "")
+    if not html_fragment.strip():
+        return []
+
+    token_pattern = re.compile(
+        r'(<span\b[^>]*class\s*=\s*["\'][^"\']*(?:highlight-positive|highlight-risk)[^"\']*["\'][^>]*>.*?</span>|<strong>.*?</strong>)',
+        re.IGNORECASE | re.DOTALL,
+    )
+    class_pattern = re.compile(r'class\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+    parts = token_pattern.split(html_fragment)
+    elements = []
+
+    for part in parts:
+        if not part:
+            continue
+        style = {"bold": True} if force_bold else {}
+        content = part
+        if re.match(r'^<strong>.*</strong>$', part, flags=re.IGNORECASE | re.DOTALL):
+            content = re.sub(r'^<strong>|</strong>$', '', part, flags=re.IGNORECASE)
+            style["bold"] = True
+        elif re.match(r'^<span\b', part, flags=re.IGNORECASE):
+            class_match = class_pattern.search(part)
+            class_text = class_match.group(1) if class_match else ""
+            content = re.sub(r'^<span[^>]*>|</span>$', '', part, flags=re.IGNORECASE)
+            if "highlight-positive" in class_text:
+                style.update({"bold": True, "text_color": 5, "background_color": 5})
+            elif "highlight-risk" in class_text:
+                style.update({"bold": True, "text_color": 1, "background_color": 1})
+        content = re.sub(r'<[^>]+>', '', content)
+        content = html_lib.unescape(content)
+        if not content:
+            continue
+        elements.append({
+            "text_run": {
+                "content": content,
+                "text_element_style": style,
+            }
+        })
+    return elements
+
+
+def build_feishu_blocks_from_highlighted_html(html_text):
+    clean_html = sanitize_highlighted_article(html_text or "")
+    if not clean_html.strip():
+        return []
+
+    block_pattern = re.compile(r'<(?P<tag>h2|h3|p)>(?P<inner>.*?)</(?P=tag)>', re.IGNORECASE | re.DOTALL)
+    blocks = []
+    for match in block_pattern.finditer(clean_html):
+        tag = (match.group('tag') or '').lower()
+        inner = (match.group('inner') or '').strip()
+        if not inner:
+            continue
+        if tag == 'h2':
+            blocks.append({
+                "block_type": 4,
+                "heading2": {"elements": build_feishu_elements_from_html(inner)},
+            })
+        elif tag == 'h3':
+            blocks.append({
+                "block_type": 5,
+                "heading3": {"elements": build_feishu_elements_from_html(inner)},
+            })
+        else:
+            blocks.append({
+                "block_type": 2,
+                "text": {"elements": build_feishu_elements_from_html(inner)},
+            })
+    return blocks
+
+
+def build_feishu_text_elements(text, force_bold=False):
+    source_text = str(text or "")
+    if not source_text:
+        return []
+
+    parts = re.split(r"(\*\*.*?\*\*)", source_text)
+    elements = []
+    for part in parts:
+        if not part:
+            continue
+        is_bold = force_bold
+        content = part
+        if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+            content = part[2:-2]
+            is_bold = True
+        if not content:
+            continue
+        style = {"bold": True} if is_bold else {}
+        elements.append({
+            "text_run": {
+                "content": content,
+                "text_element_style": style,
+            }
+        })
+    return elements
+
+
+def make_feishu_block(block_kind, text, force_bold=False):
+    block_specs = {
+        "text": (2, "text"),
+        "heading1": (3, "heading1"),
+        "heading2": (4, "heading2"),
+        "heading3": (5, "heading3"),
+    }
+    block_type, payload_key = block_specs[block_kind]
+    return {
+        "block_type": block_type,
+        payload_key: {
+            "elements": build_feishu_text_elements(text, force_bold=force_bold),
+        },
+    }
+
+
+def build_feishu_doc_blocks(article_text, highlighted_html=""):
+    title_candidates, article_body = split_structured_article_sections(article_text)
+    resolved_titles = normalize_title_candidates(title_candidates)
+    article_body = (article_body or article_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    blocks = []
+
+    def flush_paragraph(buffer):
+        clean_lines = [line.strip() for line in buffer if str(line or "").strip()]
+        if clean_lines:
+            blocks.append(make_feishu_block("text", "\n".join(clean_lines)))
+
+    if resolved_titles:
+        blocks.append(make_feishu_block("heading2", "\u5907\u9009\u6807\u9898"))
+        for idx, title in enumerate(resolved_titles, start=1):
+            blocks.append(make_feishu_block("text", f"{idx}. {title}"))
+
+    paragraph_buffer = []
+    for raw_line in article_body.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph(paragraph_buffer)
+            paragraph_buffer = []
+            continue
+        if line.startswith("### "):
+            flush_paragraph(paragraph_buffer)
+            paragraph_buffer = []
+            blocks.append(make_feishu_block("heading3", line[4:].strip()))
+            continue
+        if line.startswith("## "):
+            flush_paragraph(paragraph_buffer)
+            paragraph_buffer = []
+            blocks.append(make_feishu_block("heading2", line[3:].strip()))
+            continue
+        paragraph_buffer.append(raw_line.rstrip())
+    flush_paragraph(paragraph_buffer)
+
+    highlight_blocks = build_feishu_blocks_from_highlighted_html(highlighted_html)
+    if highlight_blocks:
+        blocks.append(make_feishu_block("heading2", "\u9ad8\u4eae\u91cd\u70b9"))
+        blocks.extend(highlight_blocks)
+
+    return blocks
+
+
+def get_feishu_tenant_access_token():
+    app_id = get_feishu_config_value("FEISHU_APP_ID")
+    app_secret = get_feishu_config_value("FEISHU_APP_SECRET")
+    if not app_id or not app_secret:
+        return False, "", "\u672a\u914d\u7f6e FEISHU_APP_ID \u6216 FEISHU_APP_SECRET\u3002"
+
+    try:
+        response = requests.post(
+            f"{FEISHU_API_BASE}/auth/v3/tenant_access_token/internal",
+            json={"app_id": app_id, "app_secret": app_secret},
+            timeout=20,
+        )
+    except Exception as exc:
+        return False, "", f"\u98de\u4e66\u9274\u6743\u8bf7\u6c42\u5931\u8d25\uff1a{exc}"
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+
+    if response.status_code != 200 or payload.get("code") != 0:
+        error_msg = payload.get("msg") or response.text or f"HTTP {response.status_code}"
+        return False, "", f"\u98de\u4e66\u9274\u6743\u5931\u8d25\uff1a{error_msg}"
+
+    token = str(payload.get("tenant_access_token", "") or "").strip()
+    if not token:
+        return False, "", "\u98de\u4e66\u9274\u6743\u5931\u8d25\uff1a\u672a\u8fd4\u56de tenant_access_token\u3002"
+    return True, token, ""
+
+
+def feishu_open_api_request(path, *, access_token, payload=None, method="POST", timeout=20):
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {access_token}"}
+    response = requests.request(method, f"{FEISHU_API_BASE}{path}", headers=headers, json=payload, timeout=timeout)
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    if response.status_code != 200 or data.get("code") != 0:
+        error_msg = data.get("msg") or response.text or f"HTTP {response.status_code}"
+        raise RuntimeError(error_msg)
+    return data.get("data", {})
+
+
+def create_feishu_doc(title, folder_token=None, access_token=""):
+    payload = {"title": title}
+    if folder_token:
+        payload["folder_token"] = folder_token
+    data = feishu_open_api_request(
+        "/docx/v1/documents",
+        access_token=access_token,
+        payload=payload,
+    )
+    document = data.get("document") or data
+    document_id = str(document.get("document_id") or document.get("document_token") or "").strip()
+    if not document_id:
+        raise RuntimeError("\u98de\u4e66\u521b\u5efa\u6587\u6863\u6210\u529f\uff0c\u4f46\u672a\u8fd4\u56de document_id\u3002")
+    return {
+        "document_id": document_id,
+        "url": str(document.get("url") or FEISHU_DOC_URL_TEMPLATE.format(document_id=document_id)).strip(),
+        "title": str(document.get("title") or title).strip(),
+    }
+
+
+def append_blocks_to_feishu_doc(document_id, blocks, access_token=""):
+    if not blocks:
+        return {}
+    return feishu_open_api_request(
+        f"/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+        access_token=access_token,
+        payload={"children": blocks},
+    )
+
+
+def publish_article_to_feishu_doc(article_text, *, title_candidates=None, highlighted_html=""):
+    article_body = get_article_body_text(article_text).strip()
+    if not article_body:
+        return False, {}, "\u5f53\u524d\u6ca1\u6709\u53ef\u53d1\u5e03\u7684\u5b9a\u7a3f\u5185\u5bb9\u3002"
+
+    success, tenant_access_token, error_msg = get_feishu_tenant_access_token()
+    if not success:
+        return False, {}, error_msg
+
+    folder_token = get_feishu_config_value("FEISHU_FOLDER_TOKEN")
+    title = build_feishu_doc_title(article_text, title_candidates=title_candidates)
+
+    try:
+        document_meta = create_feishu_doc(title, folder_token=folder_token, access_token=tenant_access_token)
+        blocks = build_feishu_doc_blocks(article_text, highlighted_html=highlighted_html)
+        append_blocks_to_feishu_doc(document_meta["document_id"], blocks, access_token=tenant_access_token)
+    except Exception as exc:
+        return False, {}, f"\u98de\u4e66\u4e91\u6587\u6863\u53d1\u5e03\u5931\u8d25\uff1a{exc}"
+
+    published_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return True, {
+        "feishu_doc_url": document_meta["url"],
+        "feishu_doc_token": document_meta["document_id"],
+        "feishu_doc_title": document_meta["title"],
+        "feishu_published_at": published_at,
+        "feishu_publish_error": "",
+    }, ""
 
 # ==========================================
 # 2. 核心抓取函数
@@ -4230,6 +4578,16 @@ def init_state():
         st.session_state.highlighted_article = ""
     if 'spoken_script' not in st.session_state:
         st.session_state.spoken_script = ""
+    if 'feishu_doc_url' not in st.session_state:
+        st.session_state.feishu_doc_url = ""
+    if 'feishu_doc_token' not in st.session_state:
+        st.session_state.feishu_doc_token = ""
+    if 'feishu_doc_title' not in st.session_state:
+        st.session_state.feishu_doc_title = ""
+    if 'feishu_published_at' not in st.session_state:
+        st.session_state.feishu_published_at = ""
+    if 'feishu_publish_error' not in st.session_state:
+        st.session_state.feishu_publish_error = ""
     if 'de_ai_model' not in st.session_state:
         st.session_state.de_ai_model = DE_AI_MODELS[0]
     else:
@@ -4685,6 +5043,8 @@ def render_task_queue_panel():
                     artifact_flags.append("高亮版")
                 if metric_info.get("has_podcast"):
                     artifact_flags.append("播客")
+                if metric_info.get("has_feishu_doc"):
+                    artifact_flags.append("\u98de\u4e66\u6587\u6863")
                 if metric_info.get("version_count"):
                     artifact_flags.append(f"版本 {metric_info.get('version_count')}")
                 artifact_text = " / ".join(artifact_flags) if artifact_flags else "暂无产物"
@@ -7069,35 +7429,71 @@ elif st.session_state.current_step == 6:
             return bio.getvalue()
             
         docx_data = create_docx(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
-        
-        btn_col1, btn_col2, btn_col3 = st.columns(3)
+
+        feishu_doc_url = (st.session_state.get("feishu_doc_url", "") or "").strip()
+        feishu_doc_title = (st.session_state.get("feishu_doc_title", "") or "").strip()
+        feishu_published_at = (st.session_state.get("feishu_published_at", "") or "").strip()
+        feishu_publish_error = (st.session_state.get("feishu_publish_error", "") or "").strip()
+        if feishu_doc_url:
+            st.success("\u5df2\u53d1\u5e03\u98de\u4e66\u4e91\u6587\u6863\u3002")
+            st.markdown(f"[\u6253\u5f00\u98de\u4e66\u6587\u6863]({feishu_doc_url})")
+            if feishu_doc_title:
+                st.caption(f"\u6587\u6863\u6807\u9898\uff1a{feishu_doc_title}")
+            if feishu_published_at:
+                st.caption(f"\u6700\u8fd1\u53d1\u5e03\u65f6\u95f4\uff1a{feishu_published_at}")
+        elif feishu_publish_error:
+            st.warning(f"\u6700\u8fd1\u4e00\u6b21\u98de\u4e66\u4e91\u6587\u6863\u53d1\u5e03\u5931\u8d25\uff1a{feishu_publish_error}")
+
+        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
         with btn_col1:
              st.download_button(
-                label="📄 导出 Word 文档" if not st.session_state.spoken_script else "📄 导出图文与脚本(Word)",
+                label="\u5bfc\u51fa Word \u6587\u6863" if not st.session_state.spoken_script else "\u5bfc\u51fa\u56fe\u6587\u4e0e\u811a\u672c",
                 data=docx_data,
-                file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号与短视频脚本_定稿.docx",
+                file_name="\u516c\u4f17\u53f7\u6587\u7ae0_\u5b9a\u7a3f.docx" if not st.session_state.spoken_script else "\u516c\u4f17\u53f7\u56fe\u6587\u4e0e\u811a\u672c_\u5b9a\u7a3f.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True
             )
-            
+
         with btn_col2:
-            if st.button("✈️ 推送通知到飞书群", use_container_width=True):
-                with st.spinner("正在推送到飞书..."):
+            if st.button("\u53d1\u5e03\u5230\u98de\u4e66\u4e91\u6587\u6863", use_container_width=True):
+                with st.spinner("\u6b63\u5728\u53d1\u5e03\u5230\u98de\u4e66\u4e91\u6587\u6863..."):
+                    success, metadata, msg = publish_article_to_feishu_doc(
+                        display_final_article,
+                        title_candidates=st.session_state.get("title_candidates", []),
+                        highlighted_html=st.session_state.get("highlighted_article", ""),
+                    )
+                    if success:
+                        for field_name, field_value in metadata.items():
+                            st.session_state[field_name] = field_value
+                        save_draft()
+                        persist_active_task_snapshot()
+                        notify_step_completed()
+                        st.success(f"\u98de\u4e66\u4e91\u6587\u6863\u521b\u5efa\u6210\u529f\uff1a{metadata.get('feishu_doc_title', '\u65b0\u6587\u6863')}")
+                        if metadata.get("feishu_doc_url"):
+                            st.markdown(f"[\u6253\u5f00\u98de\u4e66\u6587\u6863]({metadata.get('feishu_doc_url')})")
+                    else:
+                        st.session_state.feishu_publish_error = msg
+                        save_draft()
+                        persist_active_task_snapshot()
+                        st.error(msg)
+
+        with btn_col3:
+            if st.button("\u63a8\u9001\u5230\u98de\u4e66\u7fa4", use_container_width=True):
+                with st.spinner("\u6b63\u5728\u63a8\u9001\u5230\u98de\u4e66..."):
                     success, msg = push_to_feishu(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                     if success:
-                        st.success("🎉 飞书推送成功！")
+                        st.success("\U0001f389 \u98de\u4e66\u63a8\u9001\u6210\u529f\uff01")
                         notify_step_completed()
                     else:
-                        st.error(f"❌ 推送失败：{msg}")
-                            
-        with btn_col3:
-            if st.button("🔄 开启新一篇工作流", use_container_width=True):
+                        st.error(f"\u274c \u63a8\u9001\u5931\u8d25\uff1a{msg}")
+
+        with btn_col4:
+            if st.button("\u65b0\u5efa\u4e0b\u4e00\u7bc7\u4efb\u52a1", use_container_width=True):
                 clear_draft()
                 create_task_from_current_state(clone_current=False)
                 st.rerun()
 
 
-    
     with right_col:
         should_show_evidence_map = bool(
             (st.session_state.get("final_article", "") or "").strip()

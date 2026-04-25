@@ -30,8 +30,23 @@ function Get-PortProcess {
     return $null
 }
 
+function Get-AppProcesses {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        ($_.CommandLine -or "") -like ("*" + $appFile + "*") -and
+        ($_.CommandLine -or "") -like "*streamlit run*"
+    }
+}
+
 if (-not (Test-Path $python)) {
     throw "Python executable not found: $python"
+}
+
+$currentAppProcesses = @(Get-AppProcesses)
+foreach ($process in $currentAppProcesses) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+}
+if ($currentAppProcesses.Count -gt 0) {
+    Start-Sleep -Seconds 1
 }
 
 $existingProcess = Get-PortProcess -TargetPort $port
@@ -46,16 +61,14 @@ if ($existingProcess -and (($existingProcess.CommandLine -or "") -notlike ("*" +
     Start-Sleep -Seconds 1
 }
 
-if (-not (Test-AppReady -TargetUrl $url)) {
-    $streamlitArgs = "-m streamlit run `"$appFile`" --server.headless true --server.port $port --browser.gatherUsageStats false"
-    Start-Process -FilePath $python -ArgumentList $streamlitArgs -WorkingDirectory $repo | Out-Null
+$streamlitArgs = "-m streamlit run `"$appFile`" --server.headless true --server.port $port --browser.gatherUsageStats false"
+Start-Process -FilePath $python -ArgumentList $streamlitArgs -WorkingDirectory $repo | Out-Null
 
-    for ($i = 0; $i -lt 30; $i++) {
-        if (Test-AppReady -TargetUrl $url) {
-            break
-        }
-        Start-Sleep -Seconds 1
+for ($i = 0; $i -lt 30; $i++) {
+    if (Test-AppReady -TargetUrl $url) {
+        break
     }
+    Start-Sleep -Seconds 1
 }
 
 if (Test-AppReady -TargetUrl $url) {
