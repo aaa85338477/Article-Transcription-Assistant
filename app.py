@@ -3564,6 +3564,146 @@ def extract_de_ai_raw_title_candidates(response_text):
     return parse_de_ai_raw_title_candidates(response_text)
 
 
+def build_preserved_highlighted_html(article_body, title_candidates=None, highlighted_text=""):
+    clean_body = (article_body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not clean_body:
+        return ""
+
+    def escape_html(text):
+        return (
+            str(text or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;")
+        )
+
+    def normalize_plain_text(text):
+        normalized = (text or "").strip()
+        if not normalized:
+            return ""
+        normalized = re.sub(r"<\s*br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"</\s*(p|div|h1|h2|h3|li)\s*>", "\n\n", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"<\s*li\b[^>]*>", "- ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"<[^>]+>", "", normalized)
+        normalized = (
+            normalized
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+        )
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def tokenize(text):
+        return set(re.findall(r"[A-Za-z]{3,}|[\u4E00-\u9FFF]{2,}", str(text or "").casefold()))
+
+    def extract_highlight_cues(html_text):
+        cue_patterns = [
+            ("risk", re.compile(r'<span\b(?=[^>]*\bclass\s*=\s*["\'][^"\']*\bhighlight-risk\b[^"\']*["\'])[^>]*>(?P<content>.*?)</span>', re.IGNORECASE | re.DOTALL)),
+            ("positive", re.compile(r'<span\b(?=[^>]*\bclass\s*=\s*["\'][^"\']*\bhighlight-positive\b[^"\']*["\'])[^>]*>(?P<content>.*?)</span>', re.IGNORECASE | re.DOTALL)),
+            ("positive", re.compile(r'<strong>(?P<content>.*?)</strong>', re.IGNORECASE | re.DOTALL)),
+        ]
+        cues = []
+        seen = set()
+        for tone, pattern in cue_patterns:
+            for match in pattern.finditer(html_text or ""):
+                cue_text = normalize_plain_text(match.group("content"))
+                if cue_text and cue_text not in seen:
+                    seen.add(cue_text)
+                    cues.append({"text": cue_text, "tone": tone})
+        if cues:
+            return cues[:12]
+
+        for match in re.finditer(r'<(?:p|h2|h3)[^>]*>(?P<content>.*?)</(?:p|h2|h3)>', html_text or "", re.IGNORECASE | re.DOTALL):
+            cue_text = normalize_plain_text(match.group("content"))
+            if cue_text and len(cue_text) >= 8 and cue_text not in seen:
+                seen.add(cue_text)
+                cues.append({"text": cue_text, "tone": "positive"})
+        return cues[:8]
+
+    def apply_inline_cues(paragraph_text, matches):
+        rendered = escape_html(paragraph_text)
+        ordered = sorted(matches, key=lambda item: len(item.get("text", "")), reverse=True)
+        for item in ordered:
+            cue_text = str(item.get("text", "") or "").strip()
+            if not cue_text:
+                continue
+            safe_cue = escape_html(cue_text)
+            css_class = "highlight-risk" if item.get("tone") == "risk" else "highlight-positive"
+            if safe_cue in rendered:
+                rendered = rendered.replace(safe_cue, f'<span class="{css_class}">{safe_cue}</span>', 1)
+        return rendered
+
+    entries = []
+    paragraph_buffer = []
+
+    def flush_paragraph():
+        nonlocal paragraph_buffer
+        clean_lines = [line.strip() for line in paragraph_buffer if str(line or "").strip()]
+        if clean_lines:
+            entries.append({"type": "paragraph", "text": " ".join(clean_lines), "matches": []})
+        paragraph_buffer = []
+
+    resolved_titles = normalize_title_candidates(title_candidates)
+    if resolved_titles:
+        entries.append({"type": "heading2", "text": "\u5907\u9009\u6807\u9898"})
+        for idx, title in enumerate(resolved_titles, start=1):
+            entries.append({"type": "paragraph", "text": f"{idx}. {title}", "matches": []})
+
+    for raw_line in clean_body.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            continue
+        if line.startswith("### "):
+            flush_paragraph()
+            entries.append({"type": "heading3", "text": line[4:].strip()})
+            continue
+        if line.startswith("## "):
+            flush_paragraph()
+            entries.append({"type": "heading2", "text": line[3:].strip()})
+            continue
+        paragraph_buffer.append(raw_line.rstrip())
+    flush_paragraph()
+
+    cues = extract_highlight_cues(highlighted_text)
+    paragraph_indexes = [idx for idx, entry in enumerate(entries) if entry.get("type") == "paragraph"]
+
+    for cue in cues:
+        cue_text = cue.get("text", "")
+        if not cue_text:
+            continue
+        for idx in paragraph_indexes:
+            paragraph_text = entries[idx].get("text", "")
+            if cue_text in paragraph_text:
+                entries[idx].setdefault("matches", []).append(cue)
+                break
+
+    blocks = []
+    for entry in entries:
+        entry_type = entry.get("type")
+        entry_text = entry.get("text", "")
+        if entry_type == "heading2":
+            blocks.append(f"<h2>{escape_html(entry_text)}</h2>")
+            continue
+        if entry_type == "heading3":
+            blocks.append(f"<h3>{escape_html(entry_text)}</h3>")
+            continue
+
+        matches = entry.get("matches", []) or []
+        if matches:
+            content_html = apply_inline_cues(entry_text, matches)
+        else:
+            content_html = escape_html(entry_text)
+        blocks.append(f"<p>{content_html}</p>")
+
+    return "\n".join(blocks).strip()
+
+
 def ensure_highlighted_article_context(highlighted_text, title_candidates, article_body):
     clean_highlight = (highlighted_text or "").strip()
     if not clean_highlight:
@@ -3587,6 +3727,41 @@ def ensure_highlighted_article_context(highlighted_text, title_candidates, artic
             .replace("&#39;", "'")
         )
         return re.sub(r"\s+", " ", normalized).strip()
+
+    def extract_body_compare_text(text):
+        compare_text = str(text or "").strip()
+        if not compare_text:
+            return ""
+        if ARTICLE_BODY_MARKER in compare_text:
+            compare_text = compare_text.split(ARTICLE_BODY_MARKER, 1)[1]
+        elif PURE_BODY_MARKER in compare_text:
+            compare_text = compare_text.split(PURE_BODY_MARKER, 1)[1]
+        return normalize_plain_text(compare_text)
+
+    def should_rebuild_highlight(candidate_text):
+        body_plain = extract_body_compare_text(article_body)
+        highlight_plain = extract_body_compare_text(candidate_text)
+        if not body_plain or not highlight_plain:
+            return False
+        if body_plain == highlight_plain:
+            return False
+
+        body_sections = len(extract_markdown_h2_sections(article_body))
+        highlight_heading_count = len(
+            re.findall(r"<h2\b|^\s*##\s+", candidate_text or "", flags=re.IGNORECASE | re.MULTILINE)
+        )
+        if body_sections and highlight_heading_count < body_sections:
+            return True
+
+        suspicious_headings = []
+        suspicious_headings.extend(re.findall(r"<h[23][^>]*>(.*?)</h[23]>", candidate_text or "", flags=re.IGNORECASE | re.DOTALL))
+        suspicious_headings.extend(re.findall(r"^\s*##+\s+(.+)$", candidate_text or "", flags=re.MULTILINE))
+        for heading_text in suspicious_headings:
+            if len(normalize_plain_text(heading_text)) > 40:
+                return True
+
+        coverage_ratio = len(highlight_plain) / max(len(body_plain), 1)
+        return coverage_ratio < 0.92
 
     prefix_parts = []
     normalized_titles = normalize_title_candidates(title_candidates)
@@ -3617,8 +3792,13 @@ def ensure_highlighted_article_context(highlighted_text, title_candidates, artic
         prefix_parts.append(f"{ARTICLE_BODY_MARKER}\n{missing_intro}")
 
     if not prefix_parts:
-        return clean_highlight
-    return "\n\n".join(prefix_parts + [clean_highlight]).strip()
+        candidate_highlight = clean_highlight
+    else:
+        candidate_highlight = "\n\n".join(prefix_parts + [clean_highlight]).strip()
+
+    if should_rebuild_highlight(candidate_highlight):
+        return build_preserved_highlighted_html(article_body, normalized_titles, clean_highlight)
+    return candidate_highlight
 
 
 def parse_de_ai_dual_output(response_text, fallback_titles=None):
@@ -7325,6 +7505,22 @@ elif st.session_state.current_step == 6:
         f"当前模型：{selected_model}",
         f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}",
     ])
+    step6_action_col1, step6_action_col2 = st.columns([1, 1])
+    with step6_action_col1:
+        if st.button("返回去 AI 步骤", key="step6_back_to_de_ai", use_container_width=True):
+            go_to_step(5)
+            st.rerun()
+    with step6_action_col2:
+        if st.button("仅重建高亮阅读版", key="step6_rebuild_highlight", use_container_width=True):
+            st.session_state.highlighted_article = build_preserved_highlighted_html(
+                get_article_body_text(st.session_state.get("final_article", "")),
+                st.session_state.get("title_candidates", []),
+                st.session_state.get("highlighted_article", ""),
+            )
+            save_draft()
+            st.success("已基于当前定稿重建高亮阅读版。")
+            st.rerun()
+
     st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.98])
     with left_col:

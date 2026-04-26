@@ -47,6 +47,7 @@ TARGET_FUNCTIONS = {
     "detect_auto_retry_issues",
     "build_auto_retry_instruction",
     "build_auto_retry_notice",
+    "build_preserved_highlighted_html",
     "ensure_highlighted_article_context",
     "parse_de_ai_dual_output",
     "sanitize_highlighted_article",
@@ -456,6 +457,39 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("导语第一段", highlighted)
         self.assertIn("## 第一节", highlighted)
         self.assertIn("高亮正文第一节", highlighted)
+
+    def test_parse_de_ai_dual_output_rebuilds_highlight_when_model_returns_summary_version(self):
+        response = (
+            f"{PURE_TITLE_MARKER}\n"
+            "1. ??A\n"
+            "2. ??B\n"
+            "3. ??C\n\n"
+            f"{PURE_BODY_MARKER}\n"
+            "??????\n\n"
+            "??????\n\n"
+            "## ???\n\n"
+            "???????????\n\n"
+            "???????????\n\n"
+            "## ???\n\n"
+            "???????????\n\n"
+            "???????????\n\n"
+            f"{HIGHLIGHT_MARKER}\n"
+            "<h2>???</h2>\n"
+            "<p>??????????</p>\n"
+            "<h2>???</h2>\n"
+            "<p>?????????</p>"
+        )
+
+        titles, body, highlighted = self.helpers.parse_de_ai_dual_output(response)
+
+        self.assertEqual(titles, ["??A", "??B", "??C"])
+        self.assertIn("??????????", body)
+        self.assertIn("<h2>\u5907\u9009\u6807\u9898</h2>", highlighted)
+        self.assertIn("<p>??????</p>", highlighted)
+        self.assertIn("<h2>???</h2>", highlighted)
+        self.assertIn("<p>???????????</p>", highlighted)
+        self.assertIn("<p>???????????</p>", highlighted)
+        self.assertNotIn("<p>\u7b2c\u4e00\u8282\u88ab\u538b\u7f29\u6210\u6458\u8981\u3002</p>", highlighted)
 
     def test_parse_de_ai_dual_output_does_not_duplicate_intro_when_highlight_already_contains_it(self):
         response = (
