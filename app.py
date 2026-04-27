@@ -3598,45 +3598,15 @@ def build_preserved_highlighted_html(article_body, title_candidates=None, highli
         )
         return re.sub(r"\s+", " ", normalized).strip()
 
-    def tokenize(text):
-        return set(re.findall(r"[A-Za-z]{3,}|[\u4E00-\u9FFF]{2,}", str(text or "").casefold()))
-
-    def extract_highlight_cues(html_text):
-        cue_patterns = [
-            ("risk", re.compile(r'<span\b(?=[^>]*\bclass\s*=\s*["\'][^"\']*\bhighlight-risk\b[^"\']*["\'])[^>]*>(?P<content>.*?)</span>', re.IGNORECASE | re.DOTALL)),
-            ("positive", re.compile(r'<span\b(?=[^>]*\bclass\s*=\s*["\'][^"\']*\bhighlight-positive\b[^"\']*["\'])[^>]*>(?P<content>.*?)</span>', re.IGNORECASE | re.DOTALL)),
-            ("positive", re.compile(r'<strong>(?P<content>.*?)</strong>', re.IGNORECASE | re.DOTALL)),
-        ]
-        cues = []
-        seen = set()
-        for tone, pattern in cue_patterns:
-            for match in pattern.finditer(html_text or ""):
-                cue_text = normalize_plain_text(match.group("content"))
-                if cue_text and cue_text not in seen:
-                    seen.add(cue_text)
-                    cues.append({"text": cue_text, "tone": tone})
-        if cues:
-            return cues[:12]
-
-        for match in re.finditer(r'<(?:p|h2|h3)[^>]*>(?P<content>.*?)</(?:p|h2|h3)>', html_text or "", re.IGNORECASE | re.DOTALL):
-            cue_text = normalize_plain_text(match.group("content"))
-            if cue_text and len(cue_text) >= 8 and cue_text not in seen:
-                seen.add(cue_text)
-                cues.append({"text": cue_text, "tone": "positive"})
-        return cues[:8]
-
-    def apply_inline_cues(paragraph_text, matches):
-        rendered = escape_html(paragraph_text)
-        ordered = sorted(matches, key=lambda item: len(item.get("text", "")), reverse=True)
-        for item in ordered:
-            cue_text = str(item.get("text", "") or "").strip()
-            if not cue_text:
-                continue
-            safe_cue = escape_html(cue_text)
-            css_class = "highlight-risk" if item.get("tone") == "risk" else "highlight-positive"
-            if safe_cue in rendered:
-                rendered = rendered.replace(safe_cue, f'<span class="{css_class}">{safe_cue}</span>', 1)
-        return rendered
+    original_blocks = []
+    clean_highlight_html = sanitize_highlighted_article(highlighted_text or "")
+    block_pattern = re.compile(r'<(?P<tag>h2|h3|p)>(?P<inner>.*?)</(?P=tag)>', re.IGNORECASE | re.DOTALL)
+    for match in block_pattern.finditer(clean_highlight_html):
+        tag = (match.group("tag") or "").lower()
+        inner_html = (match.group("inner") or "").strip()
+        plain_text = normalize_plain_text(inner_html)
+        if plain_text:
+            original_blocks.append({"tag": tag, "inner_html": inner_html, "plain_text": plain_text})
 
     entries = []
     paragraph_buffer = []
@@ -3645,14 +3615,14 @@ def build_preserved_highlighted_html(article_body, title_candidates=None, highli
         nonlocal paragraph_buffer
         clean_lines = [line.strip() for line in paragraph_buffer if str(line or "").strip()]
         if clean_lines:
-            entries.append({"type": "paragraph", "text": " ".join(clean_lines), "matches": []})
+            entries.append({"type": "paragraph", "text": " ".join(clean_lines)})
         paragraph_buffer = []
 
     resolved_titles = normalize_title_candidates(title_candidates)
     if resolved_titles:
-        entries.append({"type": "heading2", "text": "\u5907\u9009\u6807\u9898"})
+        entries.append({"type": "heading2", "text": "????"})
         for idx, title in enumerate(resolved_titles, start=1):
-            entries.append({"type": "paragraph", "text": f"{idx}. {title}", "matches": []})
+            entries.append({"type": "paragraph", "text": f"{idx}. {title}"})
 
     for raw_line in clean_body.split("\n"):
         line = raw_line.strip()
@@ -3670,18 +3640,29 @@ def build_preserved_highlighted_html(article_body, title_candidates=None, highli
         paragraph_buffer.append(raw_line.rstrip())
     flush_paragraph()
 
-    cues = extract_highlight_cues(highlighted_text)
-    paragraph_indexes = [idx for idx, entry in enumerate(entries) if entry.get("type") == "paragraph"]
+    block_cursor = 0
 
-    for cue in cues:
-        cue_text = cue.get("text", "")
-        if not cue_text:
-            continue
-        for idx in paragraph_indexes:
-            paragraph_text = entries[idx].get("text", "")
-            if cue_text in paragraph_text:
-                entries[idx].setdefault("matches", []).append(cue)
-                break
+    def build_preserved_paragraph_html(paragraph_text):
+        nonlocal block_cursor
+        paragraph_plain = str(paragraph_text or "").strip()
+        if not paragraph_plain:
+            return ""
+
+        for idx in range(block_cursor, len(original_blocks)):
+            block = original_blocks[idx]
+            if block.get("tag") != "p":
+                continue
+            block_plain = str(block.get("plain_text", "") or "").strip()
+            if not block_plain or block_plain not in paragraph_plain:
+                continue
+            escaped_paragraph = escape_html(paragraph_plain)
+            escaped_block_plain = escape_html(block_plain)
+            if escaped_block_plain not in escaped_paragraph:
+                continue
+            block_cursor = idx + 1
+            return escaped_paragraph.replace(escaped_block_plain, block.get("inner_html", escaped_block_plain), 1)
+
+        return escape_html(paragraph_plain)
 
     blocks = []
     for entry in entries:
@@ -3693,13 +3674,7 @@ def build_preserved_highlighted_html(article_body, title_candidates=None, highli
         if entry_type == "heading3":
             blocks.append(f"<h3>{escape_html(entry_text)}</h3>")
             continue
-
-        matches = entry.get("matches", []) or []
-        if matches:
-            content_html = apply_inline_cues(entry_text, matches)
-        else:
-            content_html = escape_html(entry_text)
-        blocks.append(f"<p>{content_html}</p>")
+        blocks.append(f"<p>{build_preserved_paragraph_html(entry_text)}</p>")
 
     return "\n".join(blocks).strip()
 
@@ -4671,7 +4646,17 @@ def extract_article_content_with_fallback(url):
         }
         response = requests.get(jina_url, headers=headers, timeout=20)
         response.raise_for_status()
-        text = (response.text or '').strip()
+        text = ""
+        raw_content = getattr(response, "content", b"") or b""
+        if raw_content:
+            for encoding in ("utf-8-sig", "utf-8"):
+                try:
+                    text = raw_content.decode(encoding).strip()
+                    break
+                except UnicodeDecodeError:
+                    continue
+        if not text:
+            text = (response.text or '').strip()
         if len(text) < 50:
             raise ValueError('Fallback reader returned insufficient text.')
         return text
@@ -7505,21 +7490,7 @@ elif st.session_state.current_step == 6:
         f"当前模型：{selected_model}",
         f"脚本状态：{'已生成' if st.session_state.spoken_script else '未生成'}",
     ])
-    step6_action_col1, step6_action_col2 = st.columns([1, 1])
-    with step6_action_col1:
-        if st.button("返回去 AI 步骤", key="step6_back_to_de_ai", use_container_width=True):
-            go_to_step(5)
-            st.rerun()
-    with step6_action_col2:
-        if st.button("仅重建高亮阅读版", key="step6_rebuild_highlight", use_container_width=True):
-            st.session_state.highlighted_article = build_preserved_highlighted_html(
-                get_article_body_text(st.session_state.get("final_article", "")),
-                st.session_state.get("title_candidates", []),
-                st.session_state.get("highlighted_article", ""),
-            )
-            save_draft()
-            st.success("已基于当前定稿重建高亮阅读版。")
-            st.rerun()
+
 
     st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.98])
@@ -7645,6 +7616,21 @@ elif st.session_state.current_step == 6:
         st.divider()
         st.markdown("### 高亮阅读版")
         render_highlighted_article_panel(st.session_state.get("highlighted_article", ""))
+        step6_action_col1, step6_action_col2 = st.columns([1, 1])
+        with step6_action_col1:
+            if st.button("返回去 AI 步骤", key="step6_back_to_de_ai", use_container_width=True):
+                go_to_step(5)
+                st.rerun()
+        with step6_action_col2:
+            if st.button("仅重建高亮阅读版", key="step6_rebuild_highlight", use_container_width=True):
+                st.session_state.highlighted_article = build_preserved_highlighted_html(
+                    get_article_body_text(st.session_state.get("final_article", "")),
+                    st.session_state.get("title_candidates", []),
+                    st.session_state.get("highlighted_article", ""),
+                )
+                save_draft()
+                st.success("已基于当前定稿重建高亮阅读版。")
+                st.rerun()
 
         if st.session_state.spoken_script:
             st.divider()

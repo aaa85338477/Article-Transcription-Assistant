@@ -38,9 +38,10 @@ def load_article_helpers():
 
 
 class FakeResponse:
-    def __init__(self, *, status_code=200, text="", headers=None, url="https://example.com/article"):
+    def __init__(self, *, status_code=200, text="", content=None, headers=None, url="https://example.com/article"):
         self.status_code = status_code
         self.text = text
+        self.content = content if content is not None else (text or "").encode("utf-8")
         self.headers = headers or {}
         self.url = url
 
@@ -76,6 +77,27 @@ class ArticleExtractionTests(unittest.TestCase):
         self.assertEqual(mocked_get.call_args_list[0].kwargs["timeout"], 15)
         self.assertEqual(mocked_get.call_args_list[1].args[0], f"https://r.jina.ai/{url}")
         self.assertEqual(mocked_get.call_args_list[1].kwargs["headers"]["Accept"], "text/plain")
+
+    def test_extract_article_content_prefers_utf8_bytes_for_jina_fallback(self):
+        url = "https://www.gamigion.com/how-royal-kingdom-is-scaling-with-interstitials-and-rewarded-ads/"
+        origin_response = FakeResponse(status_code=415, url=url)
+        correct_text = "Loader\n这是一段正常中文内容。" * 6
+        mojibake_text = correct_text.encode("utf-8").decode("latin-1")
+        fallback_response = FakeResponse(
+            status_code=200,
+            text=mojibake_text,
+            content=correct_text.encode("utf-8"),
+            headers={"Content-Type": "text/plain"},
+            url=f"https://r.jina.ai/{url}",
+        )
+
+        with mock.patch.object(self.helpers.requests, "get", side_effect=[origin_response, fallback_response]):
+            text, images, error = self.helpers.extract_article_content_with_fallback(url)
+
+        self.assertIsNone(error)
+        self.assertEqual(images, [])
+        self.assertIn("正常中文内容", text)
+        self.assertNotIn("è¿™", text)
 
 
 if __name__ == "__main__":
