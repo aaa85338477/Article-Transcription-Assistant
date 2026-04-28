@@ -3635,7 +3635,7 @@ def build_preserved_highlighted_html(article_body, title_candidates=None, highli
             continue
         if line.startswith("## "):
             flush_paragraph()
-            entries.append({"type": "heading2", "text": line[3:].strip()})
+            entries.append({"type": "heading3", "text": line[3:].strip()})
             continue
         paragraph_buffer.append(raw_line.rstrip())
     flush_paragraph()
@@ -3723,7 +3723,7 @@ def ensure_highlighted_article_context(highlighted_text, title_candidates, artic
 
         body_sections = len(extract_markdown_h2_sections(article_body))
         highlight_heading_count = len(
-            re.findall(r"<h2\b|^\s*##\s+", candidate_text or "", flags=re.IGNORECASE | re.MULTILINE)
+            re.findall(r"<h[23]\b|^\s*##\s+", candidate_text or "", flags=re.IGNORECASE | re.MULTILINE)
         )
         if body_sections and highlight_heading_count < body_sections:
             return True
@@ -3827,7 +3827,7 @@ def sanitize_highlighted_article(html_text):
         stripped = raw_line.strip()
         heading_match = re.match(r"^(#{2,3})\s+(.+)$", stripped)
         if heading_match:
-            level = len(heading_match.group(1))
+            level = 3
             heading_text = heading_match.group(2).replace("🔗", "")
             heading_text = re.sub(r"\s*#+\s*$", "", heading_text).strip()
             normalized_lines.append(f"<h{level}>{heading_text}</h{level}>")
@@ -3853,6 +3853,8 @@ def sanitize_highlighted_article(html_text):
         inner = match.group("inner") or ""
         inner = re.sub(r'</?span[^>]*?>', '', inner, flags=re.IGNORECASE)
         normalized_tag = str(tag).lower()
+        if normalized_tag == "h2":
+            normalized_tag = "h3"
         return f"<{normalized_tag}>{inner}</{normalized_tag}>"
 
     clean_text = re.sub(

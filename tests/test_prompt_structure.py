@@ -427,7 +427,7 @@ class PromptStructureTests(unittest.TestCase):
     def test_sanitize_highlighted_article_converts_markdown_headings_and_removes_anchor_icons(self):
         cleaned = self.helpers.sanitize_highlighted_article("## Heading Title 🔗\n<p>Body</p>")
 
-        self.assertIn("<h2>Heading Title</h2>", cleaned)
+        self.assertIn("<h3>Heading Title</h3>", cleaned)
         self.assertNotIn("🔗", cleaned)
         self.assertNotIn("## Heading Title", cleaned)
 
@@ -486,7 +486,7 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("??????????", body)
         self.assertIn("<h2>????</h2>", highlighted)
         self.assertIn("<p>??????</p>", highlighted)
-        self.assertIn("<h2>???</h2>", highlighted)
+        self.assertIn("<h3>???</h3>", highlighted)
         self.assertIn('<span class="highlight-positive">???????????</span>', highlighted)
         self.assertIn("<p>???????????</p>", highlighted)
         self.assertIn("<p>???????????</p>", highlighted)
