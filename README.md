@@ -1,58 +1,218 @@
 # Article Transcription Assistant
 
-A Streamlit-based editorial workstation for game-industry content teams.
+一个面向游戏行业内容生产的 Streamlit 本地工作台。
 
-This project combines article scraping, YouTube transcript ingestion, local research files, optional Obsidian knowledge support, multi-stage drafting, review and rewrite flows, de-AI finalization, highlighted reading output, podcast/script generation, and export/distribution tools in a single UI.
+它把素材抓取、知识增强、初稿生成、审稿修改、去 AI 味定稿、高亮阅读版、播客脚本、配图辅助、Word 导出、飞书发布和任务队列管理整合进了一套界面里，适合单人高频生产和多任务并行处理。
 
-## Current Features
+## 这是什么
 
-The current app includes:
+这个项目的目标不是做一个“单次生成器”，而是做一个能连续处理多篇任务的本地内容生产台。
 
-- Multi-source ingestion:
-  - Web articles
-  - YouTube transcripts
-  - Local Word / Excel / TXT / image files
-- Two working modes:
-  - Manual step-by-step workflow
-  - Full auto-drive workflow
-- Multi-role drafting pipeline
-- Reviewer + revision workflow
-- Structured article output with:
-  - candidate title group
-  - opening background lede
-  - sectioned body structure
-- De-AI stage with three style variants:
-  - `Standard`
-  - `Community Article`
-  - `Natural Conversational`
-- Dual final outputs:
-  - clean article output
-  - highlighted reading version
-- Rich copy support for highlighted reading output
-- Version timeline for draft/final article history
-- Version restore that now restores both:
-  - final article body
-  - highlighted reading version
-- Optional downstream outputs:
-  - short-video narration + storyboard script
-  - single-host podcast script
-  - podcast audio synthesis
-  - image search keywords
-  - Word export
-  - Feishu push
-- Prompt management in the UI
-- Draft persistence and recovery
-- Optional Obsidian-assisted research enrichment
+它尤其适合这些场景：
 
-## Typical Use Cases
+- 把海外游戏行业文章转成中文长文分析
+- 把 YouTube 视频字幕整理成结构化稿件
+- 把多篇网页、视频、上传文件合并成一篇专题稿
+- 在同一套流程里同时产出正文、高亮阅读版、播客稿、音频和飞书文档
+- 对同一篇文章做版本回溯、重试、去 AI 重写和最终发布
 
-- Turn overseas game-industry articles into Chinese long-form content
-- Turn YouTube commentary into structured Chinese writeups
-- Produce analysis, publishing commentary, design breakdowns, and game-news articles
-- Generate article + short-video script assets from one source package
-- Run a second-pass rewrite for stronger readability or less AI-like phrasing
+## 当前核心能力
 
-## Project Layout
+### 1. 多源素材输入
+
+支持把多种来源合并成一个 source packet：
+
+- 文章 URL
+- YouTube URL
+- 本地上传文件
+- 图片素材
+
+文件侧目前支持：
+
+- `doc`
+- `docx`
+- `xls`
+- `xlsx`
+- `txt`
+- `md`
+- `csv`
+- `log`
+- `json`
+- 常见图片格式
+
+抓取链路带有网页正文提取、YouTube 字幕提取和 fallback 抓取策略。
+
+### 2. 两种工作模式
+
+- 手动精调：逐步确认每一阶段结果
+- 全自动驾驶：一路跑到定稿和交付区
+
+### 3. 多阶段写作链路
+
+当前主链路包括：
+
+1. 素材提取与合并
+2. 路由与写作角色选择
+3. 初稿生成
+4. 严格审稿与修改建议
+5. 去 AI 味定稿
+6. 交付与分发
+
+### 4. 去 AI 味定稿
+
+当前支持 4 种去 AI 变体：
+
+- `普通版`
+- `社区文章去AI版`
+- `自然唠嗑版`
+- `Humanizer-zh 版`
+
+去 AI 阶段会输出三块结果：
+
+- 备选标题组
+- 纯净最终正文
+- 高亮阅读版
+
+### 5. 高亮阅读版
+
+高亮阅读版现在是独立交付物，不是简单复制正文。
+
+当前已经支持：
+
+- 独立生成与展示
+- 富文本复制
+- 飞书兼容复制增强
+- 高亮保真修复
+- 仅重建高亮阅读版
+- 与正文结构的一致性保护
+
+### 6. 任务队列
+
+项目已经从单任务工具升级成了本地任务队列。
+
+当前支持：
+
+- 多任务切换
+- 复制当前任务为新任务
+- 删除单个任务
+- 按标题 / 站点搜索任务
+- 批量清理已完成 / 失败任务
+- 已完成任务自动归档
+- 历史归档恢复
+- 任务模板保存与复用
+
+### 7. 版本时间线
+
+每篇文章会记录版本节点，便于：
+
+- 查看历史版本
+- 恢复旧版正文
+- 恢复旧版高亮阅读版
+- 对照不同阶段输出
+
+### 8. 本地知识增强
+
+如果启用 Obsidian，本项目可以：
+
+- 从本地知识库里检索相关笔记
+- 生成研究摘要
+- 构建影响映射
+- 生成证据覆盖图
+
+这部分主要用于辅助分析和追踪正文与知识库之间的关系，不替代原始素材事实源。
+
+### 9. 下游产物与交付
+
+当前可选的下游能力包括：
+
+- 分镜脚本
+- 单人播客解说稿
+- 播客音频合成
+- 智能配图助手
+- Word 导出
+- 飞书群推送
+- 飞书云文档发布
+
+## 典型工作流
+
+### Step 1. 输入素材
+
+把网页、视频、上传文件和图片统一收进来，系统会合并成一份可供写作的 source packet。
+
+### Step 2. 选择模式
+
+根据你的使用方式选择：
+
+- 手动一步步走
+- 自动跑完整链路
+
+### Step 3. 初稿生成
+
+编辑角色会生成：
+
+- 标题组
+- 正文草稿
+
+### Step 4. 审稿与修改
+
+审稿阶段会检查：
+
+- 事实一致性
+- 逻辑和论证
+- 背景交代是否充分
+- 标题结构和段落结构
+- 词表风险和表达问题
+
+### Step 5. 去 AI 味定稿
+
+在这一阶段，系统会把文章整理成：
+
+- 纯净定稿
+- 高亮阅读版
+
+并保留对应版本。
+
+### Step 6. 交付与分发
+
+最终工作台里可以完成：
+
+- 查看和复制最终正文
+- 查看和复制高亮阅读版
+- 返回去 AI 步骤重试
+- 仅重建高亮阅读版
+- 生成播客稿与音频
+- 提取配图关键词
+- 导出 Word
+- 发布到飞书云文档
+- 推送到飞书群
+
+## 飞书发布能力
+
+项目当前已经内置飞书云文档发布链路。
+
+### 已支持
+
+- 创建飞书云文档
+- 将文章正文写入飞书文档
+- 在任务状态里记录飞书文档 URL
+- 从交付区直接打开飞书文档
+
+### 需要的配置
+
+请在 `.streamlit/secrets.toml` 或等价的 Streamlit secrets 配置中提供：
+
+```toml
+FEISHU_APP_ID = "your_app_id"
+FEISHU_APP_SECRET = "your_app_secret"
+FEISHU_FOLDER_TOKEN = "optional_folder_token"
+```
+
+说明：
+
+- `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 用于获取 tenant access token
+- `FEISHU_FOLDER_TOKEN` 可选，用于指定新文档的目标文件夹
+
+## 项目结构
 
 ```text
 .
@@ -62,155 +222,55 @@ The current app includes:
 |-- prompts.json
 |-- requirements.txt
 |-- launch_article_tool.cmd
+|-- launch_article_tool.ps1
+|-- launch_article_assistant_new.cmd
+|-- launch_article_assistant_new_silent.vbs
 |-- tests/
 |-- .streamlit/
-|-- draft_state.json      # generated at runtime
-|-- ai_diagnostics.log    # generated at runtime
-`-- runtime_audio/        # generated at runtime
+|-- draft_state.json
+|-- task_queue_state.json
+|-- ai_diagnostics.log
+`-- runtime_audio/
 ```
 
-## Installation
-
-Install dependencies:
+## 安装
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Running the App
+## 运行
 
-Standard startup:
+### 方式 1：直接运行 Streamlit
 
 ```bash
 streamlit run app.py
 ```
 
-Windows convenience launcher:
+### 方式 2：Windows 启动脚本
 
-```bash
+```powershell
+.\launch_article_tool.ps1
+```
+
+或：
+
+```cmd
 launch_article_tool.cmd
 ```
 
-After startup, configure the sidebar with the model endpoint and API key you want to use.
+## 依赖
 
-## Workflow Overview
-
-### 1. Source Intake
-
-You can combine multiple inputs in one run:
-
-- article URLs
-- YouTube URLs
-- local files such as Word / Excel / TXT / images
-
-The app merges them into one source packet.
-
-### 2. Mode Selection
-
-- `Manual`: confirm each stage yourself
-- `Auto-drive`: route the article automatically and generate through to final draft
-
-### 3. Draft Generation
-
-The editor role produces structured output with:
-
-- candidate titles
-- article body
-
-### 4. Review and Revision
-
-The reviewer checks:
-
-- factual consistency
-- logic quality
-- opening context clarity
-- heading structure
-- title-group continuity
-
-### 5. De-AI Finalization
-
-The current branch supports three rewrite variants:
-
-- `Standard`: balanced and stable
-- `Community Article`: better suited for player-community/forum long posts
-- `Natural Conversational`: more like an experienced human writer talking the point through
-
-This stage outputs three blocks:
-
-- `Pure Title Group`
-- `Pure Final Article`
-- `Highlighted Reading Version`
-
-### 6. Distribution Workspace
-
-The final workspace supports:
-
-- final article review
-- highlighted reading view
-- formatted copy for highlighted output
-- version timeline switching
-- narration/storyboard generation
-- podcast script generation
-- podcast audio synthesis
-- image keyword generation
-- Word export
-- Feishu push
-- chat-based polishing
-
-## Prompt Configuration
-
-Prompt configuration is stored in `prompts.json`.
-
-Main sections:
-
-- `editors`: editor role prompts
-- `reviewer`: reviewer prompt
-- `global_instruction`: global writing constraints appended into the drafting flow
-
-You can manage prompts either:
-
-- by editing `prompts.json` directly
-- or through the in-app prompt management UI
-
-You can also point to a custom prompt file with the `PROMPTS_FILE` environment variable.
-
-## Optional Integrations
-
-### Obsidian
-
-If an Obsidian vault path is configured, the app can:
-
-- retrieve local notes as background research
-- build a compact research brief
-- show an influence map that highlights which final paragraphs were clearly informed by local notes
-
-### Podcast / TTS
-
-If podcast features are enabled, the app can:
-
-- generate a single-host podcast script from the current final article
-- synthesize audio into `runtime_audio/podcasts/`
-- cache TTS fragments in `runtime_audio/tts_cache/`
-
-## Important Runtime Files
-
-These files and folders are runtime artifacts and are usually not meant to be committed:
-
-- `draft_state.json`
-- `ai_diagnostics.log`
-- `runtime_audio/`
-- `.tmp_test_runtime/`
-
-## Dependencies
-
-Main packages used in this project:
+当前主要依赖：
 
 - `streamlit`
 - `trafilatura`
 - `youtube-transcript-api`
-- `beautifulsoup4`
-- `openai`
 - `python-docx`
+- `requests`
+- `openai`
+- `httpx`
+- `beautifulsoup4`
 - `pandas`
 - `openpyxl`
 - `xlrd`
@@ -218,30 +278,67 @@ Main packages used in this project:
 - `pydub`
 - `audioop-lts`
 - `imageio-ffmpeg`
-- `requests`
-- `httpx`
 
-## Notes
+## Prompt 与配置
 
-- This is a Streamlit application, not a CLI-first tool.
-- Prompt edits inside the UI are written back to `prompts.json`.
-- Working drafts are persisted to `draft_state.json`.
-- AI call diagnostics are written to `ai_diagnostics.log`.
-- Highlighted reading output is now treated as part of a restorable article version.
-- Some downstream features depend on external credentials and model availability.
-- If you want image-aware analysis, use a model endpoint that supports visual input.
+Prompt 配置文件是：
 
-## Tests
+- [`prompts.json`](./prompts.json)
 
-Run the focused regression suite:
+主要内容包括：
+
+- `editors`
+- `reviewer`
+- `global_instruction`
+
+你可以：
+
+- 直接编辑 `prompts.json`
+- 在应用内通过 Prompt 管理界面修改
+- 用 `PROMPTS_FILE` 环境变量切换自定义 prompt 文件
+
+## 本地持久化文件
+
+应用运行时会维护这些状态文件：
+
+- `draft_state.json`
+- `task_queue_state.json`
+- `ai_diagnostics.log`
+- `runtime_audio/`
+
+这些通常属于运行产物，不建议直接手工改写，也通常不应该进 Git。
+
+## 测试
+
+常用回归测试：
 
 ```bash
-python -m unittest tests.test_prompt_structure tests.test_copy_formatting tests.test_article_versions tests.test_podcast_script
+python -m unittest tests.test_prompt_structure tests.test_copy_formatting tests.test_article_versions tests.test_task_queue tests.test_article_extraction tests.test_feishu_docs
 ```
 
-Run a quick syntax check:
+快速语法检查：
 
 ```bash
 python -m py_compile app.py
 ```
 
+## 适合谁
+
+这套工具目前最适合：
+
+- 高频写作和编发的单人作者
+- 游戏行业分析 / 快讯 / 专题内容团队
+- 需要“正文 + 高亮版 + 播客稿 + 飞书交付”一体化链路的人
+
+如果你想把它当成一个稳定的本地生产台来用，建议优先维护好：
+
+- Prompt 角色体系
+- 飞书配置
+- Obsidian 知识库路径
+- 任务队列的归档与清理习惯
+
+## 当前定位
+
+这是一个 Streamlit 本地工作台，不是一个通用 CLI 抓取器，也不是一个纯 SDK 项目。
+
+它的核心价值在于：把游戏内容生产链路里的高频步骤，放进一个能持续使用、能回滚、能多任务管理的本地面板里。
