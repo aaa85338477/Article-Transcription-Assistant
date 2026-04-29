@@ -4693,7 +4693,17 @@ def extract_article_content_with_fallback(url, fetch_mode="standard"):
     def fetch_article_via_scrapling(page_url):
         import importlib
 
-        fetchers_module = importlib.import_module("scrapling.fetchers")
+        try:
+            fetchers_module = importlib.import_module("scrapling.fetchers")
+        except ModuleNotFoundError as exc:
+            missing_module = getattr(exc, "name", "") or "unknown dependency"
+            if missing_module == "unknown dependency":
+                match = re.search(r"No module named ['\"]([^'\"]+)['\"]", str(exc))
+                if match:
+                    missing_module = match.group(1)
+            raise RuntimeError(
+                f"增强抓取依赖未安装完整（缺少 {missing_module}）。请安装 scrapling[fetchers] 后重试。"
+            ) from exc
 
         def normalize_scrapling_payload(payload):
             if callable(payload):
@@ -6773,14 +6783,14 @@ if st.session_state.current_step == 1:
             st.caption(f"已选择 {len(file_names)} 个文件：{preview_names}")
 
     with st.container(border=True):
-        render_section_intro("????", "????????????????????????????", "Actions")
-        st.markdown("<p class='toolbar-note'>????????????????????????????????????</p>", unsafe_allow_html=True)
-        st.caption("?????????????????????????????????????????????")
+        render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
+        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章和视频放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
+        st.caption("默认提取会先走常规抓取，失败后再自动启用增强抓取；增强提取会让文章链接直接优先走增强抓取。")
         extract_col1, extract_col2 = st.columns(2)
         with extract_col1:
-            standard_extract_clicked = st.button("????????", type="primary", use_container_width=True)
+            standard_extract_clicked = st.button("开始批量提取内容", type="primary", use_container_width=True)
         with extract_col2:
-            enhanced_extract_clicked = st.button("??????", use_container_width=True)
+            enhanced_extract_clicked = st.button("增强提取内容", use_container_width=True)
 
         if standard_extract_clicked or enhanced_extract_clicked:
             article_fetch_mode = "enhanced" if enhanced_extract_clicked else "standard"
@@ -6789,11 +6799,11 @@ if st.session_state.current_step == 1:
             uploaded_file_count = len(uploaded_source_files) if uploaded_source_files else 0
 
             if not article_urls and not video_urls and uploaded_file_count == 0:
-                st.warning("???????????????")
+                st.warning("请至少输入链接或上传一个文件！")
             else:
                 total_sources = len(article_urls) + len(video_urls) + uploaded_file_count
-                spinner_prefix = "????????" if article_fetch_mode == "enhanced" else "????????"
-                with st.spinner(f"{spinner_prefix}??????? {total_sources} ???..."):
+                spinner_prefix = "启动增强解析引擎" if article_fetch_mode == "enhanced" else "启动全息解析引擎"
+                with st.spinner(f"{spinner_prefix}，正在批量获取 {total_sources} 个素材..."):
                     combined_content = ""
                     extracted_imgs = []
                     errors = []
@@ -6805,11 +6815,11 @@ if st.session_state.current_step == 1:
                             article_fetch_mode=article_fetch_mode,
                         )
                         if art_content:
-                            combined_content += f"????? {idx+1}????: {a_url}\n{art_content}\n\n================\n\n"
+                            combined_content += f"【文章素材 {idx+1}】来源于: {a_url}\n{art_content}\n\n================\n\n"
                             extracted_imgs.extend(art_imgs)
                             success_count += 1
                         else:
-                            errors.append(f"?? {idx+1} ????: {art_err}")
+                            errors.append(f"文章 {idx+1} 提取失败: {art_err}")
 
                     for idx, v_url in enumerate(video_urls):
                         vid_content, vid_imgs, vid_err = get_content_from_url(v_url)

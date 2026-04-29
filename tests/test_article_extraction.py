@@ -184,6 +184,20 @@ class ArticleExtractionTests(unittest.TestCase):
         self.assertIn("Enhanced mode fallback article body", text)
         self.assertEqual(mocked_get.call_count, 2)
 
+    def test_extract_article_content_reports_missing_scrapling_fetcher_dependency(self):
+        url = "https://www.gamespot.com/articles/missing-dependency-case/"
+        origin_response = FakeResponse(status_code=403, url=url)
+        fallback_response = FakeResponse(status_code=403, url=f"https://r.jina.ai/{url}")
+
+        with mock.patch.object(self.helpers.requests, "get", side_effect=[origin_response, fallback_response]):
+            with mock.patch("importlib.import_module", side_effect=ModuleNotFoundError("No module named 'msgspec'")):
+                text, images, error = self.helpers.extract_article_content_with_fallback(url)
+
+        self.assertIsNone(text)
+        self.assertEqual(images, [])
+        self.assertIn("增强抓取依赖未安装完整", error)
+        self.assertIn("msgspec", error)
+
     def test_get_content_from_url_keeps_youtube_path_unaffected_by_article_fetch_mode(self):
         url = "https://www.youtube.com/watch?v=abc123"
 
