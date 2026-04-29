@@ -4548,7 +4548,20 @@ def extract_article_content(url):
     except Exception as e:
         return None, [], f"文章抓取失败: {str(e)}"
 
-def extract_article_content_with_fallback(url):
+def extract_article_content_with_fallback(url, fetch_mode="standard"):
+    HIGH_RISK_FETCH_HOSTS = {
+        "gamespot.com",
+        "www.gamespot.com",
+        "ign.com",
+        "www.ign.com",
+        "gamesradar.com",
+        "www.gamesradar.com",
+        "polygon.com",
+        "www.polygon.com",
+        "kotaku.com",
+        "www.kotaku.com",
+    }
+
     def build_article_request_headers():
         return {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
@@ -4663,20 +4676,134 @@ def extract_article_content_with_fallback(url):
             raise ValueError('Fallback reader returned insufficient text.')
         return text
 
-    direct_images = []
-    direct_error = None
-    try:
-        response = requests.get(url, headers=build_article_request_headers(), timeout=15)
+    def should_use_enhanced_article_fetch(page_url, origin_error=None, fallback_error=None, extracted_text=""):
+        host = (urlparse(page_url).netloc or "").lower()
+        if host in HIGH_RISK_FETCH_HOSTS:
+            return True
+
+        error_blob = " ".join([
+            str(origin_error or ""),
+            str(fallback_error or ""),
+        ]).lower()
+        if any(code in error_blob for code in ("403", "429", "503", "forbidden", "blocked")):
+            return True
+
+        return bool((extracted_text or "").strip()) and len((extracted_text or "").strip()) < 300
+
+    def fetch_article_via_scrapling(page_url):
+        import importlib
+
+        fetchers_module = importlib.import_module("scrapling.fetchers")
+
+        def normalize_scrapling_payload(payload):
+            if callable(payload):
+                try:
+                    payload = payload()
+                except TypeError:
+                    payload = ""
+            if payload is None:
+                return ""
+            if isinstance(payload, bytes):
+                for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+                    try:
+                        return payload.decode(encoding).strip()
+                    except UnicodeDecodeError:
+                        continue
+                return payload.decode("utf-8", errors="ignore").strip()
+            return str(payload).strip()
+
+        fetch_attempts = []
+        stealthy_fetcher = getattr(fetchers_module, "StealthyFetcher", None)
+        if stealthy_fetcher is not None:
+            fetch_attempts.append(("stealthy", lambda: stealthy_fetcher.fetch(page_url, headless=True, network_idle=True)))
+        dynamic_fetcher = getattr(fetchers_module, "DynamicFetcher", None)
+        if dynamic_fetcher is not None:
+            fetch_attempts.append(("dynamic", lambda: dynamic_fetcher.fetch(page_url, headless=True, network_idle=True)))
+        basic_fetcher = getattr(fetchers_module, "Fetcher", None)
+        if basic_fetcher is not None:
+            fetch_attempts.append(("basic", lambda: basic_fetcher.get(page_url)))
+        if not fetch_attempts:
+            raise RuntimeError("Scrapling fetchers are unavailable.")
+
+        last_error = None
+        for _, fetch_call in fetch_attempts:
+            try:
+                scrapling_page = fetch_call()
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            html_text = ""
+            for attr_name in ("html_content", "html", "content", "body"):
+                candidate = normalize_scrapling_payload(getattr(scrapling_page, attr_name, ""))
+                if candidate and "<" in candidate and ">" in candidate:
+                    html_text = candidate
+                    break
+
+            if html_text:
+                text, images = extract_article_text_and_images_from_html(html_text, page_url)
+                if (text or "").strip():
+                    return text, images
+
+            plain_text = ""
+            for attr_name in ("text",):
+                candidate = normalize_scrapling_payload(getattr(scrapling_page, attr_name, ""))
+                if candidate:
+                    plain_text = candidate
+                    break
+
+            if plain_text:
+                return plain_text, []
+
+            last_error = ValueError("Enhanced fetcher returned insufficient text.")
+
+        raise last_error or RuntimeError("Enhanced fetch failed.")
+
+    def fetch_article_direct(page_url):
+        response = requests.get(page_url, headers=build_article_request_headers(), timeout=15)
         response.raise_for_status()
 
         content_type = str(response.headers.get('Content-Type', '') or '').lower()
         if content_type and 'text/html' not in content_type and 'application/xhtml+xml' not in content_type:
             raise ValueError(f'Unsupported content type from origin: {content_type}')
 
-        text, direct_images = extract_article_text_and_images_from_html(response.text, url)
+        text, images = extract_article_text_and_images_from_html(response.text, page_url)
         if text:
-            return text, direct_images, None
-        direct_error = ValueError('Page body was empty after extraction.')
+            return text, images
+        raise ValueError('Page body was empty after extraction.')
+
+    normalized_mode = "enhanced" if str(fetch_mode or "").strip().lower() == "enhanced" else "standard"
+
+    if normalized_mode == "enhanced":
+        enhanced_error = None
+        try:
+            enhanced_text, enhanced_images = fetch_article_via_scrapling(url)
+            return enhanced_text, enhanced_images, None
+        except Exception as exc:
+            enhanced_error = exc
+
+        direct_images = []
+        direct_error = None
+        try:
+            direct_text, direct_images = fetch_article_direct(url)
+            return direct_text, direct_images, None
+        except Exception as exc:
+            direct_error = exc
+
+        try:
+            fallback_text = fetch_article_via_jina_reader(url)
+            return fallback_text, direct_images, None
+        except Exception as fallback_exc:
+            return None, [], (
+                f'Article fetch failed after enhanced, direct, and fallback attempts: '
+                f'enhanced({str(enhanced_error)}) | origin({str(direct_error)}) | fallback({str(fallback_exc)})'
+            )
+
+    direct_images = []
+    direct_error = None
+    try:
+        direct_text, direct_images = fetch_article_direct(url)
+        return direct_text, direct_images, None
     except Exception as exc:
         direct_error = exc
 
@@ -4684,14 +4811,24 @@ def extract_article_content_with_fallback(url):
         fallback_text = fetch_article_via_jina_reader(url)
         return fallback_text, direct_images, None
     except Exception as fallback_exc:
+        if should_use_enhanced_article_fetch(url, direct_error, fallback_exc):
+            try:
+                enhanced_text, enhanced_images = fetch_article_via_scrapling(url)
+                merged_images = direct_images if direct_images else enhanced_images
+                return enhanced_text, merged_images, None
+            except Exception as enhanced_exc:
+                return None, [], (
+                    f'Article fetch failed after direct, fallback, and enhanced attempts: '
+                    f'origin({str(direct_error)}) | fallback({str(fallback_exc)}) | enhanced({str(enhanced_exc)})'
+                )
         return None, [], f'Article fetch failed: origin({str(direct_error)}) | fallback({str(fallback_exc)})'
 
 
-def get_content_from_url(url):
+def get_content_from_url(url, article_fetch_mode="standard"):
     if "youtube.com" in url or "youtu.be" in url:
         return extract_youtube_transcript(url)
     else:
-        return extract_article_content_with_fallback(url)
+        return extract_article_content_with_fallback(url, fetch_mode=article_fetch_mode)
 
 
 MAX_UPLOAD_TEXT_CHARS = 18000
@@ -6636,31 +6773,43 @@ if st.session_state.current_step == 1:
             st.caption(f"已选择 {len(file_names)} 个文件：{preview_names}")
 
     with st.container(border=True):
-        render_section_intro("开始提取", "系统会先抓取正文和图片，再将多源素材聚合成统一工作底稿。", "Actions")
-        st.markdown("<p class='toolbar-note'>建议先把主题相近的文章和视频放在同一批次里，方便后续自动路由和统一改写。</p>", unsafe_allow_html=True)
-        if st.button("开始批量提取内容", type="primary", use_container_width=True):
+        render_section_intro("????", "????????????????????????????", "Actions")
+        st.markdown("<p class='toolbar-note'>????????????????????????????????????</p>", unsafe_allow_html=True)
+        st.caption("?????????????????????????????????????????????")
+        extract_col1, extract_col2 = st.columns(2)
+        with extract_col1:
+            standard_extract_clicked = st.button("????????", type="primary", use_container_width=True)
+        with extract_col2:
+            enhanced_extract_clicked = st.button("??????", use_container_width=True)
+
+        if standard_extract_clicked or enhanced_extract_clicked:
+            article_fetch_mode = "enhanced" if enhanced_extract_clicked else "standard"
             article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
             video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
             uploaded_file_count = len(uploaded_source_files) if uploaded_source_files else 0
 
             if not article_urls and not video_urls and uploaded_file_count == 0:
-                st.warning("请至少输入链接或上传一个文件！")
+                st.warning("???????????????")
             else:
                 total_sources = len(article_urls) + len(video_urls) + uploaded_file_count
-                with st.spinner(f"启动全息解析引擎，正在批量获取 {total_sources} 个素材..."):
+                spinner_prefix = "????????" if article_fetch_mode == "enhanced" else "????????"
+                with st.spinner(f"{spinner_prefix}??????? {total_sources} ???..."):
                     combined_content = ""
                     extracted_imgs = []
                     errors = []
                     success_count = 0
 
                     for idx, a_url in enumerate(article_urls):
-                        art_content, art_imgs, art_err = get_content_from_url(a_url)
+                        art_content, art_imgs, art_err = get_content_from_url(
+                            a_url,
+                            article_fetch_mode=article_fetch_mode,
+                        )
                         if art_content:
-                            combined_content += f"【文章素材 {idx+1}】来源于: {a_url}\n{art_content}\n\n================\n\n"
+                            combined_content += f"????? {idx+1}????: {a_url}\n{art_content}\n\n================\n\n"
                             extracted_imgs.extend(art_imgs)
                             success_count += 1
                         else:
-                            errors.append(f"文章 {idx+1} 提取失败: {art_err}")
+                            errors.append(f"?? {idx+1} ????: {art_err}")
 
                     for idx, v_url in enumerate(video_urls):
                         vid_content, vid_imgs, vid_err = get_content_from_url(v_url)

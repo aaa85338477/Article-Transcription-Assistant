@@ -1,4 +1,5 @@
-﻿import ast
+import ast
+import sys
 import types
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from bs4 import BeautifulSoup
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
-TARGET_FUNCTIONS = {"extract_article_content_with_fallback"}
+TARGET_FUNCTIONS = {"extract_article_content_with_fallback", "get_content_from_url"}
 
 
 def load_article_helpers():
@@ -23,6 +24,7 @@ def load_article_helpers():
         "BeautifulSoup": BeautifulSoup,
         "urlparse": urlparse,
         "re": __import__("re"),
+        "extract_youtube_transcript": lambda url: (f"youtube::{url}", [], None),
     })
 
     for node in tree.body:
@@ -98,6 +100,100 @@ class ArticleExtractionTests(unittest.TestCase):
         self.assertEqual(images, [])
         self.assertIn("正常中文内容", text)
         self.assertNotIn("è¿™", text)
+
+    def test_extract_article_content_uses_stealthy_scrapling_for_enhanced_mode(self):
+        url = "https://www.gamespot.com/articles/test-story/"
+        call_order = []
+
+        class FakeFetcher:
+            @staticmethod
+            def get(page_url):
+                call_order.append(("basic", page_url))
+                return types.SimpleNamespace(html_content="<html><body><p>basic</p></body></html>")
+
+        class FakeStealthyFetcher:
+            @staticmethod
+            def fetch(page_url, **kwargs):
+                call_order.append(("stealthy", page_url, kwargs))
+                return types.SimpleNamespace(
+                    html_content="<html><body><article><p>Enhanced article body from Scrapling.</p></article></body></html>"
+                )
+
+        fake_scrapling_module = types.SimpleNamespace(
+            Fetcher=FakeFetcher,
+            StealthyFetcher=FakeStealthyFetcher,
+        )
+
+        with mock.patch.object(self.helpers.requests, "get") as mocked_get:
+            with mock.patch.dict(sys.modules, {"scrapling.fetchers": fake_scrapling_module}):
+                text, images, error = self.helpers.extract_article_content_with_fallback(url, fetch_mode="enhanced")
+
+        self.assertIsNone(error)
+        self.assertEqual(images, [])
+        self.assertEqual(text, "direct body")
+        self.assertEqual(call_order[0][0], "stealthy")
+        self.assertFalse(any(item[0] == "basic" for item in call_order))
+        mocked_get.assert_not_called()
+
+    def test_extract_article_content_uses_enhanced_fetch_after_direct_and_fallback_fail(self):
+        url = "https://www.gamespot.com/articles/take-two-boss-gives-hope-for-la-noire-2/"
+        origin_response = FakeResponse(status_code=403, url=url)
+        fallback_response = FakeResponse(status_code=403, url=f"https://r.jina.ai/{url}")
+
+        class FakeStealthyFetcher:
+            @staticmethod
+            def fetch(page_url, **kwargs):
+                return types.SimpleNamespace(
+                    html_content="<html><body><article><p>Enhanced article body from Scrapling.</p></article></body></html>"
+                )
+
+        fake_scrapling_module = types.SimpleNamespace(StealthyFetcher=FakeStealthyFetcher)
+
+        with mock.patch.object(self.helpers.requests, "get", side_effect=[origin_response, fallback_response]) as mocked_get:
+            with mock.patch.dict(sys.modules, {"scrapling.fetchers": fake_scrapling_module}):
+                text, images, error = self.helpers.extract_article_content_with_fallback(url)
+
+        self.assertIsNone(error)
+        self.assertEqual(images, [])
+        self.assertEqual(text, "direct body")
+        self.assertEqual(mocked_get.call_count, 2)
+
+    def test_extract_article_content_enhanced_mode_falls_back_to_direct_and_jina(self):
+        url = "https://www.gamespot.com/articles/fallback-case/"
+        origin_response = FakeResponse(status_code=403, url=url)
+        fallback_response = FakeResponse(
+            status_code=200,
+            text="Enhanced mode fallback article body " * 8,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            url=f"https://r.jina.ai/{url}",
+        )
+
+        class FakeStealthyFetcher:
+            @staticmethod
+            def fetch(page_url, **kwargs):
+                raise RuntimeError("blocked by enhanced fetch")
+
+        fake_scrapling_module = types.SimpleNamespace(StealthyFetcher=FakeStealthyFetcher)
+
+        with mock.patch.object(self.helpers.requests, "get", side_effect=[origin_response, fallback_response]) as mocked_get:
+            with mock.patch.dict(sys.modules, {"scrapling.fetchers": fake_scrapling_module}):
+                text, images, error = self.helpers.extract_article_content_with_fallback(url, fetch_mode="enhanced")
+
+        self.assertIsNone(error)
+        self.assertEqual(images, [])
+        self.assertIn("Enhanced mode fallback article body", text)
+        self.assertEqual(mocked_get.call_count, 2)
+
+    def test_get_content_from_url_keeps_youtube_path_unaffected_by_article_fetch_mode(self):
+        url = "https://www.youtube.com/watch?v=abc123"
+
+        with mock.patch.object(self.helpers, "extract_article_content_with_fallback") as mocked_article_extract:
+            text, images, error = self.helpers.get_content_from_url(url, article_fetch_mode="enhanced")
+
+        self.assertEqual(text, f"youtube::{url}")
+        self.assertEqual(images, [])
+        self.assertIsNone(error)
+        mocked_article_extract.assert_not_called()
 
 
 if __name__ == "__main__":
