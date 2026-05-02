@@ -206,7 +206,12 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("title group", modification_prompt.lower())
 
     def test_de_ai_prompt_template_requires_three_output_blocks(self):
-        template = self.helpers.build_de_ai_prompt_template("\u53d1\u884c\u4e3b\u7f16", "# Role: \u793a\u4f8b", "\u793a\u4f8b\u7d20\u6750")
+        template = self.helpers.build_de_ai_prompt_template(
+            "\u53d1\u884c\u4e3b\u7f16",
+            "# Role: \u793a\u4f8b",
+            "\u793a\u4f8b\u7d20\u6750",
+            current_article_text=f"{BODY_MARKER}\n\u7b2c\u4e00\u6bb5\u3002\n\n\u7b2c\u4e8c\u6bb5\u3002",
+        )
 
         self.assertIn(PURE_TITLE_MARKER, template)
         self.assertIn(PURE_BODY_MARKER, template)
@@ -214,6 +219,9 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("\u5982\u679c\u539f\u7a3f\u5f00\u5934\u592a\u7a81\u5140", template)
         self.assertIn("\u4fdd\u7559 3-5 \u4e2a\u5907\u9009\u6807\u9898", template)
         self.assertIn("\u4f18\u5148\u4f7f\u7528 <h2>/<h3>", template)
+        self.assertIn("[Length Preservation Protocol | Highest Priority]", template)
+        self.assertIn("Current input-draft body length", template)
+        self.assertIn("Do not turn a 500-word draft into an 800-900-word article.", template)
 
     def test_de_ai_prompt_template_variants_add_style_rules_without_changing_output_protocol(self):
         role_name = "\u53d1\u884c\u4e3b\u7f16"
@@ -633,6 +641,28 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("h2_count", issues)
         self.assertIn("highlight", issues)
 
+    def test_detect_auto_retry_issues_flags_length_overrun_against_target_and_reference(self):
+        article_text = (
+            f"{BODY_MARKER}\\n"
+            + ("A" * 900)
+        )
+        reference_article = (
+            f"{BODY_MARKER}\\n"
+            + ("B" * 500)
+        )
+
+        issues = self.helpers.detect_auto_retry_issues(
+            article_text,
+            explicit_title_candidates=["Title A", "Title B", "Title C"],
+            highlighted_article="<p>Highlighted</p>",
+            require_highlight=False,
+            target_words=500,
+            reference_article_text=reference_article,
+            check_length=True,
+        )
+
+        self.assertIn("length_overrun", issues)
+
     def test_auto_retry_instruction_and_notice_reflect_requested_repairs(self):
         instruction = self.helpers.build_auto_retry_instruction(
             ["titles", "h2_count", "highlight"],
@@ -647,6 +677,23 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("\u81ea\u52a8\u8865\u8dd1", notice)
         self.assertIn("\u6807\u9898\u7ec4", notice)
         self.assertIn("\u9ad8\u4eae\u9605\u8bfb\u7248", notice)
+
+    def test_auto_retry_instruction_includes_length_compression_requirement(self):
+        reference_article = (
+            f"{BODY_MARKER}\n"
+            + ("B" * 500)
+        )
+        instruction = self.helpers.build_auto_retry_instruction(
+            ["length_overrun"],
+            target_words=500,
+            require_highlight=False,
+            reference_article_text=reference_article,
+        )
+        notice = self.helpers.build_auto_retry_notice("de_ai_generation", ["length_overrun"])
+
+        self.assertIn("压缩式改写", instruction)
+        self.assertIn("500", instruction)
+        self.assertIn("篇幅控制", notice)
 
     def test_parse_de_ai_output_returns_titles_body_and_highlight(self):
         response = (

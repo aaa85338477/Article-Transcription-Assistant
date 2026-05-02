@@ -1659,6 +1659,8 @@ def detect_auto_retry_issues(
     highlighted_article="",
     require_highlight=False,
     target_words=None,
+    reference_article_text="",
+    check_length=False,
 ):
     report = build_publish_quality_gate_report(
         article_text,
@@ -1673,10 +1675,28 @@ def detect_auto_retry_issues(
             issue_keys.append(item.get("key"))
         if item.get("key") == "highlight" and require_highlight and item.get("status") != "pass":
             issue_keys.append("highlight")
+    if check_length:
+        article_body_length = len(get_article_body_text(article_text))
+        reference_body_length = len(get_article_body_text(reference_article_text))
+        try:
+            resolved_target_words = int(target_words or 0)
+        except (TypeError, ValueError):
+            resolved_target_words = 0
+        allowed_length = int(resolved_target_words * 1.2) if resolved_target_words > 0 else 0
+        if reference_body_length > 0:
+            expansion_limit = int(reference_body_length * 1.15)
+            allowed_length = max(allowed_length, expansion_limit) if allowed_length else expansion_limit
+        if allowed_length and article_body_length > allowed_length:
+            issue_keys.append("length_overrun")
     return issue_keys
 
 
-def build_auto_retry_instruction(issue_keys, target_words=None, require_highlight=False):
+def build_auto_retry_instruction(
+    issue_keys,
+    target_words=None,
+    require_highlight=False,
+    reference_article_text="",
+):
     issue_set = set(issue_keys or [])
     min_h2, max_h2 = get_expected_h2_range(target_words)
     instructions = ["【自动补跑修正】请只修复下面这些结构问题，再重新完整输出一次。"]
@@ -1686,6 +1706,17 @@ def build_auto_retry_instruction(issue_keys, target_words=None, require_highligh
         instructions.append("- 开头先补 1-2 段导语，先交代对象、事件和分析缘由，再进入正文分析。")
     if "h2_count" in issue_set:
         instructions.append(f"- 正文补足 `##` 二级标题，目标范围是 {min_h2}-{max_h2} 个，不要再写成一整堵长段。")
+    if "length_overrun" in issue_set:
+        reference_body_length = len(get_article_body_text(reference_article_text))
+        if reference_body_length > 0:
+            instructions.append(
+                f"- 本次只做压缩式改写，保持核心事实、标题组和结构不变，把正文尽量压回接近当前输入稿篇幅（当前输入稿约 {reference_body_length} 字），不要继续扩写。"
+            )
+        else:
+            instructions.append(
+                f"- 本次只做压缩式改写，保持核心事实、标题组和结构不变，把正文控制回约 {target_words} 字（允许 ±10%），不要继续扩写。"
+            )
+        instructions.append("- 删除多余的解释、重复判断、额外案例和拖长收尾，优先压缩而不是补充。")
     if "highlight" in issue_set and require_highlight:
         instructions.append("- 请同时输出完整的高亮阅读版，不要遗漏“高亮阅读版”区块。")
     return "\n".join(instructions)
@@ -1701,6 +1732,7 @@ def build_auto_retry_notice(stage_name, issue_keys):
         "titles": "标题组",
         "intro": "开头导语",
         "h2_count": "二级标题结构",
+        "length_overrun": "篇幅控制",
         "highlight": "高亮阅读版",
     }
     issue_labels = [label_map.get(key, key) for key in issue_keys or []]
@@ -3424,7 +3456,14 @@ def infer_article_topic(source_content):
     return clean_text[:40] + ("..." if len(clean_text) > 40 else "")
 
 
-def build_de_ai_prompt_template(role_name, editor_prompt, source_content, variant=DE_AI_VARIANT_DEFAULT, term_rules_instruction=""):
+def build_de_ai_prompt_template(
+    role_name,
+    editor_prompt,
+    source_content,
+    variant=DE_AI_VARIANT_DEFAULT,
+    term_rules_instruction="",
+    current_article_text="",
+):
     persona = infer_role_persona(role_name, editor_prompt)
     topic = infer_article_topic(source_content)
     audience = ROLE_AUDIENCE_MAP.get(role_name, "行业读者")
@@ -3435,6 +3474,24 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content, varian
         target_words = int(target_words)
     except Exception:
         target_words = 1500
+    current_article_length = len(get_article_body_text(current_article_text))
+    if current_article_length > 0:
+        length_instruction = "\n".join([
+            "[Length Preservation Protocol | Highest Priority]",
+            f"Target length for this run: about {target_words} words/characters (allow +/-10%).",
+            f"Current input-draft body length: about {current_article_length} words/characters.",
+            "The de-AI rewrite must preserve length discipline. Rewrite wording first; do not expand the article just because you are making it sound more human.",
+            "If the current input draft is already close to the target, keep the final body within about +/-10% of the current input length whenever possible.",
+            "Do not add new long background sections, extra examples, extra conclusions, or extra explanation unless the original draft is clearly missing essential context.",
+            "For short articles, prefer slight compression over expansion. Do not turn a 500-word draft into an 800-900-word article.",
+        ])
+    else:
+        length_instruction = "\n".join([
+            "[Length Preservation Protocol | Highest Priority]",
+            f"Target length for this run: about {target_words} words/characters (allow +/-10%).",
+            "The de-AI rewrite must preserve length discipline. Rewrite wording first; do not expand the article just because you are making it sound more human.",
+            "Do not add new long background sections, extra examples, extra conclusions, or extra explanation unless the original draft is clearly missing essential context.",
+        ])
     if target_words < 1200:
         heading_instruction = "短稿默认使用 3 个 `##` 二级标题。"
     elif target_words <= 2500:
@@ -3516,6 +3573,8 @@ def build_de_ai_prompt_template(role_name, editor_prompt, source_content, varian
 {community_instruction}
 {chatty_instruction}
 {humanizer_instruction}
+# Length Requirements
+{length_instruction}
 # 结构保留要求
 {structure_instruction}
 - 如果原稿现有标题层级是合理的，可以润色标题措辞，但不能把层级删掉。
@@ -4323,6 +4382,20 @@ def feishu_open_api_request(path, *, access_token, payload=None, method="POST", 
         data = {}
     if response.status_code != 200 or data.get("code") != 0:
         error_msg = data.get("msg") or response.text or f"HTTP {response.status_code}"
+        field_violations = (((data.get("error") or {}).get("field_violations")) or [])
+        if field_violations:
+            violation_parts = []
+            for item in field_violations:
+                field_name = str(item.get("field", "") or "").strip()
+                description = str(item.get("description", "") or "").strip()
+                if field_name and description:
+                    violation_parts.append(f"{field_name}: {description}")
+                elif field_name:
+                    violation_parts.append(field_name)
+                elif description:
+                    violation_parts.append(description)
+            if violation_parts:
+                error_msg = f"{error_msg} ({'; '.join(violation_parts)})"
         raise RuntimeError(error_msg)
     return data.get("data", {})
 
@@ -4350,11 +4423,17 @@ def create_feishu_doc(title, folder_token=None, access_token=""):
 def append_blocks_to_feishu_doc(document_id, blocks, access_token=""):
     if not blocks:
         return {}
-    return feishu_open_api_request(
-        f"/docx/v1/documents/{document_id}/blocks/{document_id}/children",
-        access_token=access_token,
-        payload={"children": blocks},
-    )
+    append_path = f"/docx/v1/documents/{document_id}/blocks/{document_id}/children"
+    last_response = {}
+    # Feishu Docx create-block API accepts at most 50 children per call.
+    for start_idx in range(0, len(blocks), 50):
+        chunk = blocks[start_idx:start_idx + 50]
+        last_response = feishu_open_api_request(
+            append_path,
+            access_token=access_token,
+            payload={"children": chunk},
+        )
+    return last_response
 
 
 def publish_article_to_feishu_doc(article_text, *, title_candidates=None, highlighted_html=""):
@@ -7506,6 +7585,7 @@ elif st.session_state.current_step == 5:
         st.session_state.get("source_content", ""),
         variant=de_ai_variant,
         term_rules_instruction=de_ai_term_rules_instruction,
+        current_article_text=st.session_state.get("modified_article", ""),
     )
 
     with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
@@ -7573,6 +7653,34 @@ elif st.session_state.current_step == 5:
                     de_ai_response,
                     fallback_titles=st.session_state.get("title_candidates", []),
                 )
+                retry_issue_keys = detect_auto_retry_issues(
+                    build_structured_article_text(pure_titles, pure_article),
+                    explicit_title_candidates=pure_titles,
+                    highlighted_article=highlighted_article,
+                    require_highlight=True,
+                    target_words=get_target_article_words(),
+                    reference_article_text=st.session_state.get("modified_article", ""),
+                    check_length=True,
+                )
+                if retry_issue_keys:
+                    retry_instruction = build_auto_retry_instruction(
+                        retry_issue_keys,
+                        target_words=get_target_article_words(),
+                        require_highlight=True,
+                        reference_article_text=st.session_state.get("modified_article", ""),
+                    )
+                    retry_response = call_llm(
+                        api_key=api_key,
+                        base_url=current_base_url,
+                        model_name=st.session_state.get('de_ai_model', DE_AI_MODELS[0]),
+                        system_prompt=st.session_state.de_ai_prompt_template + "\n\n" + retry_instruction,
+                        user_content=st.session_state.modified_article,
+                        temperature=st.session_state.get('de_ai_temperature', 0.75),
+                    )
+                    pure_titles, pure_article, highlighted_article = parse_de_ai_dual_output(
+                        retry_response,
+                        fallback_titles=pure_titles or st.session_state.get("title_candidates", []),
+                    )
                 st.session_state.title_candidates = pure_titles
                 st.session_state.final_article = build_structured_article_text(pure_titles, pure_article) or (de_ai_response or "").strip()
                 st.session_state.highlighted_article = highlighted_article

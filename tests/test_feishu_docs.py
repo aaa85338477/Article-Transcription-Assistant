@@ -20,6 +20,8 @@ TARGET_FUNCTIONS = {
     "build_feishu_text_elements",
     "make_feishu_block",
     "build_feishu_doc_blocks",
+    "append_blocks_to_feishu_doc",
+    "feishu_open_api_request",
 }
 TARGET_ASSIGNMENTS = {
     "ARTICLE_TITLE_MARKER",
@@ -172,6 +174,31 @@ class FeishuDocTests(unittest.TestCase):
         self.assertTrue(risk_style.get("bold"))
         self.assertEqual(risk_style.get("text_color"), 1)
         self.assertEqual(risk_style.get("background_color"), 1)
+
+    def test_append_blocks_to_feishu_doc_sends_chunks_of_50(self):
+        captured_payloads = []
+
+        def fake_open_api_request(path, *, access_token, payload=None, method="POST", timeout=20):
+            captured_payloads.append({
+                "path": path,
+                "access_token": access_token,
+                "payload": payload,
+            })
+            return {"ok": True}
+
+        self.helpers.feishu_open_api_request = fake_open_api_request
+        blocks = [self.helpers.make_feishu_block("text", f"Block {idx}") for idx in range(63)]
+
+        self.helpers.append_blocks_to_feishu_doc("doc_123", blocks, access_token="tenant_token")
+
+        self.assertEqual(len(captured_payloads), 2)
+        self.assertEqual(len(captured_payloads[0]["payload"]["children"]), 50)
+        self.assertEqual(len(captured_payloads[1]["payload"]["children"]), 13)
+        self.assertEqual(
+            captured_payloads[0]["path"],
+            "/docx/v1/documents/doc_123/blocks/doc_123/children",
+        )
+        self.assertEqual(captured_payloads[1]["access_token"], "tenant_token")
 
 
 if __name__ == "__main__":
