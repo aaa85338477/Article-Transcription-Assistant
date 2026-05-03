@@ -5,6 +5,7 @@ import re
 import types
 import unittest
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -51,6 +52,12 @@ TARGET_FUNCTIONS = {
     "ensure_highlighted_article_context",
     "parse_de_ai_dual_output",
     "sanitize_highlighted_article",
+    "parse_writing_brief_structured_text",
+    "summarize_writing_brief",
+    "split_brief_signal_entry",
+    "build_brief_evidence_map",
+    "build_brief_source_confirmation",
+    "build_planned_editor_user_content",
     "normalize_query_token",
     "split_article_paragraphs",
     "extract_obsidian_signal_terms",
@@ -76,6 +83,7 @@ TARGET_ASSIGNMENTS = {
     "DE_AI_VARIANT_COMMUNITY",
     "DE_AI_VARIANT_CHAT",
     "DE_AI_VARIANT_HUMANIZER",
+    "BRIEF_SECTION_ALIASES",
     "QUERY_STOPWORDS_EN",
     "QUERY_STOPWORDS_ZH",
     "ENGLISH_SIGNAL_HINTS",
@@ -108,6 +116,7 @@ def load_prompt_helpers():
         "re": re,
         "json": json,
         "hashlib": hashlib,
+        "urlparse": urlparse,
         "st": types.SimpleNamespace(session_state=SessionState()),
     })
 
@@ -837,6 +846,59 @@ class PromptStructureTests(unittest.TestCase):
         self.assertEqual(len(session_state["evidence_map"]), 1)
         self.assertEqual(session_state["evidence_map"][0]["source_types"], ["source_packet"])
         self.assertIn("\u547d\u4e2d\u6bb5\u843d", session_state["evidence_summary"])
+
+    def test_writing_brief_parser_supports_inline_topic_and_reddit_signal_without_duplicate_summary(self):
+        brief_text = (
+            "`深度` 从‘快节奏崩塌’到‘长线运营焦虑’：当英雄射击与叙事驱动游戏遭遇生存危机\n"
+            "> 值得写: 行业近期出现明显的两极分化。\n"
+            "> 推荐角度: 对比分析：工业化量产的“平庸产品”如何被市场抛弃。\n"
+            "> 写作切口: 当《Last Flag》在上线两周后宣布停止开发时，它不仅是一个产品的失败。\n"
+            "> Reddit 信号: Reddit社区目前对《崩坏：星穹铁道》末期循环的高评价，反映出玩家对“低压力、高质量”体验的渴求。\n"
+            "> 数据来源: https://example.com/a\n"
+        )
+
+        parsed = self.helpers.parse_writing_brief_structured_text(brief_text)
+        summary = self.helpers.summarize_writing_brief(parsed)
+
+        self.assertEqual(parsed["topic_candidates"][0], "从‘快节奏崩塌’到‘长线运营焦虑’：当英雄射击与叙事驱动游戏遭遇生存危机")
+        self.assertEqual(parsed["signal_groups"]["Reddit"][0], "Reddit社区目前对《崩坏：星穹铁道》末期循环的高评价，反映出玩家对“低压力、高质量”体验的渴求。")
+        self.assertIn("Source-specific signals:", summary)
+        self.assertEqual(summary.count("Reddit signal:"), 1)
+        if "Why it matters:" in summary and "Source-specific signals:" in summary:
+            why_block = summary.split("Why it matters:", 1)[1].split("Source-specific signals:", 1)[0]
+            self.assertNotIn("Reddit社区目前对《崩坏：星穹铁道》末期循环的高评价", why_block)
+
+    def test_planned_editor_content_prioritizes_brief_before_sources(self):
+        content = self.helpers.build_planned_editor_user_content(
+            "### 今日可写选题\n1. 经典策略回归为何比服务型新品更能穿越周期",
+            "【文章素材 1】来源于: https://example.com/a\n示例正文",
+            "本地知识摘要",
+        )
+
+        self.assertTrue(content.startswith("[Planning brief | highest priority]"))
+        self.assertIn("Build a brand-new synthesized article", content)
+        self.assertIn("[Source packet]", content)
+        self.assertIn("本地知识摘要", content)
+
+    def test_brief_evidence_map_and_source_confirmation_match_source_packet(self):
+        parsed = self.helpers.parse_writing_brief_structured_text(
+            "### 今日可写选题\n1. 英雄射击为何陷入同质化困境\n> 推荐角度：比较 Last Flag 与经典策略回归\n> 数据来源：https://www.gamespot.com/articles/demo\n"
+        )
+        source_packet = (
+            "【文章素材 1】来源于: https://www.gamespot.com/articles/demo\n"
+            "Last Flag 在上线两周后宣布停止开发，反映出英雄射击赛道的同质化问题。\n\n"
+            "================\n\n"
+            "【文章素材 2】来源于: https://example.com/other\n"
+            "Heroes of Might and Magic 的回归在 Steam 上表现强劲。"
+        )
+
+        evidence_map = self.helpers.build_brief_evidence_map(parsed, source_packet)
+        confirmations = self.helpers.build_brief_source_confirmation(parsed, source_packet)
+
+        self.assertTrue(evidence_map)
+        self.assertEqual(evidence_map[0]["matched_source_label"], "文章素材 1")
+        self.assertEqual(confirmations[0]["host"], "gamespot.com")
+        self.assertTrue(confirmations[0]["matched"])
 
 if __name__ == "__main__":
     unittest.main()

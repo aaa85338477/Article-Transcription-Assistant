@@ -117,6 +117,10 @@ class TaskQueueHelperTests(unittest.TestCase):
     def test_build_task_title_prefers_titles_then_url_summary(self):
         titled = self.helpers.build_task_title({"title_candidates": ["First title", "Second title"]})
         self.assertEqual(titled, "First title")
+        from_brief = self.helpers.build_task_title({
+            "brief_topic": "从快节奏崩塌到长线运营焦虑：当英雄射击与叙事驱动游戏遭遇生存危机"
+        })
+        self.assertTrue(from_brief.startswith("从快节奏崩塌到长线运营焦虑"))
 
         from_urls = self.helpers.build_task_title({
             "article_url": "https://example.com/a\nhttps://example.com/b"
@@ -186,7 +190,12 @@ class TaskQueueHelperTests(unittest.TestCase):
                 "id": "T002",
                 "name": "Gamigion roundup",
                 "status": "pending",
-                "snapshot": {"article_url": "https://gamigion.com/news"},
+                "snapshot": {
+                    "article_url": "https://gamigion.com/news",
+                    "brief_topic": "英雄射击为何陷入同质化困境",
+                    "writing_brief_summary": "Core topic: 英雄射击为何陷入同质化困境",
+                    "brief_sources": ["https://www.gamespot.com/articles/demo"],
+                },
             },
         ]
 
@@ -195,6 +204,8 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertIn("pocketgamer.biz", self.helpers.build_task_search_haystack(tasks[0]))
         self.assertEqual([task["id"] for task in self.helpers.filter_tasks_by_query(tasks, "PocketGamer")], ["T001"])
         self.assertEqual([task["id"] for task in self.helpers.filter_tasks_by_query(tasks, "gamigion.com")], ["T002"])
+        self.assertEqual([task["id"] for task in self.helpers.filter_tasks_by_query(tasks, "英雄射击")], ["T002"])
+        self.assertEqual([task["id"] for task in self.helpers.filter_tasks_by_query(tasks, "gamespot.com")], ["T002"])
         self.assertEqual([task["id"] for task in self.helpers.filter_tasks_by_query(tasks, "pocketgamer", status_filter="completed")], ["T001"])
         self.assertEqual(self.helpers.filter_tasks_by_query(tasks, "pocketgamer", status_filter="pending"), [])
 

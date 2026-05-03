@@ -87,7 +87,10 @@ DRAFT_STATE_KEYS = [
     'obsidian_retrieval_error', 'obsidian_query_terms', 'obsidian_wiki_root',
     'obsidian_last_indexed_at', 'obsidian_retrieval_signature',
     'obsidian_influence_map', 'obsidian_influence_summary', 'obsidian_influence_signature',
-    'evidence_map', 'evidence_summary', 'evidence_signature'
+    'evidence_map', 'evidence_summary', 'evidence_signature',
+    'writing_brief_raw', 'writing_brief_parsed', 'writing_brief_mode',
+    'writing_brief_summary', 'brief_topic', 'brief_sources',
+    'brief_evidence_map', 'brief_evidence_summary', 'brief_source_confirmation'
 ]
 
 TASK_TEMPLATE_CONFIG_KEYS = [
@@ -296,6 +299,8 @@ def apply_draft_data(draft_data):
     st.session_state.target_article_words_slider = st.session_state.get("target_article_words", 1500)
     for stale_key in [key for key in list(st.session_state.keys()) if key.startswith("source_image_pick_")]:
         del st.session_state[stale_key]
+    st.session_state._writing_brief_signature = ""
+    refresh_writing_brief_state(force=True)
 
 
 def build_task_fallback_name(entity_id, default_suffix="001"):
@@ -308,6 +313,12 @@ def build_task_title(task_snapshot, fallback_name="\u4efb\u52a1"):
     titles = normalize_title_candidates(snapshot.get("title_candidates", []))
     if titles:
         return titles[0][:60]
+
+    brief_topic = str(snapshot.get("brief_topic", "") or snapshot.get("writing_brief_summary", "") or "").strip()
+    if brief_topic:
+        first_line = brief_topic.splitlines()[0].strip()
+        if first_line:
+            return first_line[:60]
 
     for field_name in ("article_url", "video_url"):
         raw_value = str(snapshot.get(field_name, "") or "")
@@ -434,7 +445,13 @@ def build_task_source_hosts(task_record):
 
 
 def build_task_search_haystack(task_record):
-    parts = [str((task_record or {}).get("name", "") or "").strip()]
+    snapshot = (task_record or {}).get("snapshot", {}) or {}
+    parts = [
+        str((task_record or {}).get("name", "") or "").strip(),
+        str(snapshot.get("brief_topic", "") or "").strip(),
+        str(snapshot.get("writing_brief_summary", "") or "").strip(),
+    ]
+    parts.extend(snapshot.get("brief_sources", []) or [])
     parts.extend(build_task_source_hosts(task_record))
     return " ".join(part.casefold() for part in parts if str(part or "").strip())
 
@@ -474,6 +491,10 @@ def refresh_task_record(task_record, task_snapshot=None):
     task_record["resume_stage"] = snapshot.get("pending_ai_stage") or snapshot.get("last_completed_ai_stage") or ""
     task_record["last_error"] = (snapshot.get("last_ai_error", "") or "").strip()
     task_record["metrics"] = build_task_metrics(snapshot)
+    task_record["writing_brief_summary"] = snapshot.get("writing_brief_summary", "") or ""
+    task_record["brief_topic"] = snapshot.get("brief_topic", "") or ""
+    task_record["brief_sources"] = clone_json_data(snapshot.get("brief_sources", []) or [])
+    task_record["brief_mode"] = snapshot.get("writing_brief_mode", "structured_text") or "structured_text"
     if is_placeholder_task_name(task_record.get("name", "")):
         fallback_name = build_task_fallback_name(task_record.get('id', ''))
         task_record["name"] = build_task_title(snapshot, fallback_name=fallback_name)
@@ -623,6 +644,15 @@ def build_blank_task_snapshot(base_snapshot=None):
         "evidence_map": [],
         "evidence_summary": "",
         "evidence_signature": "",
+        "writing_brief_raw": "",
+        "writing_brief_parsed": {},
+        "writing_brief_mode": "structured_text",
+        "writing_brief_summary": "",
+        "brief_topic": "",
+        "brief_sources": [],
+        "brief_evidence_map": [],
+        "brief_evidence_summary": "",
+        "brief_source_confirmation": [],
     }
     for key, value in reset_defaults.items():
         snapshot[key] = clone_json_data(value)
@@ -651,6 +681,10 @@ def draft_has_meaningful_content(draft_data):
         "feishu_doc_title",
         "feishu_publish_error",
         "obsidian_research_brief",
+        "writing_brief_raw",
+        "writing_brief_summary",
+        "brief_topic",
+        "brief_evidence_summary",
     )
     for key in text_keys:
         if str(draft_data.get(key, "") or "").strip():
@@ -668,6 +702,9 @@ def draft_has_meaningful_content(draft_data):
         "chat_history",
         "obsidian_hits",
         "evidence_map",
+        "brief_sources",
+        "brief_evidence_map",
+        "brief_source_confirmation",
     )
     for key in list_keys:
         if draft_data.get(key):
@@ -2325,6 +2362,443 @@ def build_editor_user_content(source_content, research_brief, use_images=False):
     return "\n\n================\n\n".join(part for part in parts if part.strip())
 
 
+BRIEF_SECTION_ALIASES = {
+    "topics": ("今日可写选题", "可写选题", "选题", "核心选题", "主题"),
+    "signals": ("值得写", "值得写的点", "信号", "为什么值得写", "why it matters"),
+    "angles": ("推荐角度", "角度", "分析角度", "recommended angles"),
+    "hooks": ("写作切口", "切口", "切入点", "writing hooks"),
+    "sources": ("数据来源", "来源", "来源链接", "参考来源", "referenced sources"),
+}
+
+
+
+def split_brief_signal_entry(value):
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    for marker in ("信号：", "信号:"):
+        marker_index = text.find(marker)
+        if marker_index != -1:
+            label = text[:marker_index].strip().lstrip("> -*•").strip()
+            label = label.split()[0].strip() if label.split() else label
+            body = text[marker_index + len(marker):].strip()
+            if label and body:
+                return label, body
+    marker_index = text.find("信号")
+    if marker_index != -1:
+        label = text[:marker_index].strip().lstrip("> -*•").strip()
+        label = label.split()[0].strip() if label.split() else label
+        body = text[marker_index + len("信号"):].lstrip("：:").strip()
+        if label and body:
+            return label, body
+    return None, None
+def parse_writing_brief_structured_text(raw_text):
+    clean_text = (raw_text or "").strip()
+    parsed = {
+        "topic_candidates": [],
+        "signals": [],
+        "signal_groups": {},
+        "angles": [],
+        "hooks": [],
+        "source_urls": [],
+    }
+    if not clean_text:
+        return parsed
+
+    bullet_chars = "> -*" + chr(0x2022)
+    full_colon = chr(0xff1a)
+    signal_token = ''.join(chr(c) for c in (0x4fe1, 0x53f7))
+
+    def append_unique(bucket, value):
+        clean_value = str(value or "").strip()
+        if not clean_value:
+            return
+        if clean_value not in bucket:
+            bucket.append(clean_value)
+
+    def append_brief_urls(bucket, seen_urls, value):
+        for url in re.findall(r"https?://[^\s<>\])]+", value or ""):
+            clean_url = url.rstrip('.,;)]}>\'"')
+            if clean_url and clean_url not in seen_urls:
+                seen_urls.add(clean_url)
+                bucket.append(clean_url)
+
+    def resolve_section_key(label_text):
+        clean_label = str(label_text or "").strip().casefold()
+        for section_key, aliases in BRIEF_SECTION_ALIASES.items():
+            for alias in aliases:
+                if clean_label == str(alias).strip().casefold():
+                    return section_key
+        return None
+
+    def split_section_value(normalized):
+        normalized_fold = normalized.casefold()
+        for section_name, aliases in BRIEF_SECTION_ALIASES.items():
+            for alias in aliases:
+                alias_text = str(alias).strip()
+                if not alias_text:
+                    continue
+                if not normalized_fold.startswith(alias_text.casefold()):
+                    continue
+                remainder = normalized[len(alias_text):].strip()
+                if remainder.startswith(":") or remainder.startswith(full_colon):
+                    remainder = remainder[1:].strip()
+                return section_name, remainder.strip()
+        return None, None
+
+    def split_signal_value(text):
+        if signal_token not in text:
+            return None, None
+        signal_prefix, signal_body = text.split(signal_token, 1)
+        signal_label = signal_prefix.strip().lstrip(bullet_chars).strip()
+        signal_label = signal_label.split()[0].strip() if signal_label.split() else signal_label
+        signal_body = signal_body.lstrip(f"{full_colon}:").strip()
+        if not signal_label or not signal_body:
+            return None, None
+        return signal_label, signal_body
+
+    section_key = None
+    source_seen = set()
+    first_content_consumed = False
+    for raw_line in clean_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        heading_match = re.match(r"^\s{0,3}#{1,6}\s*(.+?)\s*$", line)
+        if heading_match:
+            heading_text = heading_match.group(1).strip()
+            resolved = resolve_section_key(heading_text)
+            if resolved:
+                section_key = resolved
+                continue
+
+        normalized = line.lstrip(bullet_chars).strip()
+        normalized = re.sub(r"^\d+[\.)]\s*", "", normalized).strip()
+        normalized = normalized.strip("`").strip()
+        if not normalized:
+            continue
+
+        matched_inline = False
+        section_name, value = split_section_value(normalized)
+        if section_name:
+            matched_inline = True
+            section_key = section_name
+            if section_name == "topics":
+                append_unique(parsed["topic_candidates"], value)
+            elif section_name == "signals":
+                append_unique(parsed["signals"], value)
+                signal_label, signal_body = split_signal_value(value)
+                if signal_label and signal_body:
+                    append_unique(parsed["signal_groups"].setdefault(signal_label, []), signal_body)
+            elif section_name == "angles":
+                append_unique(parsed["angles"], value)
+            elif section_name == "hooks":
+                append_unique(parsed["hooks"], value)
+            elif section_name == "sources":
+                append_brief_urls(parsed["source_urls"], source_seen, value)
+        if matched_inline:
+            continue
+
+        signal_label, signal_body = split_signal_value(normalized)
+        if signal_label and signal_body:
+            append_unique(parsed["signals"], normalized)
+            append_unique(parsed["signal_groups"].setdefault(signal_label, []), signal_body)
+            append_brief_urls(parsed["source_urls"], source_seen, normalized)
+            first_content_consumed = True
+            section_key = "signals"
+            continue
+
+        if not first_content_consumed and not parsed["topic_candidates"]:
+            topic_line = re.sub(r"^`[^`]+`\s*", "", line.strip()).strip()
+            if topic_line:
+                append_unique(parsed["topic_candidates"], topic_line)
+                append_brief_urls(parsed["source_urls"], source_seen, topic_line)
+                first_content_consumed = True
+                continue
+
+        first_content_consumed = True
+        if section_key == "topics":
+            append_unique(parsed["topic_candidates"], normalized)
+        elif section_key == "signals":
+            append_unique(parsed["signals"], normalized)
+            signal_label, signal_body = split_signal_value(normalized)
+            if signal_label and signal_body:
+                append_unique(parsed["signal_groups"].setdefault(signal_label, []), signal_body)
+        elif section_key == "angles":
+            append_unique(parsed["angles"], normalized)
+        elif section_key == "hooks":
+            append_unique(parsed["hooks"], normalized)
+        elif section_key == "sources":
+            append_brief_urls(parsed["source_urls"], source_seen, normalized)
+        else:
+            append_unique(parsed["signals"], normalized)
+            signal_label, signal_body = split_signal_value(normalized)
+            if signal_label and signal_body:
+                append_unique(parsed["signal_groups"].setdefault(signal_label, []), signal_body)
+        append_brief_urls(parsed["source_urls"], source_seen, normalized)
+
+    return parsed
+
+
+def summarize_writing_brief(parsed_brief):
+    parsed = parsed_brief or {}
+    signal_token = ''.join(chr(c) for c in (0x4fe1, 0x53f7))
+    full_colon = chr(0xff1a)
+    bullet_chars = "> -*" + chr(0x2022)
+    lines = []
+    if parsed.get("topic_candidates"):
+        lines.append(f"Core topic: {parsed['topic_candidates'][0]}")
+    if parsed.get("angles"):
+        lines.append("Recommended angles:")
+        lines.extend(f"- {item}" for item in parsed["angles"][:3])
+    if parsed.get("hooks"):
+        lines.append("Writing hooks:")
+        lines.extend(f"- {item}" for item in parsed["hooks"][:3])
+    grouped_values = {
+        value
+        for values in (parsed.get("signal_groups", {}) or {}).values()
+        for value in values
+    }
+    plain_signals = []
+    for item in parsed.get("signals", []) or []:
+        if signal_token in item:
+            signal_prefix, signal_body = item.split(signal_token, 1)
+            signal_label = signal_prefix.strip().lstrip(bullet_chars).strip()
+            signal_label = signal_label.split()[0].strip() if signal_label.split() else signal_label
+            signal_body = signal_body.lstrip(f"{full_colon}:").strip()
+            if signal_label and signal_body and signal_body in grouped_values:
+                continue
+        plain_signals.append(item)
+    if plain_signals:
+        lines.append("Why it matters:")
+        lines.extend(f"- {item}" for item in plain_signals[:3])
+    if parsed.get("signal_groups"):
+        lines.append("Source-specific signals:")
+        for label, values in list((parsed.get("signal_groups", {}) or {}).items())[:4]:
+            for value in values[:2]:
+                lines.append(f"- {label} signal: {value}")
+    if parsed.get("source_urls"):
+        lines.append("Referenced sources:")
+        lines.extend(f"- {url}" for url in parsed["source_urls"][:6])
+def summarize_writing_brief(parsed_brief):
+    parsed = parsed_brief or {}
+    signal_token = ''.join(chr(c) for c in (0x4fe1, 0x53f7))
+    full_colon = chr(0xff1a)
+    bullet_chars = "> -*" + chr(0x2022)
+    lines = []
+    if parsed.get("topic_candidates"):
+        lines.append(f"Core topic: {parsed['topic_candidates'][0]}")
+    if parsed.get("angles"):
+        lines.append("Recommended angles:")
+        lines.extend(f"- {item}" for item in parsed["angles"][:3])
+    if parsed.get("hooks"):
+        lines.append("Writing hooks:")
+        lines.extend(f"- {item}" for item in parsed["hooks"][:3])
+    grouped_values = {
+        value
+        for values in (parsed.get("signal_groups", {}) or {}).values()
+        for value in values
+    }
+    plain_signals = []
+    for item in parsed.get("signals", []) or []:
+        if signal_token in item:
+            signal_prefix, signal_body = item.split(signal_token, 1)
+            signal_label = signal_prefix.strip().lstrip(bullet_chars).strip()
+            signal_label = signal_label.split()[0].strip() if signal_label.split() else signal_label
+            signal_body = signal_body.lstrip(f"{full_colon}:").strip()
+            if signal_label and signal_body and signal_body in grouped_values:
+                continue
+        plain_signals.append(item)
+    if plain_signals:
+        lines.append("Why it matters:")
+        lines.extend(f"- {item}" for item in plain_signals[:3])
+    if parsed.get("signal_groups"):
+        lines.append("Source-specific signals:")
+        for label, values in list((parsed.get("signal_groups", {}) or {}).items())[:4]:
+            for value in values[:2]:
+                lines.append(f"- {label} signal: {value}")
+    if parsed.get("source_urls"):
+        lines.append("Referenced sources:")
+        lines.extend(f"- {url}" for url in parsed["source_urls"][:6])
+    return "\n".join(lines).strip()
+
+def render_brief_signal_cards(signal_groups):
+    groups = [(label, values) for label, values in (signal_groups or {}).items() if values]
+    if not groups:
+        return
+
+    card_columns = 2 if len(groups) > 1 else 1
+    rows = [groups[idx:idx + card_columns] for idx in range(0, len(groups), card_columns)]
+    for row in rows:
+        columns = st.columns(card_columns)
+        for idx, col in enumerate(columns):
+            if idx >= len(row):
+                continue
+            label, values = row[idx]
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{label} 信号**")
+                    st.caption(f"{len(values[:3])} 条重点反馈")
+                    for value in values[:3]:
+                        st.markdown(f"- {value}")
+
+
+def build_brief_evidence_map(parsed_brief, source_content):
+    parsed = parsed_brief or {}
+    source_segments = parse_source_packet_segments(source_content)
+    if not source_segments:
+        return []
+
+    query_terms = []
+    for field_name in ("topic_candidates", "angles", "hooks", "signals"):
+        for value in parsed.get(field_name, []) or []:
+            query_terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}|[\u4E00-\u9FFF]{2,12}", value or ""))
+    normalized_terms = []
+    seen_terms = set()
+    for token in query_terms:
+        normalized = normalize_query_token(token)
+        if not normalized or normalized in QUERY_STOPWORDS_EN or normalized in QUERY_STOPWORDS_ZH or normalized in seen_terms:
+            continue
+        seen_terms.add(normalized)
+        normalized_terms.append(normalized)
+
+    evidence_map = []
+    for label, section_values in (
+        ("topic", parsed.get("topic_candidates", [])[:1]),
+        ("angles", parsed.get("angles", [])[:3]),
+        ("hooks", parsed.get("hooks", [])[:3]),
+    ):
+        for section_value in section_values:
+            best_match = None
+            best_score = 0
+            section_text = str(section_value or "")
+            section_terms = [
+                normalize_query_token(token)
+                for token in re.findall(r"[A-Za-z][A-Za-z0-9\-\+]{2,}|[\u4E00-\u9FFF]{2,12}", section_text)
+            ]
+            section_terms = [term for term in section_terms if term and term not in QUERY_STOPWORDS_EN and term not in QUERY_STOPWORDS_ZH]
+            active_terms = section_terms or normalized_terms[:8]
+            for segment in source_segments:
+                paragraphs = segment.get("paragraphs", []) or []
+                paragraph_hits = []
+                score = 0
+                for idx, paragraph in enumerate(paragraphs, start=1):
+                    paragraph_lower = paragraph.casefold()
+                    hit_terms = [term for term in active_terms if term and term in paragraph_lower]
+                    if hit_terms:
+                        paragraph_hits.append({"index": idx, "text": paragraph, "matched_terms": hit_terms})
+                        score += len(hit_terms) * 2
+                    if section_text and paragraph and section_text[:24] in paragraph:
+                        score += 3
+                if score > best_score and paragraph_hits:
+                    best_score = score
+                    best_match = {
+                        "brief_section": label,
+                        "brief_text": section_text,
+                        "matched_source_label": segment.get("source_label", ""),
+                        "matched_source_locator": segment.get("source_locator", ""),
+                        "matched_paragraphs": paragraph_hits[:2],
+                        "score": score,
+                    }
+            if best_match:
+                evidence_map.append(best_match)
+    return evidence_map
+
+
+def build_brief_source_confirmation(parsed_brief, source_content):
+    source_segments = parse_source_packet_segments(source_content)
+    known_hosts = {}
+    for segment in source_segments:
+        locator = str(segment.get("source_locator", "") or "").strip()
+        if not locator:
+            continue
+        host = urlparse(locator).netloc.replace("www.", "").strip()
+        if host and host not in known_hosts:
+            known_hosts[host] = locator
+
+    confirmations = []
+    for url in (parsed_brief or {}).get("source_urls", []) or []:
+        clean_url = str(url or "").strip()
+        host = urlparse(clean_url).netloc.replace("www.", "").strip()
+        confirmations.append({
+            "url": clean_url,
+            "host": host or clean_url,
+            "matched": bool(host and host in known_hosts),
+            "matched_locator": known_hosts.get(host, ""),
+        })
+    return confirmations
+
+
+def refresh_writing_brief_state(force=False):
+    raw_text = (st.session_state.get("writing_brief_raw", "") or "").strip()
+    source_content = (st.session_state.get("source_content", "") or "").strip()
+    signature_base = raw_text + "\n\n" + source_content
+    signature = hashlib.sha1(signature_base.encode("utf-8")).hexdigest() if signature_base else ""
+    if not force and signature and st.session_state.get("_writing_brief_signature") == signature:
+        return
+    if not raw_text:
+        st.session_state.writing_brief_parsed = {}
+        st.session_state.writing_brief_summary = ""
+        st.session_state.brief_topic = ""
+        st.session_state.brief_sources = []
+        st.session_state.brief_evidence_map = []
+        st.session_state.brief_evidence_summary = ""
+        st.session_state.brief_source_confirmation = []
+        st.session_state._writing_brief_signature = signature
+        return
+
+    parsed = parse_writing_brief_structured_text(raw_text)
+    st.session_state.writing_brief_parsed = parsed
+    st.session_state.writing_brief_mode = "structured_text"
+    st.session_state.writing_brief_summary = summarize_writing_brief(parsed)
+    st.session_state.brief_topic = (parsed.get("topic_candidates", []) or [""])[0]
+    st.session_state.brief_sources = clone_json_data(parsed.get("source_urls", []) or [])
+    evidence_map = build_brief_evidence_map(parsed, source_content)
+    st.session_state.brief_evidence_map = evidence_map
+    if evidence_map:
+        mapped_sources = []
+        for item in evidence_map:
+            label = item.get("matched_source_label", "") or item.get("matched_source_locator", "")
+            if label and label not in mapped_sources:
+                mapped_sources.append(label)
+        st.session_state.brief_evidence_summary = (
+            f"Brief mapped to {len(mapped_sources)} source segments: " + ", ".join(mapped_sources[:4])
+        )
+    else:
+        st.session_state.brief_evidence_summary = ""
+    st.session_state.brief_source_confirmation = build_brief_source_confirmation(parsed, source_content)
+    st.session_state._writing_brief_signature = signature
+
+
+def sync_writing_brief_state():
+    refresh_writing_brief_state(force=True)
+    save_draft()
+
+
+def build_planned_editor_user_content(writing_brief, source_content, research_brief, use_images=False):
+    brief_summary = summarize_writing_brief(parse_writing_brief_structured_text(writing_brief))
+    lead = "Below is a merged source packet. Use the attached reference images together with the text for deep analysis and synthesis:" if use_images else "Below is a merged source packet. Use the text-only source packet for deep analysis and synthesis:"
+    source_parts = [f"{lead}\n\n{(source_content or '').strip()}"]
+    if research_brief:
+        source_parts.append(
+            "Below is a research brief from your local Obsidian knowledge base. It may only be used for background, concept definitions, historical cases, and analysis frameworks. If anything conflicts with the current source packet, the current source packet wins.\n\n"
+            + research_brief.strip()
+        )
+    source_packet = "\n\n================\n\n".join(part for part in source_parts if part.strip())
+    return (
+        "[Planning brief | highest priority]\n"
+        + (brief_summary or (writing_brief or "").strip())
+        + "\n\n[Writing directive]\n"
+        + "The planning brief above is the lead editor's assignment. Build a brand-new synthesized article around that topic, angle, and hook set.\n"
+        + "Do not rewrite any single source article in order. Reorganize multiple sources into one new argument structure.\n"
+        + "Use the merged source packet only as the evidence pool. You may ignore irrelevant source paragraphs.\n"
+        + "Do not invent facts that are not supported by the evidence pool.\n\n"
+        + "[Source packet]\n"
+        + source_packet
+    ).strip()
+
+
 def normalize_title_candidates(title_candidates):
     if isinstance(title_candidates, str):
         raw_lines = title_candidates.splitlines()
@@ -2420,7 +2894,7 @@ def get_article_body_text(article_text):
     return (article_body or article_text or "").strip()
 
 
-def build_reviewer_user_content(source_content, draft_article, research_brief="", title_candidates=None):
+def build_reviewer_user_content(source_content, draft_article, research_brief="", title_candidates=None, writing_brief_summary=""):
     resolved_titles = normalize_title_candidates(title_candidates)
     if not resolved_titles:
         resolved_titles, _ = split_structured_article_sections(draft_article)
@@ -2440,6 +2914,11 @@ def build_reviewer_user_content(source_content, draft_article, research_brief=""
         + "Below is the draft body:\n"
         + draft_body
     ]
+    if writing_brief_summary:
+        parts.append(
+            "Below is the planning brief summary. Use it only to judge whether the draft stays on the intended topic, angle, and hook. Do not use it to invent new facts.\n\n"
+            + writing_brief_summary.strip()
+        )
     if research_brief:
         parts.append(
             "Below is a knowledge-base research brief. It may only help you judge whether the article aligns with prior analysis frameworks. It must not be used for new fact checking or to override the source packet.\n\n"
@@ -3463,6 +3942,7 @@ def build_de_ai_prompt_template(
     variant=DE_AI_VARIANT_DEFAULT,
     term_rules_instruction="",
     current_article_text="",
+    writing_brief_summary="",
 ):
     persona = infer_role_persona(role_name, editor_prompt)
     topic = infer_article_topic(source_content)
@@ -3507,6 +3987,17 @@ def build_de_ai_prompt_template(
         "小节标题必须具体、信息明确，禁止使用“背景介绍”“总结一下”“最后说说”这类空标题。",
         "结构要清楚，但不要把每一节写成机械等长的模板段落。",
     ])
+    planning_instruction = ""
+    if (writing_brief_summary or "").strip():
+        planning_instruction = "\n".join([
+            "【策划主轴约束】",
+            "这篇稿子并不是围绕单一来源改写，而是围绕既定写作方案重组而成。",
+            "去 AI 改写时，必须保留当前稿件已经形成的核心选题、推荐角度和写作切口。",
+            "不要把已经综合重组好的结构又写回单篇素材式展开，也不要改写成逐条摘要拼接。",
+            "如果某一段已经承担方案中的关键论点，只能优化表达，不能擅自挪走主轴。",
+            "",
+            writing_brief_summary.strip(),
+        ])
     community_instruction = ""
     chatty_instruction = ""
     humanizer_instruction = ""
@@ -3570,6 +4061,7 @@ def build_de_ai_prompt_template(
 6. 整体语气优先靠近：{tone}。
 
 {term_rules_instruction}
+{planning_instruction}
 {community_instruction}
 {chatty_instruction}
 {humanizer_instruction}
@@ -5286,6 +5778,26 @@ def init_state():
         st.session_state.evidence_summary = ""
     if 'evidence_signature' not in st.session_state:
         st.session_state.evidence_signature = ""
+    if 'writing_brief_raw' not in st.session_state:
+        st.session_state.writing_brief_raw = ""
+    if 'writing_brief_parsed' not in st.session_state or not isinstance(st.session_state.writing_brief_parsed, dict):
+        st.session_state.writing_brief_parsed = {}
+    if 'writing_brief_mode' not in st.session_state:
+        st.session_state.writing_brief_mode = "structured_text"
+    if 'writing_brief_summary' not in st.session_state:
+        st.session_state.writing_brief_summary = ""
+    if 'brief_topic' not in st.session_state:
+        st.session_state.brief_topic = ""
+    if 'brief_sources' not in st.session_state or not isinstance(st.session_state.brief_sources, list):
+        st.session_state.brief_sources = []
+    if 'brief_evidence_map' not in st.session_state or not isinstance(st.session_state.brief_evidence_map, list):
+        st.session_state.brief_evidence_map = []
+    if 'brief_evidence_summary' not in st.session_state:
+        st.session_state.brief_evidence_summary = ""
+    if 'brief_source_confirmation' not in st.session_state or not isinstance(st.session_state.brief_source_confirmation, list):
+        st.session_state.brief_source_confirmation = []
+    if '_writing_brief_signature' not in st.session_state:
+        st.session_state._writing_brief_signature = ""
     if 'task_queue' not in st.session_state or not isinstance(st.session_state.task_queue, list):
         st.session_state.task_queue = []
     if 'archived_task_queue' not in st.session_state or not isinstance(st.session_state.archived_task_queue, list):
@@ -5313,6 +5825,7 @@ def init_state():
 
 apply_pending_draft_restore()
 init_state()
+refresh_writing_brief_state()
 
 
 def mark_ai_stage_started(stage_name):
@@ -6825,6 +7338,19 @@ if st.session_state.current_step == 1:
                     if reset_active_task_to_blank():
                         st.rerun()
 
+    with st.container(border=True):
+        render_section_intro("写作方案", "把外部信息抓取工具生成的选题、角度、切口和来源粘贴到这里。它会主导后续成稿结构。", "Planning")
+        st.text_area(
+            "粘贴结构化写作方案",
+            key="writing_brief_raw",
+            height=220,
+            placeholder="### 今日可写选题\n1. 你的核心选题\n> 值得写：为什么这个题现在有价值\n> 推荐角度：你想主打的分析角度\n> 写作切口：文章真正切入的问题\n> 数据来源：https://example.com/a",
+            on_change=sync_writing_brief_state,
+        )
+        if st.session_state.get("writing_brief_summary", ""):
+            st.caption("当前已识别出的策划摘要")
+            st.code(st.session_state.get("writing_brief_summary", ""), language="markdown")
+
 
     input_col1, input_col2 = st.columns(2)
     with input_col1:
@@ -6938,6 +7464,7 @@ if st.session_state.current_step == 1:
                         st.session_state.extraction_success = True
                         st.session_state.obsidian_retrieval_signature = ""
                         run_obsidian_retrieval(force=True)
+                        refresh_writing_brief_state(force=True)
                         notify_step_completed()
 
                         if errors:
@@ -7006,6 +7533,85 @@ if st.session_state.current_step == 1:
             st.code(preview_text, language="markdown")
 
 
+        if (st.session_state.get("writing_brief_raw", "") or "").strip():
+            with st.container(border=True):
+                render_section_intro("方案解析与来源确认", "这里显示当前写作方案主轴，以及它引用的来源是否已经进入素材池。", "Planning")
+                parsed_brief = st.session_state.get("writing_brief_parsed", {}) or {}
+                confirmations = st.session_state.get("brief_source_confirmation", []) or []
+                grouped_signal_values = {
+                    value
+                    for values in (parsed_brief.get("signal_groups", {}) or {}).values()
+                    for value in values
+                }
+                plain_signals = []
+                for item in parsed_brief.get("signals", []):
+                    signal_match = re.match(r"^(?P<label>[\w\u4e00-\u9fff]+)\s*信号[:：]?\s*(?P<body>.+)$", item, flags=re.IGNORECASE)
+                    if signal_match and signal_match.group("body").strip() in grouped_signal_values:
+                        continue
+                    plain_signals.append(item)
+
+                angles = parsed_brief.get("angles", []) or []
+                hooks = parsed_brief.get("hooks", []) or []
+                signal_groups = parsed_brief.get("signal_groups", {}) or {}
+                matched_count = sum(1 for item in confirmations if item.get("matched"))
+                total_sources = len(confirmations)
+
+                render_context_strip([
+                    f"主轴：{st.session_state.get('brief_topic', '未识别')[:24]}",
+                    f"推荐角度 {len(angles)} 条",
+                    f"写作切口 {len(hooks)} 条",
+                    f"一般信号 {len(plain_signals)} 条",
+                    f"来源型信号 {sum(len(values) for values in signal_groups.values())} 条",
+                    f"来源确认 {matched_count}/{total_sources}",
+                ])
+
+                brief_left_col, brief_right_col = st.columns([1.2, 0.95])
+                with brief_left_col:
+                    if st.session_state.get("brief_topic", ""):
+                        with st.container(border=True):
+                            st.markdown("#### 核心选题")
+                            st.markdown(st.session_state.get("brief_topic", ""))
+
+                    if angles:
+                        with st.container(border=True):
+                            st.markdown("#### 推荐角度")
+                            for value in angles[:4]:
+                                st.markdown(f"- {value}")
+
+                    if hooks:
+                        with st.container(border=True):
+                            st.markdown("#### 写作切口")
+                            for value in hooks[:4]:
+                                st.markdown(f"- {value}")
+
+                with brief_right_col:
+                    if plain_signals:
+                        with st.container(border=True):
+                            st.markdown("#### 值得写 / 一般信号")
+                            for value in plain_signals[:4]:
+                                st.markdown(f"- {value}")
+
+                    if confirmations:
+                        with st.container(border=True):
+                            st.markdown("#### 来源清单确认")
+                            st.caption(f"已抓取 {matched_count} / {total_sources} 个方案来源")
+                            for item in confirmations:
+                                marker = "已抓取" if item.get("matched") else "待补抓"
+                                st.markdown(f"- `{marker}` {item.get('host', '')} - {item.get('url', '')}")
+
+                    if st.session_state.get("brief_evidence_summary", ""):
+                        with st.container(border=True):
+                            st.markdown("#### 证据覆盖")
+                            st.caption(st.session_state.get("brief_evidence_summary", ""))
+
+                if signal_groups:
+                    st.markdown("#### 来源型信号")
+                    trimmed_signal_groups = {
+                        label: values[:3]
+                        for label, values in list(signal_groups.items())[:4]
+                    }
+                    render_brief_signal_cards(trimmed_signal_groups)
+
         if st.session_state.get("obsidian_enabled"):
             with st.container(border=True):
                 render_section_intro("Obsidian 检索简报", "在选择写作模式前，先检查本地知识库命中与自动生成的研究摘要。", "知识库")
@@ -7067,9 +7673,18 @@ if st.session_state.current_step == 1:
                         请只输出角色的完整名称，绝不允许包含任何其他标点或解释废话！
                         可选角色：{', '.join(editor_names)}"""
 
+                        routing_input = st.session_state.source_content[:5000]
+                        if (st.session_state.get("writing_brief_summary", "") or "").strip():
+                            routing_input = (
+                                "[Planning brief]\n"
+                                + st.session_state.get("writing_brief_summary", "")
+                                + "\n\n================\n\n[Source packet]\n"
+                                + st.session_state.source_content[:5000]
+                            )
+
                         chosen_editor_raw = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                            system_prompt=routing_prompt, user_content=st.session_state.source_content[:5000]
+                            system_prompt=routing_prompt, user_content=routing_input
                         )
 
                         chosen_editor = chosen_editor_raw.strip() if chosen_editor_raw else ""
@@ -7084,11 +7699,19 @@ if st.session_state.current_step == 1:
                         global_instruction = prompts_data.get("global_instruction", "")
                         final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
 
-                        draft_content = build_editor_user_content(
-                            st.session_state.source_content,
-                            st.session_state.get("obsidian_research_brief", ""),
-                            use_images=bool(st.session_state.source_images)
-                        )
+                        if (st.session_state.get("writing_brief_raw", "") or "").strip():
+                            draft_content = build_planned_editor_user_content(
+                                st.session_state.get("writing_brief_raw", ""),
+                                st.session_state.source_content,
+                                st.session_state.get("obsidian_research_brief", ""),
+                                use_images=bool(st.session_state.source_images)
+                            )
+                        else:
+                            draft_content = build_editor_user_content(
+                                st.session_state.source_content,
+                                st.session_state.get("obsidian_research_brief", ""),
+                                use_images=bool(st.session_state.source_images)
+                            )
                         draft_response = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
@@ -7112,6 +7735,7 @@ if st.session_state.current_step == 1:
                             st.session_state.draft_article,
                             st.session_state.get("obsidian_research_brief", ""),
                             title_candidates=st.session_state.get("title_candidates", []),
+                            writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
                         )
                         st.session_state.review_feedback = call_llm(
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
@@ -7226,11 +7850,19 @@ elif st.session_state.current_step == 2:
             with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
                 final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
-                editor_user_content = build_editor_user_content(
-                    st.session_state.source_content,
-                    st.session_state.get("obsidian_research_brief", ""),
-                    use_images=bool(st.session_state.source_images)
-                )
+                if (st.session_state.get("writing_brief_raw", "") or "").strip():
+                    editor_user_content = build_planned_editor_user_content(
+                        st.session_state.get("writing_brief_raw", ""),
+                        st.session_state.source_content,
+                        st.session_state.get("obsidian_research_brief", ""),
+                        use_images=bool(st.session_state.source_images)
+                    )
+                else:
+                    editor_user_content = build_editor_user_content(
+                        st.session_state.source_content,
+                        st.session_state.get("obsidian_research_brief", ""),
+                        use_images=bool(st.session_state.source_images)
+                    )
 
                 draft_response = call_llm(
                     api_key=api_key, 
@@ -7299,6 +7931,7 @@ elif st.session_state.current_step == 3:
                         st.session_state.draft_article,
                         st.session_state.get("obsidian_research_brief", ""),
                         title_candidates=st.session_state.get("title_candidates", []),
+                        writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
                     )
                 else:
                     anti_hallucination_instruction = """\n\n【⚠️ 强制系统级指令：严禁幻觉】：
@@ -7308,6 +7941,7 @@ elif st.session_state.current_step == 3:
                         st.session_state.draft_article,
                         st.session_state.get("obsidian_research_brief", ""),
                         title_candidates=st.session_state.get("title_candidates", []),
+                        writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
                     )
                 
                 final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
@@ -7586,6 +8220,7 @@ elif st.session_state.current_step == 5:
         variant=de_ai_variant,
         term_rules_instruction=de_ai_term_rules_instruction,
         current_article_text=st.session_state.get("modified_article", ""),
+        writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
     )
 
     with st.expander("查看本次去 AI 味专用 Prompt 模板（只读）", expanded=False):
