@@ -71,7 +71,7 @@ DRAFT_STATE_KEYS = [
     'podcast_enabled', 'podcast_duration', 'podcast_script_raw', 'podcast_script_segments',
     'podcast_audio_path', 'podcast_audio_manifest', 'podcast_last_error', 'podcast_voice',
     'podcast_tts_provider', 'podcast_tts_api_key_present',
-    'chat_history', 'image_keywords', 'selected_role', 'target_article_words',
+    'chat_history', 'image_keywords', 'selected_role', 'selected_reviewer', 'target_article_words',
     'source_images_all', 'selected_source_image_ids', 'article_versions',
     'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
     'feishu_doc_url', 'feishu_doc_token', 'feishu_doc_title', 'feishu_published_at', 'feishu_publish_error',
@@ -94,7 +94,7 @@ DRAFT_STATE_KEYS = [
 ]
 
 TASK_TEMPLATE_CONFIG_KEYS = [
-    'selected_role', 'target_article_words',
+    'selected_role', 'selected_reviewer', 'target_article_words',
     'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
     'term_rules_enabled', 'term_rules_scope',
     'banned_terms_text', 'default_replacement_terms_text', 'suggested_replacement_terms_text',
@@ -219,15 +219,283 @@ DEFAULT_GLOBAL_PROMPT = """【全局强制写作规范（最高优先级）】
 3. 拒绝强行升华：文章结尾禁止进行“爹味说教”或喊口号式的价值升华，客观给出冷酷的结论或留白即可。
 4. 打破匀速节奏：多用短句！避免一口气读不完的复杂长句。允许出现少量口语化的标点停顿，模仿人类写稿时真实的“呼吸感”和偶尔的“毒舌”感。"""
 
+DEFAULT_REVIEWER_ROLE = "游戏行业内容审稿编辑"
+DEFAULT_REVIEWER_PLANNED_DEEP_ROLE = "议题统稿编辑（深度版）"
+DEFAULT_REVIEWER_PLANNED_NEWS_ROLE = "议题统稿编辑（资讯版）"
+DEFAULT_REVIEWER_PROMPTS = {
+    DEFAULT_REVIEWER_ROLE: """# Role: 游戏行业内容审稿编辑
+
+你的任务是把初稿审成一份“可直接执行的修改任务单”，供下一轮改稿使用。
+
+## 工作原则
+1. 只基于当前素材包和稿件内容判断，不补充外部事实。
+2. 不重写全文，只识别问题并提出修改动作。
+3. 不做情绪化评价，不使用羞辱性措辞。
+4. 每条意见都必须能直接转化为修改操作。
+5. 如果某项内容无法确认真伪，标注“素材不足，建议改成保守表述”。
+
+## 重点检查
+请优先识别以下问题：
+
+1. 事实错误
+- 产品、公司、时间、数据、案例与素材不一致
+- 推测被写成事实
+
+2. 逻辑断层
+- 结论超出材料支持范围
+- 因果关系不成立
+- 论证跳步
+
+3. 结构缺陷
+- 开头没有交代对象、背景、争议点或分析意义
+- 标题组缺失或与正文主题不一致
+- 没有清晰的二级标题结构
+- 单节过长、层级失衡、整篇堆成大段
+
+4. 表达问题
+- AI腔、套话、空话、翻译腔
+- 表述过满、过硬、过武断
+- 术语堆叠但解释不足
+
+## 输出格式
+严格按以下格式输出：
+
+【审核结论】
+通过 / 小修 / 大修 / 退回重写
+一句话说明判定原因。
+
+【修改任务清单】
+按优先级列出3-8条任务，每条必须包含：
+1. 问题类型：
+2. 对应位置或原句：
+3. 为什么要改：
+4. 应该怎么改：
+
+要求：
+- “为什么要改”说明问题本质
+- “应该怎么改”必须是可执行动作，不要写空话
+
+【最高优先级修改动作】
+总结1-3条最关键的改稿任务，写成可以直接交给下游模型执行的指令句。
+
+## 限制
+- 不要输出无依据的新信息
+- 不要输出泛泛表扬
+- 不要把审稿报告写成评论文章
+- 所有建议都必须服务于下一轮改稿""",
+    DEFAULT_REVIEWER_PLANNED_DEEP_ROLE: """# Role: 议题统稿编辑（深度版）
+
+你是一名负责多来源综合深度稿的资深统稿编辑。
+
+你的任务不是把文章审回“逐篇复述素材”的样子，也不是压制文章的综合判断，而是帮助这篇稿子真正长成一篇成立的深度文章：有主轴、有判断、有结构推进，也有基于素材的合理支撑。
+
+## 你的工作目标
+
+1. 检查主轴是否清晰且稳定
+文章必须围绕写作方案中的核心议题、推荐角度和写作切口推进。
+如果文章开头立了题，后面却没有持续围绕它展开，要指出。
+
+2. 检查综合是否真正发生
+这篇稿子应当是综合重组后的新稿，而不是多篇素材的顺序陈列。
+你要识别它是否完成了：
+- 对照
+- 归并
+- 取舍
+- 新判断的建立
+
+3. 检查判断是否成立
+允许文章基于素材做归纳、比较和推演。
+你不需要压制创造性，但要指出哪些地方：
+- 判断明显写得过满
+- 论证还没铺够
+- 观点成立但缺少关键支撑
+
+4. 检查结构是否服务于论证
+深度稿不能只是信息多，而要层层推进。
+如果段落顺序不合理、论证跳步、该收束的地方没有收束，要明确指出。
+
+## 你优先关注的问题
+
+1. 主轴松散
+- 看似有议题，但没有持续围绕
+- 中间跑偏，后面越写越散
+- 结尾没有回到文章真正想讨论的问题
+
+2. 综合不充分
+- 多来源并列堆放，但没有形成统一判断
+- 只是换了一种说法复述素材
+- 不同来源之间没有形成对照关系
+
+3. 判断与支撑不匹配
+- 观点比证据走得更远
+- 个别案例被写成整体趋势
+- 某个推演方向是合理的，但铺垫不够
+
+4. 结构推进不顺
+- 开头太散
+- 中段重复
+- 后段突然拔高
+- 结尾没有收住主轴
+
+5. 文章像“拼接稿”
+- 某些段落保留明显单篇素材痕迹
+- 读起来像把几份资料缝在一起
+- 统一性不够，像多个声音并排出现
+
+## 审稿原则
+
+- 不要求逐条对应每个素材
+- 不要求每篇来源平均出现
+- 不压制合理的综合判断
+- 重点不是“材料有没有全写”，而是“这篇文章是否成立”
+- 优先修改影响整篇质量的问题，而不是纠结局部字句
+
+## 输出格式
+
+【统稿结论】
+通过 / 小修 / 大修
+一句话说明这篇稿子目前最核心的问题。
+
+【主轴与判断】
+用2-4条简短结论说明：
+- 主轴是否成立
+- 综合是否自然
+- 判断是否够稳
+- 最大短板在哪一层
+
+【修改任务清单】
+列出 4-6 条最关键的修改任务，每条包含：
+1. 问题类型：
+2. 对应位置或表现：
+3. 为什么要改：
+4. 应该怎么改：
+
+要求：
+- 建议必须具体
+- 优先提结构、论证、判断层面的修改
+- 尽量指出该删什么、该并什么、该补什么、该收什么
+
+【最高优先级修改动作】
+总结 1-3 条最重要的改稿指令，直接写给下游模型。
+
+## 你要避免的错误
+
+- 把深度综合稿审成保守摘要稿
+- 一味要求“更忠于每篇素材”
+- 只抓小句子，不看整篇主轴
+- 只说“增强逻辑”，不说具体怎么改""",
+    DEFAULT_REVIEWER_PLANNED_NEWS_ROLE: """# Role: 议题统稿编辑（资讯版）
+
+你是一名负责多来源资讯综合稿的统稿编辑。
+
+你的任务不是把文章审成“资料汇编”，也不是把它压成毫无判断的中性摘要，而是帮助它成为一篇成熟、清楚、克制的资讯综合稿：主题明确，结构顺，信息整合有效，判断不过满。
+
+## 你的工作目标
+
+1. 检查文章是否围绕核心议题展开
+文章要让读者快速看明白“这篇到底在讲什么”。
+如果主题不聚焦，或者重点被冲散，要指出。
+
+2. 检查多来源信息是否被整理清楚
+资讯综合稿不要求深评论，但必须有整合能力。
+你要判断它是否做到了：
+- 把分散信息放到同一主题下
+- 让来源之间彼此补强
+- 避免逐篇介绍素材
+
+3. 检查判断是否克制且成立
+资讯稿可以有判断，但不应过度拔高。
+如果结论明显超出素材支撑，或者反过来整篇只有材料没有归纳，也要指出。
+
+4. 检查文章是否易读
+资讯综合稿的关键是“快、清楚、顺”。
+如果结构拥堵、段落重复、重点不突出，要明确指出。
+
+## 你优先关注的问题
+
+1. 主题不够聚焦
+- 开头没有迅速进入问题
+- 中间信息太多，但缺乏重心
+- 读完后不清楚核心结论
+
+2. 综合感不够
+- 多来源只是并列出现
+- 看起来信息很多，但没有真正整合
+- 仍然保留明显的素材顺序痕迹
+
+3. 判断不稳
+- 结论太满
+- 推演太远
+- 或者只有信息，没有适度归纳
+
+4. 结构不清
+- 该合并的没合并
+- 该提前交代的没交代
+- 段落节奏不顺
+- 结尾没有自然收束
+
+5. 资讯稿写成了拼接稿
+- 某些段落像直接摘录单篇素材
+- 文章缺少统一语气和主轴
+- 读起来像多篇资讯贴在一起
+
+## 审稿原则
+
+- 不要求面面俱到
+- 不要求每篇来源都充分展开
+- 允许适度综合判断
+- 不把文章往深评论或保守复述两个极端拉
+- 重点帮助文章变得更清楚、更集中、更完整
+
+## 输出格式
+
+【统稿结论】
+通过 / 小修 / 大修
+一句话说明目前最核心的问题。
+
+【主题与综合判断】
+用2-4条简短结论说明：
+- 主题是否清楚
+- 综合是否自然
+- 判断是否克制
+- 主要问题在哪一层
+
+【修改任务清单】
+列出 3-5 条最关键的修改任务，每条包含：
+1. 问题类型：
+2. 对应位置或表现：
+3. 为什么要改：
+4. 应该怎么改：
+
+要求：
+- 建议尽量具体
+- 优先提结构、整合、主题聚焦层面的修改
+- 少纠结零碎字句
+
+【最高优先级修改动作】
+总结 1-3 条最重要的改稿指令，直接写给下游模型。
+
+## 你要避免的错误
+
+- 把资讯综合稿审成资料拼盘
+- 把文章硬压回单篇复述逻辑
+- 给出太泛的建议
+- 只盯局部句子，不看整篇主题是否成立""",
+}
+
 def load_prompts():
     default_data = {
         "editors": {
             "发行主编": "你是一位资深的海外发行主编。请深度分析素材，重点关注买量、ROI与发行策略...",
             "研发主编": "你是一位硬核游戏制作人。请深度拆解素材，重点关注核心循环、系统设计与工业化管线...",
             "游戏快讯编辑": "你是一位敏锐的游戏媒体编辑。请将素材提炼为通俗易懂、具有爆点的新闻快讯...",
-            "客观转录编辑": "你是一位专业速记员。请剥离所有主观情绪，将素材客观、结构化地转录并总结..."
+            "客观转录编辑": "你是一位专业速记员。请剥离所有主观情绪，将素材客观、结构化地转录并总结...",
+            "议题统筹主编（深度判断版）": "你是一位擅长议题提炼与跨来源综合写作的深度栏目主编。请围绕写作方案建立中心判断，并用多来源证据支撑，而不是逐篇摘要拼接...",
+            "议题统筹主编（资讯综合版）": "你是一位擅长整合多方信息与重组资讯结构的综合主编。请围绕写作方案形成清晰主轴，输出判断克制、信息密度高的新稿..."
         },
-        "reviewer": "你是一个极其严苛的资深游戏媒体主编兼风控专家。请严格核查初稿中的事实错误、逻辑漏洞及AI幻觉...",
+        "reviewers": clone_json_data(DEFAULT_REVIEWER_PROMPTS),
+        "default_reviewer_role": DEFAULT_REVIEWER_ROLE,
+        "reviewer": DEFAULT_REVIEWER_PROMPTS[DEFAULT_REVIEWER_ROLE],
         "global_instruction": DEFAULT_GLOBAL_PROMPT
     }
 
@@ -245,6 +513,20 @@ def load_prompts():
             editors = data.get("editors", {}) if isinstance(data, dict) else {}
             if not isinstance(editors, dict) or len(editors) == 0:
                 raise ValueError("缺少 editors 配置或 editors 为空")
+
+            reviewers = data.get("reviewers", {})
+            if not isinstance(reviewers, dict) or len(reviewers) == 0:
+                legacy_reviewer = data.get("reviewer", "")
+                reviewers = clone_json_data(DEFAULT_REVIEWER_PROMPTS)
+                if isinstance(legacy_reviewer, str) and legacy_reviewer.strip():
+                    reviewers[DEFAULT_REVIEWER_ROLE] = legacy_reviewer
+                data["reviewers"] = reviewers
+
+            default_reviewer_role = data.get("default_reviewer_role", DEFAULT_REVIEWER_ROLE)
+            if default_reviewer_role not in reviewers:
+                default_reviewer_role = next(iter(reviewers))
+            data["default_reviewer_role"] = default_reviewer_role
+            data["reviewer"] = reviewers[default_reviewer_role]
 
             if "global_instruction" not in data:
                 data["global_instruction"] = DEFAULT_GLOBAL_PROMPT
@@ -273,6 +555,50 @@ def clone_json_data(data):
         return data
 
 
+def get_reviewer_prompt_map(prompts_data):
+    reviewers = prompts_data.get("reviewers", {}) if isinstance(prompts_data, dict) else {}
+    cleaned_reviewers = {
+        str(name).strip(): str(prompt)
+        for name, prompt in reviewers.items()
+        if str(name).strip() and isinstance(prompt, str)
+    }
+    if cleaned_reviewers:
+        return cleaned_reviewers
+
+    legacy_prompt = ""
+    if isinstance(prompts_data, dict):
+        legacy_prompt = str(prompts_data.get("reviewer", "") or "").strip()
+    if legacy_prompt:
+        return {DEFAULT_REVIEWER_ROLE: legacy_prompt}
+    return clone_json_data(DEFAULT_REVIEWER_PROMPTS)
+
+
+def sync_reviewer_prompt_config(prompts_data):
+    reviewer_map = get_reviewer_prompt_map(prompts_data)
+    default_role = str(prompts_data.get("default_reviewer_role", "") or "").strip() if isinstance(prompts_data, dict) else ""
+    if default_role not in reviewer_map:
+        default_role = next(iter(reviewer_map))
+    prompts_data["reviewers"] = reviewer_map
+    prompts_data["default_reviewer_role"] = default_role
+    prompts_data["reviewer"] = reviewer_map[default_role]
+    return reviewer_map, default_role
+
+
+def get_selected_reviewer_role(prompts_data):
+    reviewer_map, default_role = sync_reviewer_prompt_config(prompts_data)
+    selected_role = str(st.session_state.get("selected_reviewer", "") or "").strip()
+    if selected_role not in reviewer_map:
+        selected_role = default_role
+        st.session_state.selected_reviewer = selected_role
+    return selected_role
+
+
+def get_selected_reviewer_prompt(prompts_data):
+    reviewer_map, _ = sync_reviewer_prompt_config(prompts_data)
+    selected_role = get_selected_reviewer_role(prompts_data)
+    return reviewer_map.get(selected_role, reviewer_map[next(iter(reviewer_map))])
+
+
 def build_draft_data():
     return {key: clone_json_data(st.session_state[key]) for key in DRAFT_STATE_KEYS if key in st.session_state}
 
@@ -296,6 +622,9 @@ def apply_draft_data(draft_data):
     current_role = st.session_state.get("selected_role", "")
     if isinstance(current_role, str):
         st.session_state.selected_role_widget = current_role
+    current_reviewer = st.session_state.get("selected_reviewer", "")
+    if isinstance(current_reviewer, str):
+        st.session_state.selected_reviewer_widget = current_reviewer
     st.session_state.target_article_words_slider = st.session_state.get("target_article_words", 1500)
     for stale_key in [key for key in list(st.session_state.keys()) if key.startswith("source_image_pick_")]:
         del st.session_state[stale_key]
@@ -1216,6 +1545,13 @@ def sync_selected_role():
     selected_role = st.session_state.get("selected_role_widget", "")
     if isinstance(selected_role, str) and selected_role.strip():
         st.session_state.selected_role = selected_role
+        save_draft()
+
+
+def sync_selected_reviewer():
+    selected_reviewer = st.session_state.get("selected_reviewer_widget", "")
+    if isinstance(selected_reviewer, str) and selected_reviewer.strip():
+        st.session_state.selected_reviewer = selected_reviewer
         save_draft()
 
 
@@ -3900,6 +4236,8 @@ ROLE_AUDIENCE_MAP = {
     "\u6e38\u620f\u5feb\u8baf\u7f16\u8f91": "\u884c\u4e1a\u4ece\u4e1a\u8005",
     "\u5ba2\u89c2\u8f6c\u5f55\u7f16\u8f91": "\u516c\u4f17\u8bfb\u8005",
     "\u6e38\u620f\u884c\u4e1a\u8bc4\u8bba\u5458": "\u6e38\u620f\u884c\u4e1a\u4ece\u4e1a\u8005",
+    "\u8bae\u9898\u7edf\u7b79\u4e3b\u7f16\uff08\u6df1\u5ea6\u5224\u65ad\u7248\uff09": "\u5173\u6ce8\u884c\u4e1a\u8d8b\u52bf\u7684\u6df1\u5ea6\u8bfb\u8005\u4e0e\u6e38\u620f\u4ece\u4e1a\u8005",
+    "\u8bae\u9898\u7edf\u7b79\u4e3b\u7f16\uff08\u8d44\u8baf\u7efc\u5408\u7248\uff09": "\u9700\u8981\u5feb\u901f\u628a\u63e1\u8bae\u9898\u7684\u8d44\u8baf\u8bfb\u8005\u4e0e\u884c\u4e1a\u4ece\u4e1a\u8005",
 }
 ROLE_JARGON_MAP = {
     "\u53d1\u884c\u4e3b\u7f16": "ROI, LTV, \u4e70\u91cf, \u53d8\u73b0\u6548\u7387",
@@ -3907,6 +4245,8 @@ ROLE_JARGON_MAP = {
     "\u6e38\u620f\u5feb\u8baf\u7f16\u8f91": "\u7248\u53f7, \u4e0a\u7ebf\u6863\u671f, \u53d1\u884c\u8282\u594f, \u5e02\u573a\u53cd\u9988",
     "\u5ba2\u89c2\u8f6c\u5f55\u7f16\u8f91": "\u7559\u5b58, \u53d8\u73b0, \u672c\u5730\u5316, \u8fd0\u8425\u8282\u594f",
     "\u6e38\u620f\u884c\u4e1a\u8bc4\u8bba\u5458": "ROI, \u6d17\u91cf, \u8dd1\u91cf, \u5546\u4e1a\u5316\u6548\u7387",
+    "\u8bae\u9898\u7edf\u7b79\u4e3b\u7f16\uff08\u6df1\u5ea6\u5224\u65ad\u7248\uff09": "\u4e3b\u8f74, \u8bba\u8bc1\u7ebf, \u7ed3\u6784\u91cd\u7ec4, \u884c\u4e1a\u5206\u5316, \u8bc1\u636e\u652f\u6491",
+    "\u8bae\u9898\u7edf\u7b79\u4e3b\u7f16\uff08\u8d44\u8baf\u7efc\u5408\u7248\uff09": "\u7efc\u5408\u7a3f, \u4e3b\u8bae\u9898, \u5e02\u573a\u4fe1\u53f7, \u5e73\u53f0\u53cd\u9988, \u4ea4\u53c9\u5370\u8bc1",
 }
 ROLE_TONE_MAP = {
     "\u53d1\u884c\u4e3b\u7f16": "\u51b7\u9759\u3001\u950b\u5229\u3001\u5224\u65ad\u660e\u786e",
@@ -3914,6 +4254,8 @@ ROLE_TONE_MAP = {
     "\u6e38\u620f\u5feb\u8baf\u7f16\u8f91": "\u514b\u5236\u3001\u6e05\u695a\u3001\u4fe1\u606f\u5bc6\u5ea6\u9ad8",
     "\u5ba2\u89c2\u8f6c\u5f55\u7f16\u8f91": "\u5e73\u5b9e\u3001\u5e72\u51c0\u3001\u7ed3\u6784\u6e05\u6670",
     "\u6e38\u620f\u884c\u4e1a\u8bc4\u8bba\u5458": "\u4e00\u9488\u89c1\u8840\u3001\u5f3a\u89c2\u70b9\u4f46\u4e0d\u6d6e\u5938",
+    "\u8bae\u9898\u7edf\u7b79\u4e3b\u7f16\uff08\u6df1\u5ea6\u5224\u65ad\u7248\uff09": "\u5224\u65ad\u6e05\u695a\u3001\u8282\u594f\u7a33\u5b9a\u3001\u6562\u4e8e\u53d6\u820d",
+    "\u8bae\u9898\u7edf\u7b79\u4e3b\u7f16\uff08\u8d44\u8baf\u7efc\u5408\u7248\uff09": "\u7ed3\u6784\u6e05\u695a\u3001\u5224\u65ad\u514b\u5236\u3001\u6574\u5408\u611f\u5f3a",
 }
 
 
@@ -5726,6 +6068,10 @@ def init_state():
         st.session_state.target_article_words = 1500
     if 'selected_role_widget' not in st.session_state:
         st.session_state.selected_role_widget = st.session_state.get('selected_role', '')
+    if 'selected_reviewer' not in st.session_state:
+        st.session_state.selected_reviewer = DEFAULT_REVIEWER_ROLE
+    if 'selected_reviewer_widget' not in st.session_state:
+        st.session_state.selected_reviewer_widget = st.session_state.get('selected_reviewer', DEFAULT_REVIEWER_ROLE)
     if 'target_article_words_slider' not in st.session_state:
         st.session_state.target_article_words_slider = get_target_article_words()
     if 'article_versions' not in st.session_state or not isinstance(st.session_state.article_versions, list):
@@ -7176,6 +7522,11 @@ st.set_page_config(page_title="公众号文章生成助手", page_icon="🕹️"
 inject_ui_theme()
 
 prompts_data = load_prompts()
+reviewer_prompt_map, default_reviewer_role = sync_reviewer_prompt_config(prompts_data)
+if st.session_state.get("selected_reviewer") not in reviewer_prompt_map:
+    st.session_state.selected_reviewer = default_reviewer_role
+if st.session_state.get("selected_reviewer_widget") not in reviewer_prompt_map:
+    st.session_state.selected_reviewer_widget = st.session_state.get("selected_reviewer", default_reviewer_role)
 render_pending_completion_sound()
 
 with st.sidebar:
@@ -7295,8 +7646,24 @@ with st.sidebar:
                         st.error("操作失败：必须至少保留一个编辑角色！")
                         
         with tab2:
-            new_reviewer_prompt = st.text_area("主编/审稿员系统指令", value=prompts_data["reviewer"], height=300)
+            reviewer_role_options = list(get_reviewer_prompt_map(prompts_data).keys())
+            config_default_reviewer = prompts_data.get("default_reviewer_role", reviewer_role_options[0])
+            if config_default_reviewer not in reviewer_role_options:
+                config_default_reviewer = reviewer_role_options[0]
+            selected_config_reviewer = st.selectbox(
+                "选择要编辑的审稿员",
+                reviewer_role_options,
+                index=reviewer_role_options.index(config_default_reviewer),
+                key="reviewer_config_role",
+            )
+            new_reviewer_prompt = st.text_area(
+                "主编/审稿员系统指令",
+                value=get_reviewer_prompt_map(prompts_data).get(selected_config_reviewer, ""),
+                height=300,
+            )
             if st.button("💾 保存审稿员设置"):
+                prompts_data["reviewers"][selected_config_reviewer] = new_reviewer_prompt
+                prompts_data["default_reviewer_role"] = selected_config_reviewer
                 prompts_data["reviewer"] = new_reviewer_prompt
                 save_prompts(prompts_data)
                 st.success("已更新审稿员人设！")
@@ -7726,7 +8093,7 @@ if st.session_state.current_step == 1:
                         save_draft()
 
                         st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
-                        reviewer_prompt = prompts_data["reviewer"]
+                        reviewer_prompt = get_selected_reviewer_prompt(prompts_data)
                         anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
                         final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
 
@@ -7894,7 +8261,19 @@ elif st.session_state.current_step == 2:
 # --- Step 3 (手动模式) ---
 elif st.session_state.current_step == 3:
     render_section_intro("严格审稿", "主编从事实、逻辑和风格三个维度核查初稿，确保对外可发布。", "Step 03")
-    render_context_strip([f"当前模型：{selected_model}", f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}", f"目标字数：约 {get_target_article_words()} 字", f"分镜脚本：{'开启' if enable_script else '关闭'}"])
+    reviewer_options = list(get_reviewer_prompt_map(prompts_data).keys())
+    if st.session_state.get("selected_reviewer") not in reviewer_options:
+        st.session_state.selected_reviewer = reviewer_options[0]
+    if st.session_state.get("selected_reviewer_widget") not in reviewer_options:
+        st.session_state.selected_reviewer_widget = st.session_state.selected_reviewer
+
+    render_context_strip([
+        f"当前模型：{selected_model}",
+        f"编辑角色：{st.session_state.selected_role if 'selected_role' in st.session_state else '未选择'}",
+        f"审稿角色：{st.session_state.selected_reviewer if 'selected_reviewer' in st.session_state else reviewer_options[0]}",
+        f"目标字数：约 {get_target_article_words()} 字",
+        f"分镜脚本：{'开启' if enable_script else '关闭'}"
+    ])
     
     with st.expander("📝 查看当前初稿内容 (鼠标移至右上角可一键复制)", expanded=True):
         render_wrapped_article_text(st.session_state.draft_article)
@@ -7902,7 +8281,17 @@ elif st.session_state.current_step == 3:
     
     st.divider()
     
-    reviewer_prompt = st.text_area("🧐 审稿员 Prompt (支持临时微调)", value=prompts_data["reviewer"], height=200)
+    st.selectbox(
+        "选择【审稿员】视角",
+        reviewer_options,
+        key="selected_reviewer_widget",
+        on_change=sync_selected_reviewer,
+    )
+    reviewer_prompt = st.text_area(
+        "🧐 审稿员 Prompt (支持临时微调)",
+        value=get_selected_reviewer_prompt(prompts_data),
+        height=200,
+    )
     
     col1, col2, col3 = st.columns(3)
     with col1:

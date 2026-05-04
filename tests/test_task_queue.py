@@ -137,6 +137,7 @@ class TaskQueueHelperTests(unittest.TestCase):
     def test_template_config_and_blank_snapshot_preserve_only_config(self):
         snapshot = {
             "selected_role": "lead_editor",
+            "selected_reviewer": "议题统稿编辑（深度版）",
             "target_article_words": 1800,
             "podcast_enabled": True,
             "final_article": "Body text",
@@ -146,16 +147,19 @@ class TaskQueueHelperTests(unittest.TestCase):
 
         config = self.helpers.build_task_template_config(snapshot)
         self.assertEqual(config["selected_role"], "lead_editor")
+        self.assertEqual(config["selected_reviewer"], "议题统稿编辑（深度版）")
         self.assertEqual(config["target_article_words"], 1800)
         self.assertTrue(config["podcast_enabled"])
         self.assertNotIn("final_article", config)
 
         updated = self.helpers.apply_task_template_config({"selected_role": "old_role", "final_article": "keep"}, config)
         self.assertEqual(updated["selected_role"], "lead_editor")
+        self.assertEqual(updated["selected_reviewer"], "议题统稿编辑（深度版）")
         self.assertEqual(updated["final_article"], "keep")
 
         blank = self.helpers.build_blank_task_snapshot(snapshot)
         self.assertEqual(blank["selected_role"], "lead_editor")
+        self.assertEqual(blank["selected_reviewer"], "议题统稿编辑（深度版）")
         self.assertEqual(blank["target_article_words"], 1800)
         self.assertEqual(blank["current_step"], 1)
         self.assertEqual(blank["final_article"], "")
