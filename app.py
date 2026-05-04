@@ -7371,6 +7371,52 @@ def inject_ui_theme():
             --radius-lg: 24px;
             --radius-md: 18px;
         }
+        html, body, .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stSidebar"],
+        [data-testid="stMarkdownContainer"],
+        .stMarkdown, .stText, .stCaption,
+        .stButton > button, .stDownloadButton > button,
+        .stTextInput input, .stTextArea textarea,
+        .stSelectbox [data-baseweb="select"] > div,
+        .stMultiSelect [data-baseweb="select"] > div,
+        .stNumberInput input, .stDateInput input,
+        .stRadio label, .stCheckbox label, .stToggle label,
+        h1, h2, h3, h4, h5, h6, p, label, li,
+        .step-label, .step-desc, .section-title, .section-subtitle,
+        .metric-card strong, .metric-card span,
+        .mode-card strong, .mode-card span,
+        .chip, .toolbar-note, .article-text-view pre {
+            font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+                "Noto Sans SC", "Source Han Sans SC", "Segoe UI", sans-serif !important;
+        }
+        body, .stApp, p, label, li,
+        .stTextInput input, .stTextArea textarea,
+        .stSelectbox [data-baseweb="select"] > div,
+        .stMultiSelect [data-baseweb="select"] > div,
+        .stNumberInput input, .stDateInput input {
+            font-weight: 400;
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        h1, h2, h3, h4, h5, h6,
+        .stButton > button, .stDownloadButton > button,
+        .step-label, .section-title {
+            font-weight: 600;
+        }
+        .material-symbols-rounded,
+        .material-symbols-outlined,
+        .material-icons,
+        [data-testid="stExpanderToggleIcon"] span,
+        [data-testid="stBaseButton-headerNoPadding"] span {
+            font-family: "Material Symbols Rounded", "Material Symbols Outlined", "Material Icons" !important;
+            font-weight: normal !important;
+            font-style: normal !important;
+            letter-spacing: normal !important;
+            text-transform: none !important;
+            white-space: nowrap !important;
+        }
         .stApp {
             background:
                 radial-gradient(circle at top left, rgba(31, 111, 95, 0.12), transparent 32%),
@@ -7544,6 +7590,48 @@ def inject_ui_theme():
             border-radius: 14px !important;
             border: 1px solid var(--border) !important;
             background: rgba(255, 255, 255, 0.88) !important;
+        }
+        [data-testid="stMetric"],
+        [data-testid="stMetric"] * {
+            color: var(--text) !important;
+        }
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] *,
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] *,
+        .block-container .stCaption,
+        .block-container .stCaption * {
+            color: var(--text-muted) !important;
+        }
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] * {
+            color: var(--text) !important;
+            font-weight: 700 !important;
+        }
+        .block-container .stTextInput input,
+        .block-container .stTextArea textarea,
+        .block-container .stNumberInput input,
+        .block-container .stDateInput input,
+        .block-container .stSelectbox [data-baseweb="select"] > div,
+        .block-container .stMultiSelect [data-baseweb="select"] > div {
+            color: var(--text) !important;
+        }
+        .block-container .stTextInput input::placeholder,
+        .block-container .stTextArea textarea::placeholder,
+        .block-container [data-baseweb="select"] input::placeholder {
+            color: var(--text-muted) !important;
+            opacity: 1 !important;
+        }
+        .block-container .stCheckbox label,
+        .block-container .stToggle label,
+        .block-container .stRadio label,
+        .block-container .stCheckbox p,
+        .block-container .stToggle p,
+        .block-container .stRadio p,
+        .block-container .stCheckbox span,
+        .block-container .stToggle span,
+        .block-container .stRadio span {
+            color: var(--text) !important;
         }
         .stCodeBlock, [data-testid="stCodeBlock"] {
             border-radius: 16px !important;
