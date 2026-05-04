@@ -48,6 +48,7 @@ TARGET_FUNCTIONS = {
     "detect_auto_retry_issues",
     "build_auto_retry_instruction",
     "build_auto_retry_notice",
+    "rerun_de_ai_from_quality_gate",
     "build_preserved_highlighted_html",
     "ensure_highlighted_article_context",
     "parse_de_ai_dual_output",
@@ -650,6 +651,34 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("h2_count", issues)
         self.assertIn("highlight", issues)
 
+    def test_detect_auto_retry_issues_flags_humanizer_risk_when_requested(self):
+        article_text = (
+            f"{TITLE_MARKER}\\n"
+            "1. Title A\\n"
+            "2. Title B\\n"
+            "3. Title C\\n\\n"
+            f"{BODY_MARKER}\\n"
+            "\u5bfc\u8bed\u7b2c\u4e00\u6bb5\u3002\\n\\n"
+            "\u5bfc\u8bed\u7b2c\u4e8c\u6bb5\u3002\\n\\n"
+            "## \u7b2c\u4e00\u8282\\n\\n"
+            "\u8fd9\u4e0d\u4ec5\u4ec5\u662f\u4e00\u6b21\u66f4\u65b0\uff0c\u800c\u662f\u4e00\u573a\u9769\u547d\u3002\u6b64\u5916\uff0c\u4e13\u5bb6\u8ba4\u4e3a\u5b83\u81f3\u5173\u91cd\u8981\u3002\\n\\n"
+            "## \u7b2c\u4e8c\u8282\\n\\n"
+            "\u4f17\u6240\u5468\u77e5\uff0c\u8fd9\u4e5f\u63d0\u9192\u6211\u4eec\u672a\u6765\u53ef\u671f\u3002\\n\\n"
+            "## \u7b2c\u4e09\u8282\\n\\n"
+            "\u6700\u540e\u4e00\u8282\u628a\u7ed3\u6784\u8865\u9f50\u3002"
+        )
+
+        issues = self.helpers.detect_auto_retry_issues(
+            article_text,
+            explicit_title_candidates=["Title A", "Title B", "Title C"],
+            highlighted_article="<p>Highlighted</p>",
+            require_highlight=True,
+            target_words=1500,
+            include_humanizer_risk=True,
+        )
+
+        self.assertIn("humanizer_risk", issues)
+
     def test_detect_auto_retry_issues_flags_length_overrun_against_target_and_reference(self):
         article_text = (
             f"{BODY_MARKER}\\n"
@@ -687,6 +716,20 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("\u6807\u9898\u7ec4", notice)
         self.assertIn("\u9ad8\u4eae\u9605\u8bfb\u7248", notice)
 
+    def test_auto_retry_instruction_includes_humanizer_guidance(self):
+        instruction = self.helpers.build_auto_retry_instruction(
+            ["humanizer_risk", "highlight"],
+            target_words=1500,
+            require_highlight=True,
+            issue_detail_map={"humanizer_risk": "存在明显的 AI 写作痕迹，重点问题：模板转折句。"},
+        )
+        notice = self.helpers.build_auto_retry_notice("de_ai_generation", ["humanizer_risk"])
+
+        self.assertIn("定向去模板化重写", instruction)
+        self.assertIn("模板转折句", instruction)
+        self.assertIn("高亮阅读版", instruction)
+        self.assertIn("AI痕迹风险", notice)
+
     def test_auto_retry_instruction_includes_length_compression_requirement(self):
         reference_article = (
             f"{BODY_MARKER}\n"
@@ -703,6 +746,70 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("压缩式改写", instruction)
         self.assertIn("500", instruction)
         self.assertIn("篇幅控制", notice)
+
+    def test_rerun_de_ai_from_quality_gate_uses_current_final_article_and_returns_updated_outputs(self):
+        current_final_article = (
+            f"{TITLE_MARKER}\n"
+            "1. Old Title A\n"
+            "2. Old Title B\n"
+            "3. Old Title C\n\n"
+            f"{BODY_MARKER}\n"
+            "导语第一段。\n\n"
+            "导语第二段。\n\n"
+            "## 第一节\n\n"
+            "这不仅仅是一次更新，而是一场革命。此外，专家认为它至关重要。\n\n"
+            "## 第二节\n\n"
+            "众所周知，这也提醒我们未来可期。\n\n"
+            "## 第三节\n\n"
+            "最后一节把结构补齐。"
+        )
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return (
+                f"{PURE_TITLE_MARKER}\n"
+                "1. New Title A\n"
+                "2. New Title B\n"
+                "3. New Title C\n\n"
+                f"{PURE_BODY_MARKER}\n"
+                "导语第一段。\n\n"
+                "导语第二段。\n\n"
+                "## 小节一\n\n"
+                "更自然的正文段落。\n\n"
+                "## 小节二\n\n"
+                "第二节正文。\n\n"
+                "## 小节三\n\n"
+                "第三节正文。\n\n"
+                f"{HIGHLIGHT_MARKER}\n"
+                "<p><span class=\"highlight-positive\">更自然的正文段落。</span></p>"
+            )
+
+        success, payload, error_msg = self.helpers.rerun_de_ai_from_quality_gate(
+            current_final_article,
+            ["Old Title A", "Old Title B", "Old Title C"],
+            "<p>Old highlight</p>",
+            "编辑角色",
+            "# Role: 编辑角色",
+            "示例素材",
+            variant=self.helpers.DE_AI_VARIANT_HUMANIZER,
+            term_rules_instruction="",
+            writing_brief_summary="",
+            de_ai_model="test-model",
+            api_key="test-key",
+            base_url="https://example.com",
+            temperature=0.8,
+            target_words=1500,
+            llm_caller=fake_call_llm,
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(error_msg, "")
+        self.assertEqual(captured["user_content"], current_final_article)
+        self.assertIn("humanizer_risk", payload["issue_keys"])
+        self.assertEqual(payload["title_candidates"], ["New Title A", "New Title B", "New Title C"])
+        self.assertIn("更自然的正文段落", payload["final_article"])
+        self.assertIn("highlight-positive", payload["highlighted_article"])
 
     def test_parse_de_ai_output_returns_titles_body_and_highlight(self):
         response = (

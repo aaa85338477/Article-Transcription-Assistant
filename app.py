@@ -63,6 +63,7 @@ PROMPTS_LOAD_REPORT = ""
 PENDING_DRAFT_RESTORE_KEY = "_pending_draft_restore"
 DRAFT_RESTORE_NOTICE_KEY = "_draft_restore_notice"
 TASK_QUEUE_NOTICE_KEY = "_task_queue_notice"
+QUALITY_GATE_NOTICE_KEY = "_quality_gate_notice"
 
 DRAFT_STATE_KEYS = [
     'current_step', 'article_url', 'video_url', 'source_content',
@@ -74,6 +75,7 @@ DRAFT_STATE_KEYS = [
     'chat_history', 'image_keywords', 'selected_role', 'selected_reviewer', 'target_article_words',
     'source_images_all', 'selected_source_image_ids', 'article_versions',
     'active_article_version_id', 'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
+    'quality_gate_retry_use_separate_model', 'quality_gate_retry_model',
     'feishu_doc_url', 'feishu_doc_token', 'feishu_doc_title', 'feishu_published_at', 'feishu_publish_error',
     'de_ai_prompt_template', 'term_rules_enabled', 'term_rules_scope',
     'banned_terms_text', 'replacement_terms_text', 'default_replacement_terms_text',
@@ -96,6 +98,7 @@ DRAFT_STATE_KEYS = [
 TASK_TEMPLATE_CONFIG_KEYS = [
     'selected_role', 'selected_reviewer', 'target_article_words',
     'de_ai_model', 'de_ai_variant', 'de_ai_temperature',
+    'quality_gate_retry_use_separate_model', 'quality_gate_retry_model',
     'term_rules_enabled', 'term_rules_scope',
     'banned_terms_text', 'default_replacement_terms_text', 'suggested_replacement_terms_text',
     'article_banned_terms_text', 'article_default_replacement_terms_text', 'article_suggested_replacement_terms_text',
@@ -2034,6 +2037,7 @@ def detect_auto_retry_issues(
     target_words=None,
     reference_article_text="",
     check_length=False,
+    include_humanizer_risk=False,
 ):
     report = build_publish_quality_gate_report(
         article_text,
@@ -2048,6 +2052,8 @@ def detect_auto_retry_issues(
             issue_keys.append(item.get("key"))
         if item.get("key") == "highlight" and require_highlight and item.get("status") != "pass":
             issue_keys.append("highlight")
+        if item.get("key") == "humanizer_risk" and include_humanizer_risk and item.get("status") == "fail":
+            issue_keys.append("humanizer_risk")
     if check_length:
         article_body_length = len(get_article_body_text(article_text))
         reference_body_length = len(get_article_body_text(reference_article_text))
@@ -2069,6 +2075,7 @@ def build_auto_retry_instruction(
     target_words=None,
     require_highlight=False,
     reference_article_text="",
+    issue_detail_map=None,
 ):
     issue_set = set(issue_keys or [])
     min_h2, max_h2 = get_expected_h2_range(target_words)
@@ -2090,6 +2097,14 @@ def build_auto_retry_instruction(
                 f"- 本次只做压缩式改写，保持核心事实、标题组和结构不变，把正文控制回约 {target_words} 字（允许 ±10%），不要继续扩写。"
             )
         instructions.append("- 删除多余的解释、重复判断、额外案例和拖长收尾，优先压缩而不是补充。")
+    if "humanizer_risk" in issue_set:
+        issue_detail_map = issue_detail_map if isinstance(issue_detail_map, dict) else {}
+        humanizer_detail = str(issue_detail_map.get("humanizer_risk", "") or "").strip()
+        instructions.append("- 这次只做定向去模板化重写，只改表达，不推翻现有结构、观点和事实顺序。")
+        instructions.append("- 重点消除模板转折句、空泛升华句、宣传腔和公式化连接词，避免再写出标准答案味很重的句子。")
+        instructions.append("- 保留标题组、正文结构、篇幅边界和核心判断，不要借机重起一篇新稿。")
+        if humanizer_detail:
+            instructions.append(f"- 本轮优先处理当前质量闸门命中的重点问题：{humanizer_detail}")
     if "highlight" in issue_set and require_highlight:
         instructions.append("- 请同时输出完整的高亮阅读版，不要遗漏“高亮阅读版”区块。")
     return "\n".join(instructions)
@@ -2107,11 +2122,104 @@ def build_auto_retry_notice(stage_name, issue_keys):
         "h2_count": "二级标题结构",
         "length_overrun": "篇幅控制",
         "highlight": "高亮阅读版",
+        "humanizer_risk": "AI痕迹风险",
     }
     issue_labels = [label_map.get(key, key) for key in issue_keys or []]
     if not issue_labels:
         return ""
     return f"自动补跑已触发：{stage_map.get(stage_name, stage_name or '当前阶段')}缺少“{'、'.join(issue_labels)}”，系统已追加修正要求并重跑 1 次。"
+
+
+def rerun_de_ai_from_quality_gate(
+    article_text,
+    title_candidates,
+    highlighted_article,
+    role_name,
+    editor_prompt,
+    source_content,
+    *,
+    variant=None,
+    term_rules_instruction="",
+    writing_brief_summary="",
+    de_ai_model="",
+    api_key="",
+    base_url="",
+    temperature=0.75,
+    target_words=None,
+    llm_caller=None,
+):
+    llm_caller = llm_caller or call_llm
+    variant = variant or DE_AI_VARIANT_DEFAULT
+    resolved_target_words = target_words if target_words is not None else get_target_article_words()
+    retry_issue_keys = detect_auto_retry_issues(
+        article_text,
+        explicit_title_candidates=title_candidates,
+        highlighted_article=highlighted_article,
+        require_highlight=True,
+        target_words=resolved_target_words,
+        reference_article_text=article_text,
+        check_length=True,
+        include_humanizer_risk=True,
+    )
+    if not retry_issue_keys:
+        return False, {}, "当前质量闸门没有需要一键续跑的红项。"
+
+    quality_report = build_publish_quality_gate_report(
+        article_text,
+        title_candidates=title_candidates,
+        highlighted_article=highlighted_article,
+        term_scan_summary={},
+        target_words=resolved_target_words,
+    )
+    issue_detail_map = {
+        item.get("key"): item.get("detail", "")
+        for item in quality_report.get("items", [])
+        if item.get("status") == "fail"
+    }
+    prompt_template = build_de_ai_prompt_template(
+        role_name,
+        editor_prompt,
+        source_content,
+        variant=variant,
+        term_rules_instruction=term_rules_instruction,
+        current_article_text=article_text,
+        writing_brief_summary=writing_brief_summary,
+    )
+    retry_instruction = build_auto_retry_instruction(
+        retry_issue_keys,
+        target_words=resolved_target_words,
+        require_highlight=True,
+        reference_article_text=article_text,
+        issue_detail_map=issue_detail_map,
+    )
+    retry_response = llm_caller(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=de_ai_model,
+        system_prompt=prompt_template + "\n\n" + retry_instruction,
+        user_content=article_text,
+        temperature=temperature,
+    )
+    pure_titles, pure_article, rebuilt_highlighted_article = parse_de_ai_dual_output(
+        retry_response,
+        fallback_titles=title_candidates,
+    )
+    resolved_titles = pure_titles or normalize_title_candidates(title_candidates)
+    final_article_text = build_structured_article_text(resolved_titles, pure_article) or (retry_response or "").strip()
+    if not rebuilt_highlighted_article:
+        rebuilt_highlighted_article = build_preserved_highlighted_html(
+            get_article_body_text(final_article_text),
+            resolved_titles,
+            highlighted_article,
+        )
+    return True, {
+        "issue_keys": retry_issue_keys,
+        "retry_instruction": retry_instruction,
+        "prompt_template": prompt_template,
+        "title_candidates": resolved_titles,
+        "final_article": final_article_text,
+        "highlighted_article": rebuilt_highlighted_article,
+    }, ""
 
 
 def resolve_active_term_rules(scope=None, respect_enabled=True):
@@ -5982,6 +6090,17 @@ def init_state():
         )
         if st.session_state.de_ai_model not in DE_AI_MODELS:
             st.session_state.de_ai_model = DE_AI_MODELS[0]
+    if 'quality_gate_retry_use_separate_model' not in st.session_state:
+        st.session_state.quality_gate_retry_use_separate_model = False
+    if 'quality_gate_retry_model' not in st.session_state:
+        st.session_state.quality_gate_retry_model = st.session_state.de_ai_model
+    else:
+        st.session_state.quality_gate_retry_model = DE_AI_MODEL_MIGRATION.get(
+            st.session_state.quality_gate_retry_model,
+            st.session_state.quality_gate_retry_model,
+        )
+        if st.session_state.quality_gate_retry_model not in DE_AI_MODELS:
+            st.session_state.quality_gate_retry_model = st.session_state.de_ai_model
     if 'de_ai_variant' not in st.session_state:
         st.session_state.de_ai_variant = DE_AI_VARIANT_DEFAULT
     elif st.session_state.de_ai_variant not in DE_AI_VARIANTS:
@@ -6238,6 +6357,10 @@ def render_ai_progress_banner():
     draft_restore_notice = st.session_state.pop(DRAFT_RESTORE_NOTICE_KEY, "")
     if draft_restore_notice:
         st.success(draft_restore_notice)
+
+    quality_gate_notice = st.session_state.pop(QUALITY_GATE_NOTICE_KEY, "")
+    if quality_gate_notice:
+        st.success(quality_gate_notice)
 
     recovered_notice = st.session_state.get("recovered_ai_notice", "")
     if recovered_notice:
@@ -8752,6 +8875,9 @@ elif st.session_state.current_step == 5:
 elif st.session_state.current_step == 6:
     refresh_obsidian_influence_map()
     refresh_evidence_map()
+    current_role = st.session_state.get("selected_role", "")
+    current_editor_prompt = prompts_data["editors"].get(current_role, "") if current_role in prompts_data["editors"] else ""
+    de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
     render_section_intro("分发工作台", "在统一界面完成定稿审阅、脚本联动、搜图建议、导出分发和后续精修。", "Step 06")
     display_final_article = build_display_article_text(
         st.session_state.get("final_article", ""),
@@ -8776,6 +8902,16 @@ elif st.session_state.current_step == 6:
         highlighted_article=st.session_state.get("highlighted_article", ""),
         term_scan_summary=st.session_state.get("term_scan_summary", {}),
         target_words=globals().get("get_target_article_words", lambda: 1500)(),
+    )
+    quality_gate_retry_issue_keys = detect_auto_retry_issues(
+        display_final_article,
+        explicit_title_candidates=st.session_state.get("title_candidates", []),
+        highlighted_article=st.session_state.get("highlighted_article", ""),
+        require_highlight=True,
+        target_words=get_target_article_words(),
+        reference_article_text=display_final_article,
+        check_length=True,
+        include_humanizer_risk=True,
     )
 
     render_context_strip([
@@ -8838,6 +8974,11 @@ elif st.session_state.current_step == 6:
         st.divider()
         st.markdown("### 发布前质量闸门")
         with st.container(border=True):
+            quality_gate_retry_use_separate_model = bool(st.session_state.get("quality_gate_retry_use_separate_model", False))
+            quality_gate_retry_model = (
+                st.session_state.get("quality_gate_retry_model", st.session_state.get("de_ai_model", DE_AI_MODELS[0]))
+                or st.session_state.get("de_ai_model", DE_AI_MODELS[0])
+            )
             if publish_quality_gate.get("overall_status") == "pass":
                 st.success("当前稿件已通过发布前结构闸门。")
             elif publish_quality_gate.get("overall_status") == "fail":
@@ -8858,6 +8999,107 @@ elif st.session_state.current_step == 6:
                 st.markdown(
                     f"- **[{status_label_map.get(item.get('status'), '提示')}] {item.get('label', '')}**：{item.get('detail', '')}"
                 )
+            if publish_quality_gate.get("fail_count", 0) > 0:
+                st.divider()
+                retry_config_col1, retry_config_col2 = st.columns([1, 1.1])
+                with retry_config_col1:
+                    st.checkbox(
+                        "这轮续跑使用独立模型",
+                        key="quality_gate_retry_use_separate_model",
+                        help="默认沿用当前去 AI 模型。开启后，你可以为质量闸门续跑单独选一个模型。",
+                        on_change=save_draft,
+                    )
+                with retry_config_col2:
+                    retry_model_disabled = not bool(st.session_state.get("quality_gate_retry_use_separate_model", False))
+                    if retry_model_disabled:
+                        st.caption(f"当前沿用去 AI 模型：{st.session_state.get('de_ai_model', DE_AI_MODELS[0])}")
+                    else:
+                        st.selectbox(
+                            "质量闸门续跑模型",
+                            DE_AI_MODELS,
+                            key="quality_gate_retry_model",
+                            on_change=save_draft,
+                        )
+                if quality_gate_retry_issue_keys:
+                    if st.button("按质量闸门问题再去 AI 一轮", key="step6_retry_from_quality_gate", use_container_width=True):
+                        mark_ai_stage_started("de_ai_generation")
+                        try:
+                            retry_term_banned_terms, retry_term_default_replacements, _, _ = resolve_active_term_rules("de_ai")
+                            retry_term_rules_instruction = build_term_rules_instruction(
+                                retry_term_banned_terms,
+                                retry_term_default_replacements,
+                            )
+                            retry_model_name = (
+                                st.session_state.get("quality_gate_retry_model", st.session_state.get("de_ai_model", DE_AI_MODELS[0]))
+                                if st.session_state.get("quality_gate_retry_use_separate_model", False)
+                                else st.session_state.get("de_ai_model", DE_AI_MODELS[0])
+                            )
+                            with st.spinner(f"正在根据质量闸门问题，使用 {retry_model_name} 再做一轮定向去 AI 重写..."):
+                                success, retry_payload, retry_error = rerun_de_ai_from_quality_gate(
+                                    st.session_state.get("final_article", ""),
+                                    st.session_state.get("title_candidates", []),
+                                    st.session_state.get("highlighted_article", ""),
+                                    current_role,
+                                    current_editor_prompt,
+                                    st.session_state.get("source_content", ""),
+                                    variant=de_ai_variant,
+                                    term_rules_instruction=retry_term_rules_instruction,
+                                    writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
+                                    de_ai_model=retry_model_name,
+                                    api_key=api_key,
+                                    base_url=current_base_url,
+                                    temperature=st.session_state.get("de_ai_temperature", 0.75),
+                                    target_words=get_target_article_words(),
+                                )
+                            if not success:
+                                st.session_state.last_ai_error = retry_error
+                                save_draft()
+                                st.warning(retry_error)
+                            else:
+                                st.session_state.de_ai_prompt_template = retry_payload.get("prompt_template", "")
+                                st.session_state.title_candidates = retry_payload.get("title_candidates", [])
+                                st.session_state.final_article = retry_payload.get("final_article", "")
+                                st.session_state.highlighted_article = retry_payload.get("highlighted_article", "")
+                                if de_ai_variant == DE_AI_VARIANT_COMMUNITY:
+                                    retry_stage_label = "去AI味定稿（社区版｜闸门续跑）"
+                                elif de_ai_variant == DE_AI_VARIANT_CHAT:
+                                    retry_stage_label = "去AI味定稿（唠嗑版｜闸门续跑）"
+                                elif de_ai_variant == DE_AI_VARIANT_HUMANIZER:
+                                    retry_stage_label = "去AI味定稿（Humanizer版｜闸门续跑）"
+                                else:
+                                    retry_stage_label = "去AI味定稿（闸门续跑）"
+                                append_article_version(
+                                    st.session_state.final_article,
+                                    retry_stage_label,
+                                    role=current_role,
+                                    model=retry_model_name,
+                                    highlighted_article=st.session_state.get("highlighted_article", ""),
+                                )
+                                if enable_script:
+                                    generate_script_for_current_article(api_key, current_base_url, selected_model, script_duration)
+                                else:
+                                    st.session_state.spoken_script = ""
+                                if st.session_state.get("podcast_enabled"):
+                                    generate_podcast_script_for_current_article(
+                                        api_key,
+                                        current_base_url,
+                                        selected_model,
+                                        st.session_state.get("podcast_duration", "5分钟"),
+                                    )
+                                else:
+                                    reset_podcast_outputs(delete_audio=True)
+                                checkpoint_ai_stage("de_ai_generation", target_step=6)
+                                st.session_state[QUALITY_GATE_NOTICE_KEY] = "已根据质量闸门命中的问题完成一轮定向去 AI 重写。"
+                                save_draft()
+                                notify_step_completed(defer_until_rerun=True)
+                                st.rerun()
+                        except Exception as exc:
+                            st.session_state.pending_ai_stage = ""
+                            st.session_state.last_ai_error = str(exc)
+                            save_draft()
+                            st.error(f"质量闸门续跑失败：{exc}")
+                else:
+                    st.caption("当前红项不在一键续跑支持范围内，请手动返回去 AI 步骤处理。")
 
         st.divider()
         st.markdown("### 词表检查")
