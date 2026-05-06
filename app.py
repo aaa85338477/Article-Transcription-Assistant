@@ -606,11 +606,17 @@ def build_draft_data():
     return {key: clone_json_data(st.session_state[key]) for key in DRAFT_STATE_KEYS if key in st.session_state}
 
 
+def is_ui_preview_mode():
+    return bool(st.session_state.get("ui_preview_mode_enabled", False))
+
+
 def queue_draft_restore(draft_data, notice=""):
     snapshot = clone_json_data(draft_data or {})
     st.session_state[PENDING_DRAFT_RESTORE_KEY] = snapshot
     if notice:
         st.session_state[DRAFT_RESTORE_NOTICE_KEY] = notice
+    if is_ui_preview_mode():
+        return
     try:
         with open(DRAFT_FILE, "w", encoding="utf-8") as file_obj:
             json.dump(snapshot, file_obj, ensure_ascii=False, indent=2)
@@ -844,6 +850,8 @@ def read_task_queue_data():
 
 
 def save_task_queue_state():
+    if is_ui_preview_mode():
+        return
     queue_payload = {
         "active_task_id": st.session_state.get("active_task_id", ""),
         "tasks": clone_json_data(st.session_state.get("task_queue", [])),
@@ -902,6 +910,8 @@ def init_task_queue_state():
 
 
 def persist_active_task_snapshot(draft_data=None):
+    if is_ui_preview_mode():
+        return
     init_task_queue_state()
     active_task_id = st.session_state.get("active_task_id", "")
     if not active_task_id:
@@ -991,6 +1001,437 @@ def build_blank_task_snapshot(base_snapshot=None):
     return snapshot
 
 
+def build_ui_preview_review_feedback():
+    return """【结构性检查】
+- 当前初稿的对象已经明确，但导语里“为什么现在值得讨论”还可以再往前提半步。
+
+【表达与说服力检查】
+- 第二部分的判断足够清楚，但句式略整齐，建议适当打散长句，保留分析力度。
+
+【修改任务清单】
+- 任务 1｜导语先把争议焦点说透
+问题类型：导语
+对应位置或原句：开头两段已经交代对象，但“当前矛盾”还不够聚焦。
+为什么要改：读者需要在最前面知道这篇文章到底在争什么。
+应该怎么改：把测试反馈、玩法适配和 IP 容器化矛盾压缩成一句更直接的引子。
+
+- 任务 2｜中段判断再压一层术语密度
+问题类型：表达
+对应位置或原句：第二部分连续使用了多组概念判断。
+为什么要改：连续术语会让节奏显得更像研究报告，而不是媒体定稿。
+应该怎么改：保留判断，但减少一层概念堆叠，让句子更短、更像成稿。"""
+
+
+def build_ui_preview_step_data(step):
+    resolved_step = max(1, min(6, int(step or 1)))
+    snapshot = build_blank_task_snapshot({})
+    title_candidates = [
+        "容器型 IP 的叙事越界：《王者荣耀》衍生矩阵的跨品类阵痛",
+        "从《王者荣耀世界》测试反馈看 IP 跨品类扩张的真实阻力",
+        "当碎片化内容走向开放世界：腾讯天美的产品取舍困局",
+    ]
+    draft_article = build_structured_article_text(
+        title_candidates,
+        """近期，围绕《王者荣耀世界》的先遣测试，市场对腾讯天美工作室的讨论重新升温。玩家的反馈并不集中在单一点，而是落在剧情推进、地图引导、任务节奏与设备负载几个互相关联的体验层面，这让“IP 跨品类扩张是否真的成立”再次变成值得追问的话题。
+
+## 容器型资产的效率优势与迁移代价
+
+《王者荣耀》的内容资产天然适合高频运营。它依赖公共符号、角色形象和皮肤系统，能快速形成认知闭环，也能在短时间内持续制造话题。但当这种资产被搬进长流程、重探索的产品框架时，原本为短周期反馈服务的设计逻辑就会出现错位。
+
+## 从测试反馈看开放世界的节奏压力
+
+这次测试里，玩家集中提到的并不是单一 bug，而是多个系统共同形成的摩擦：剧情演出不够可跳、地图导航不够直观、支线任务层次不清，以及长时间游玩时的性能负担。它们分别属于不同模块，却共同指向一个问题：产品节奏还没有找到与 IP 特性真正匹配的表达方式。
+
+## 争议背后其实是内容重心的重新选择
+
+如果把《王者荣耀世界》看成对原有内容资产的一次再包装，当前的问题就不只是“做得够不够细”，而是“到底应该把开发资源优先投向哪里”。对一个已经拥有高认知度角色池和成熟战斗反馈的 IP 来说，用户可能并不优先期待一套更厚的文本叙事，他们真正关心的，反而是动作手感、多人协作与反馈闭环是否足够纯粹。""",
+    )
+    modified_article = build_structured_article_text(
+        title_candidates,
+        """《王者荣耀世界》的先遣测试，让腾讯天美再次面对一个老问题：成熟 IP 在跨品类扩张时，到底应该先保住什么。玩家这轮讨论并不只是在挑单点毛病，而是在同时指向剧情推进、地图引导、任务节奏和性能负载，说明争议已经落到了产品表达方式本身。
+
+## 容器型 IP 的效率，在长线产品里会变成约束
+
+《王者荣耀》的优势来自高频运营积累下的公共符号、角色辨识度和快速反馈机制。它天然适合碎片化消费，也适合围绕角色不断追加内容。但放进开放世界或长线叙事框架后，这些原本服务于短局循环的设计，未必能无缝支撑更慢、更重的探索体验。
+
+## 这次测试暴露的不是单个问题，而是节奏组织问题
+
+玩家对剧情不可跳、地图不够顺手、任务断层明显以及设备发热卡顿的抱怨，看上去分散，其实都在说明同一件事：产品节奏还没有真正长出来。系统与系统之间缺少一种自然衔接，导致用户既感受不到探索的流动，也很难获得持续投入的动力。
+
+## 更现实的方向，是重新确认内容重心
+
+对天美来说，这次测试的真正价值，不只是找到一些待修功能点，而是帮助团队重新确认《王者荣耀世界》到底要把什么放在最前面。如果核心资产依然是战斗反馈、角色辨识与多人协作，那后续更值得优先保证的，可能不是更厚的文本包装，而是更纯粹、更稳定、更可重复投入的玩法体验。""",
+    )
+    final_article = build_structured_article_text(
+        title_candidates,
+        """围绕《王者荣耀世界》的先遣测试，腾讯天美正在面对一次比常规调优更棘手的校准：当一个以碎片化内容和高频反馈见长的 IP 走向开放世界，它原本最有效率的资产，可能也会变成最先暴露边界的地方。
+
+## 容器型 IP 的效率优势，到了长线品类就会反过来施压
+
+《王者荣耀》过去积累的角色认知、公共符号和皮肤体系，是一套非常高效的内容容器。它能快速制造熟悉感，也能持续提供运营素材。但这种效率建立在短局对抗和快节奏消费之上，一旦迁移到更强调探索、沉浸和成长曲线的产品框架里，原本顺手的资产组织方式就可能开始变得笨重。
+
+## 测试反馈真正指向的是节奏组织问题
+
+这次测试里，玩家提到的剧情不可跳、地图引导不够直观、任务断层明显，以及部分设备发热卡顿，看似来自不同系统，实则都落在同一个结果上：产品节奏还没有真正建立起来。用户既没有被自然地推着走，也很难形成持续投入的内在驱动力。
+
+## 内容重心的确认，比继续堆叙事更关键
+
+如果继续沿着“把世界做得更厚”这条路往前推进，团队会不可避免地投入更多资源去补文本、补设定、补任务层级。但从当前反馈看，玩家最愿意为之停留的，依然是动作反馈、角色辨识和多人协作这些更接近原生 IP 强项的部分。比起继续扩张叙事体量，更现实的选择，是优先把这些核心体验打磨得更纯粹。
+
+## 真正决定项目上限的，是取舍是否果断
+
+对天美来说，这轮测试最有价值的地方，不只是暴露了哪里还不够完整，而是逼着团队重新回答一个更根本的问题：这款产品究竟要把什么放在最前面。只有先确认内容重心，后续的世界构建、任务分层与长线留存设计，才不会继续被一个“什么都想承接”的目标拖慢。""",
+    )
+    highlighted_article = """<h3>容器型 IP 的效率优势，到了长线品类就会反过来施压</h3>
+<p>《王者荣耀》过去积累的角色认知、公共符号和皮肤体系，是一套<span class="highlight-positive">非常高效的内容容器</span>。它能快速制造熟悉感，也能持续提供运营素材。<span class="highlight-positive">但这种效率建立在短局对抗和快节奏消费之上</span>，一旦迁移到更强调探索、沉浸和成长曲线的产品框架里，原本顺手的资产组织方式就可能开始变得笨重。</p>
+<h3>测试反馈真正指向的是节奏组织问题</h3>
+<p>这次测试里，玩家提到的剧情不可跳、地图引导不够直观、任务断层明显，以及部分设备发热卡顿，看似来自不同系统，实则都落在同一个结果上：<span class="highlight-positive">产品节奏还没有真正建立起来</span>。用户既没有被自然地推着走，也很难形成持续投入的内在驱动力。</p>
+<h3>内容重心的确认，比继续堆叙事更关键</h3>
+<p>如果继续沿着“把世界做得更厚”这条路往前推进，团队会不可避免地投入更多资源去补文本、补设定、补任务层级。<span class="highlight-positive">从当前反馈看，玩家最愿意为之停留的，依然是动作反馈、角色辨识和多人协作</span>这些更接近原生 IP 强项的部分。</p>
+<h3>真正决定项目上限的，是取舍是否果断</h3>
+<p>对天美来说，这轮测试最有价值的地方，不只是暴露了哪里还不够完整，而是逼着团队重新回答一个更根本的问题：<span class="highlight-positive">这款产品究竟要把什么放在最前面</span>。只有先确认内容重心，后续的世界构建、任务分层与长线留存设计，才不会继续被一个“什么都想承接”的目标拖慢。</p>"""
+    review_feedback = build_ui_preview_review_feedback()
+    review_actions = parse_review_actions(review_feedback)
+    accepted_review_items = [action.get("id") for action in review_actions]
+    podcast_segments = [
+        {"speaker": "host", "section": "opening", "text": "今天我们不聊热闹本身，而是聊《王者荣耀世界》测试背后真正暴露出来的产品取舍。"},
+        {"speaker": "host", "section": "analysis", "text": "一个依赖高频反馈的容器型 IP，走进开放世界后，最先出问题的往往不是资产量，而是节奏组织。"},
+        {"speaker": "host", "section": "closing", "text": "所以这次测试最关键的意义，不是找到了多少待修项，而是逼团队重新确认什么才是核心体验。"},
+    ]
+    podcast_script_raw = json.dumps(podcast_segments, ensure_ascii=False, indent=2)
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    snapshot.update({
+        "current_step": resolved_step,
+        "article_url": "https://www.gamespot.com/articles/take-two-boss-gives-hope-for-la-noire-2-and-other-sequels/1100-6539678/",
+        "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "source_content": """【文章素材 1】来源于: https://www.gamespot.com/articles/take-two-boss-gives-hope-for-la-noire-2-and-other-sequels/1100-6539678/
+Take-Two 管理层在最新访谈中提到，部分经典系列并没有被放弃，关键在于如何找到合适的市场窗口与开发节奏。
+
+================
+
+【文章素材 2】来源于: https://www.gamigion.com/how-royal-kingdom-is-scaling-with-interstitials-and-rewarded-ads/
+围绕产品扩张、留存压力和商业化节奏，这篇访谈提供了很多适合用来讨论“内容重心与运营效率”的参照视角。
+
+================
+
+【视频素材 1】来源于: https://www.youtube.com/watch?v=dQw4w9WgXcQ
+测试阶段的玩家讨论集中在任务节奏、地图体验、性能稳定性和玩法反馈。""",
+        "source_images": [],
+        "source_images_all": [],
+        "selected_source_image_ids": [],
+        "extraction_success": True,
+        "draft_article": draft_article,
+        "review_feedback": review_feedback,
+        "review_actions": review_actions,
+        "accepted_review_items": accepted_review_items,
+        "modified_article": modified_article,
+        "final_article": final_article,
+        "title_candidates": title_candidates,
+        "highlighted_article": highlighted_article,
+        "spoken_script": "镜头 1：先用一句话抛出测试争议。\\n镜头 2：解释容器型 IP 的效率优势。\\n镜头 3：落回‘节奏组织’这个核心矛盾。\\n镜头 4：收束到‘内容重心’与团队取舍。",
+        "podcast_enabled": True,
+        "podcast_duration": "5分钟",
+        "podcast_script_raw": podcast_script_raw,
+        "podcast_script_segments": podcast_segments,
+        "podcast_audio_path": "",
+        "podcast_audio_manifest": {"voice": snapshot.get("podcast_voice", DEFAULT_TTS_VOICE), "segment_count": 3, "cache_hits": 2},
+        "podcast_last_error": "",
+        "chat_history": [
+            {"role": "user", "content": "帮我把第二部分再压短一点。"},
+            {"role": "assistant", "content": "可以，建议只保留“效率优势”和“迁移代价”两层判断，把第三句的术语密度再收一层。"},
+        ],
+        "image_keywords": "1. Honor of Kings World gameplay test UI\n2. Tencent TiMi open world game screenshot\n3. mobile game open world performance benchmark\n4. 王者荣耀世界 先遣测试 地图 截图\n5. Honor of Kings character roster art\n6. Tencent Games action combat showcase\n7. mobile RPG quest flow UX diagram\n8. game open world navigation comparison\n9. 王者荣耀世界 战斗反馈 boss 战 截图\n10. Honor of Kings World multiplayer combat image",
+        "selected_role": "发行主编" if "发行主编" in (prompts_data.get("editors", {}) or {}) else list(prompts_data["editors"].keys())[0],
+        "selected_reviewer": DEFAULT_REVIEWER_ROLE,
+        "target_article_words": 1500,
+        "article_versions": [
+            {"id": "preview_v1", "label": "初稿", "article_text": draft_article, "created_at": now_text, "role": "发行主编", "model": "qwen3.5-plus"},
+            {"id": "preview_v2", "label": "修改稿", "article_text": modified_article, "created_at": now_text, "role": "发行主编", "model": "qwen3.5-plus"},
+            {"id": "preview_v3", "label": "定稿", "article_text": final_article, "created_at": now_text, "role": "发行主编", "model": "qwen3.5-plus"},
+        ],
+        "active_article_version_id": "preview_v3",
+        "de_ai_model": "qwen3.5-plus",
+        "de_ai_variant": DE_AI_VARIANT_HUMANIZER if "DE_AI_VARIANT_HUMANIZER" in globals() else "Humanizer-zh",
+        "de_ai_temperature": 0.75,
+        "quality_gate_retry_use_separate_model": False,
+        "quality_gate_retry_model": "qwen3.5-plus",
+        "feishu_doc_url": "https://feishu.cn/docx/preview-demo-doc",
+        "feishu_doc_token": "preview-demo-doc",
+        "feishu_doc_title": title_candidates[0],
+        "feishu_published_at": now_text,
+        "feishu_publish_error": "",
+        "term_scan_result": [],
+        "term_scan_summary": {"banned_terms": 0, "default_replacement_terms": 1, "suggested_replacement_terms": 2},
+        "pending_ai_stage": "",
+        "last_completed_ai_stage": "",
+        "last_completed_ai_target_step": 0,
+        "last_ai_error": "",
+        "recovered_ai_notice": "",
+        "obsidian_enabled": True,
+        "obsidian_vault_path": "E:\\Obsidian\\originvault\\1号仓库\\LLM Wiki\\wiki",
+        "obsidian_max_hits": 6,
+        "obsidian_show_hits": True,
+        "obsidian_hits": [
+            {"title": "开放世界节奏设计", "category_label": "设计方法", "path": "LLM Wiki/开放世界节奏设计.md", "matched_terms": ["开放世界", "节奏", "任务引导"], "excerpt": "长流程玩法里，任务切换与地图反馈必须共同保证推进感。"},
+            {"title": "容器型 IP 扩张边界", "category_label": "行业观察", "path": "LLM Wiki/容器型IP扩张边界.md", "matched_terms": ["IP", "内容容器", "角色资产"], "excerpt": "高认知 IP 在跨品类时，最容易高估已有资产对新品类节奏的支撑能力。"},
+        ],
+        "obsidian_research_brief": "本地知识库命中两条高相关笔记：一条讨论开放世界节奏组织，一条讨论容器型 IP 跨品类扩张的边界。",
+        "obsidian_retrieval_error": "",
+        "obsidian_query_terms": ["王者荣耀世界", "开放世界", "节奏", "IP 扩张"],
+        "obsidian_wiki_root": "E:\\Obsidian\\originvault\\1号仓库\\LLM Wiki\\wiki",
+        "obsidian_last_indexed_at": now_text,
+        "obsidian_retrieval_signature": "preview-obsidian-signature",
+        "obsidian_influence_map": [
+            {"paragraph_index": 2, "paragraph_preview": "《王者荣耀》过去积累的角色认知、公共符号和皮肤体系，是一套非常高效的内容容器。", "influence_level": "高", "score": 12, "note_titles": ["容器型 IP 扩张边界"], "matched_terms": ["IP", "内容容器", "角色资产"]},
+            {"paragraph_index": 3, "paragraph_preview": "这次测试里，玩家提到的剧情不可跳、地图引导不够直观、任务断层明显，以及部分设备发热卡顿。", "influence_level": "中", "score": 8, "note_titles": ["开放世界节奏设计"], "matched_terms": ["开放世界", "节奏", "任务引导"]},
+        ],
+        "obsidian_influence_summary": "共发现 2 个段落明显受到 Obsidian 补充内容影响。",
+        "obsidian_influence_signature": "preview-influence-signature",
+        "evidence_map": [
+            {
+                "paragraph_index": 1,
+                "coverage_level": "高",
+                "paragraph_preview": "围绕《王者荣耀世界》的先遣测试，腾讯天美正在面对一次比常规调优更棘手的校准。",
+                "claim_sentences": ["测试争议已经从单点体验问题上升到了产品表达方式本身。"],
+                "support_items": [
+                    {"source_type": "source_packet", "source_label": "文章素材 1 · GameSpot", "confidence": "高", "source_locator": "素材 1 / 第 1 段", "matched_excerpt": "关键在于如何找到合适的市场窗口与开发节奏。", "matched_terms": ["市场窗口", "开发节奏"]},
+                    {"source_type": "obsidian", "source_label": "本地笔记 · 容器型 IP 扩张边界", "confidence": "中", "source_locator": "LLM Wiki/容器型IP扩张边界.md", "matched_excerpt": "跨品类扩张的首要风险不是资产不够，而是节奏错配。", "matched_terms": ["跨品类", "节奏错配"]},
+                ],
+            },
+            {
+                "paragraph_index": 3,
+                "coverage_level": "中",
+                "paragraph_preview": "这次测试里，玩家提到的剧情不可跳、地图引导不够直观、任务断层明显，以及部分设备发热卡顿。",
+                "claim_sentences": ["多个系统问题共同指向了产品节奏尚未建立。"],
+                "support_items": [
+                    {"source_type": "source_packet", "source_label": "视频素材 1 · 玩家讨论摘要", "confidence": "高", "source_locator": "视频素材 1 / 字幕摘要", "matched_excerpt": "讨论集中在任务节奏、地图体验、性能稳定性和玩法反馈。", "matched_terms": ["任务节奏", "地图体验", "性能稳定性"]},
+                ],
+            },
+        ],
+        "evidence_summary": "共为 2 个关键段落建立了素材回溯卡片。",
+        "evidence_signature": "preview-evidence-signature",
+        "writing_brief_raw": "### 今日选题\\n1. 讨论《王者荣耀世界》测试反馈与容器型 IP 的扩张边界\\n> 推荐角度：内容重心、玩法节奏与 IP 迁移代价\\n> 数据来源：https://www.gamespot.com/",
+        "writing_brief_parsed": {"topic": "《王者荣耀世界》测试反馈与 IP 扩张边界", "sources": ["https://www.gamespot.com/"]},
+        "writing_brief_mode": "structured_text",
+        "writing_brief_summary": "选题聚焦《王者荣耀世界》测试反馈，主线是“容器型 IP 的效率优势何时会变成开放世界的节奏负担”。",
+        "brief_topic": "《王者荣耀世界》测试反馈与 IP 扩张边界",
+        "brief_sources": ["https://www.gamespot.com/", "https://www.gamigion.com/"],
+        "brief_evidence_map": [],
+        "brief_evidence_summary": "已确认两条外部来源和一条本地知识脉络。",
+        "brief_source_confirmation": [
+            {
+                "url": "https://www.gamespot.com/articles/take-two-boss-gives-hope-for-la-noire-2-and-other-sequels/1100-6539678/",
+                "host": "gamespot.com",
+                "matched": True,
+                "matched_locator": "https://www.gamespot.com/articles/take-two-boss-gives-hope-for-la-noire-2-and-other-sequels/1100-6539678/",
+            },
+            {
+                "url": "https://www.gamigion.com/how-royal-kingdom-is-scaling-with-interstitials-and-rewarded-ads/",
+                "host": "gamigion.com",
+                "matched": True,
+                "matched_locator": "https://www.gamigion.com/how-royal-kingdom-is-scaling-with-interstitials-and-rewarded-ads/",
+            },
+        ],
+    })
+
+    if resolved_step < 2:
+        snapshot["draft_article"] = ""
+        snapshot["article_versions"] = []
+        snapshot["active_article_version_id"] = None
+    if resolved_step < 3:
+        snapshot["review_feedback"] = ""
+        snapshot["review_actions"] = []
+        snapshot["accepted_review_items"] = []
+    if resolved_step < 4:
+        snapshot["modified_article"] = ""
+    if resolved_step < 5:
+        snapshot["final_article"] = ""
+        snapshot["highlighted_article"] = ""
+        snapshot["spoken_script"] = ""
+        snapshot["podcast_script_raw"] = ""
+        snapshot["podcast_script_segments"] = []
+        snapshot["podcast_audio_manifest"] = {}
+        snapshot["podcast_enabled"] = False
+        snapshot["evidence_map"] = []
+        snapshot["evidence_summary"] = ""
+        snapshot["obsidian_influence_map"] = []
+        snapshot["obsidian_influence_summary"] = ""
+        snapshot["image_keywords"] = ""
+        snapshot["feishu_doc_url"] = ""
+        snapshot["feishu_doc_token"] = ""
+        snapshot["feishu_doc_title"] = ""
+        snapshot["feishu_published_at"] = ""
+    if resolved_step < 6:
+        snapshot["final_article"] = ""
+        snapshot["highlighted_article"] = ""
+        snapshot["spoken_script"] = ""
+        snapshot["podcast_script_raw"] = ""
+        snapshot["podcast_script_segments"] = []
+        snapshot["podcast_audio_manifest"] = {}
+        snapshot["podcast_last_error"] = ""
+        snapshot["evidence_map"] = []
+        snapshot["evidence_summary"] = ""
+        snapshot["obsidian_influence_map"] = []
+        snapshot["obsidian_influence_summary"] = ""
+        snapshot["image_keywords"] = ""
+        snapshot["feishu_doc_url"] = ""
+        snapshot["feishu_doc_token"] = ""
+        snapshot["feishu_doc_title"] = ""
+        snapshot["feishu_published_at"] = ""
+        snapshot["feishu_publish_error"] = ""
+        snapshot["chat_history"] = []
+
+    return snapshot
+
+
+def build_ui_preview_runtime(step):
+    resolved_step = max(1, min(6, int(step or 1)))
+    active_snapshot = build_ui_preview_step_data(resolved_step)
+    task_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    active_task = {
+        "id": "P001",
+        "name": "预览任务｜王者荣耀世界跨品类分析",
+        "created_at": task_time,
+    }
+    refresh_task_record(active_task, active_snapshot)
+
+    completed_snapshot = build_ui_preview_step_data(6)
+    completed_task = {
+        "id": "P002",
+        "name": "已完成｜Royal Kingdom 商业化访谈",
+        "created_at": task_time,
+    }
+    refresh_task_record(completed_task, completed_snapshot)
+
+    pending_snapshot = build_blank_task_snapshot({})
+    pending_snapshot["brief_topic"] = "待启动｜Take-Two 经典 IP 续作窗口"
+    pending_snapshot["writing_brief_summary"] = "等待导入素材后开始写作。"
+    pending_task = {
+        "id": "P003",
+        "name": "待处理｜Take-Two 续作窗口",
+        "created_at": task_time,
+    }
+    refresh_task_record(pending_task, pending_snapshot)
+
+    archived_task = clone_json_data(completed_task)
+    archived_task["id"] = "A001"
+    archived_task["name"] = "历史归档｜AppLovin 变现策略复盘"
+    archived_task["archived_at"] = task_time
+    archived_task["archive_reason"] = "auto_completed_retention"
+
+    template = {
+        "id": "TPL001",
+        "name": "标准游戏新闻流程",
+        "created_at": task_time,
+        "config_snapshot": {
+            "selected_role": active_snapshot.get("selected_role", ""),
+            "selected_reviewer": active_snapshot.get("selected_reviewer", ""),
+            "target_article_words": active_snapshot.get("target_article_words", 1500),
+            "de_ai_model": active_snapshot.get("de_ai_model", ""),
+            "de_ai_variant": active_snapshot.get("de_ai_variant", ""),
+            "podcast_enabled": True,
+            "podcast_duration": "5分钟",
+        },
+    }
+    return {
+        "draft": active_snapshot,
+        "task_queue": [active_task, pending_task, completed_task],
+        "archived_task_queue": [archived_task],
+        "task_templates": [template],
+        "active_task_id": "P001",
+        "task_filter_status": "全部",
+        "task_search_query": "",
+        "task_template_apply_targets": [],
+    }
+
+
+def apply_ui_preview_runtime(runtime_payload):
+    payload = runtime_payload or {}
+    apply_draft_data(payload.get("draft", {}))
+    st.session_state.task_queue = clone_json_data(payload.get("task_queue", []))
+    st.session_state.archived_task_queue = clone_json_data(payload.get("archived_task_queue", []))
+    st.session_state.task_templates = clone_json_data(payload.get("task_templates", []))
+    st.session_state.active_task_id = payload.get("active_task_id", "")
+    st.session_state.task_filter_status = payload.get("task_filter_status", "全部")
+    st.session_state.task_search_query = payload.get("task_search_query", "")
+    st.session_state.task_template_apply_targets = clone_json_data(payload.get("task_template_apply_targets", []))
+
+
+def apply_ui_preview_snapshot(step, notice=""):
+    resolved_step = max(1, min(6, int(step or 1)))
+    preview_state = clone_json_data(st.session_state.get("ui_preview_snapshot", {}) or {})
+    live_backup = clone_json_data(preview_state.get("live_backup", {}))
+    runtime_payload = build_ui_preview_runtime(resolved_step)
+    preview_state["live_backup"] = live_backup
+    preview_state["runtime"] = clone_json_data(runtime_payload)
+    preview_state["last_step"] = resolved_step
+    st.session_state.ui_preview_snapshot = preview_state
+    apply_ui_preview_runtime(runtime_payload)
+    if notice:
+        st.session_state.ui_preview_notice = notice
+
+
+def clear_ui_preview_snapshot():
+    preview_state = clone_json_data(st.session_state.get("ui_preview_snapshot", {}) or {})
+    live_backup = clone_json_data(preview_state.get("live_backup", {}))
+    live_task_queue = clone_json_data(preview_state.get("live_task_queue", []))
+    live_archived_task_queue = clone_json_data(preview_state.get("live_archived_task_queue", []))
+    live_task_templates = clone_json_data(preview_state.get("live_task_templates", []))
+    live_active_task_id = preview_state.get("live_active_task_id", "")
+    live_task_filter_status = preview_state.get("live_task_filter_status", "全部")
+    live_task_search_query = preview_state.get("live_task_search_query", "")
+    live_task_template_apply_targets = clone_json_data(preview_state.get("live_task_template_apply_targets", []))
+
+    if live_backup:
+        apply_draft_data(live_backup)
+    st.session_state.task_queue = live_task_queue
+    st.session_state.archived_task_queue = live_archived_task_queue
+    st.session_state.task_templates = live_task_templates
+    st.session_state.active_task_id = live_active_task_id
+    st.session_state.task_filter_status = live_task_filter_status
+    st.session_state.task_search_query = live_task_search_query
+    st.session_state.task_template_apply_targets = live_task_template_apply_targets
+    st.session_state.ui_preview_snapshot = {}
+    st.session_state.ui_preview_notice = ""
+    st.session_state._ui_preview_applied = False
+
+
+def sync_ui_preview_mode():
+    preview_enabled = bool(st.session_state.get("ui_preview_mode_enabled", False))
+    preview_applied = bool(st.session_state.get("_ui_preview_applied", False))
+    preview_step = max(1, min(6, int(st.session_state.get("ui_preview_step", 1) or 1)))
+
+    if preview_enabled:
+        if not preview_applied:
+            st.session_state.ui_preview_snapshot = {
+                "live_backup": build_draft_data(),
+                "live_task_queue": clone_json_data(st.session_state.get("task_queue", [])),
+                "live_archived_task_queue": clone_json_data(st.session_state.get("archived_task_queue", [])),
+                "live_task_templates": clone_json_data(st.session_state.get("task_templates", [])),
+                "live_active_task_id": st.session_state.get("active_task_id", ""),
+                "live_task_filter_status": st.session_state.get("task_filter_status", "全部"),
+                "live_task_search_query": st.session_state.get("task_search_query", ""),
+                "live_task_template_apply_targets": clone_json_data(st.session_state.get("task_template_apply_targets", [])),
+            }
+            st.session_state._ui_preview_applied = True
+            apply_ui_preview_snapshot(preview_step, notice="当前为测试预览模式：不会调用 AI，也不会写入真实草稿、任务或飞书状态。")
+        else:
+            preview_state = st.session_state.get("ui_preview_snapshot", {}) or {}
+            if int(preview_state.get("last_step", 1) or 1) != preview_step:
+                apply_ui_preview_snapshot(preview_step, notice=f"已切换到 Step {preview_step} 的测试预览。")
+    elif preview_applied:
+        clear_ui_preview_snapshot()
+
+
+def build_ui_preview_chat_reply(user_query):
+    question = (user_query or "").strip()
+    if not question:
+        return "这是测试模式下的示例回复。"
+    return f"【测试模式示例回复】\n已收到你的精修要求：{question}\n\n在真实模式下，这里会调用当前模型继续改写、追问出处或压缩段落；测试模式只展示交互界面，不会发起真实 AI 请求。"
+
+
 def draft_has_meaningful_content(draft_data):
     if not isinstance(draft_data, dict):
         return False
@@ -1062,6 +1503,8 @@ def should_offer_draft_restore():
 
 
 def reset_active_task_to_blank():
+    if is_ui_preview_mode():
+        return False
     init_task_queue_state()
     active_task_id = st.session_state.get("active_task_id", "")
     if not active_task_id:
@@ -1082,6 +1525,8 @@ def reset_active_task_to_blank():
 
 
 def ensure_task_queue_bootstrap():
+    if is_ui_preview_mode():
+        return
     init_task_queue_state()
     tasks = st.session_state.get("task_queue", []) or []
     active_task_id = st.session_state.get("active_task_id", "")
@@ -1110,6 +1555,8 @@ def ensure_task_queue_bootstrap():
 
 
 def create_task_from_current_state(*, clone_current=False, template_id="", task_name=""):
+    if is_ui_preview_mode():
+        return st.session_state.get("active_task_id", "")
     init_task_queue_state()
     current_snapshot = build_draft_data()
     task_snapshot = clone_json_data(current_snapshot) if clone_current else build_blank_task_snapshot(current_snapshot)
@@ -1136,6 +1583,8 @@ def create_task_from_current_state(*, clone_current=False, template_id="", task_
 
 
 def switch_to_task(task_id):
+    if is_ui_preview_mode():
+        return False
     init_task_queue_state()
     task_record = get_task_by_id(task_id)
     if not task_record:
@@ -1153,6 +1602,8 @@ def switch_to_task(task_id):
 
 
 def resume_task(task_id=""):
+    if is_ui_preview_mode():
+        return False
     init_task_queue_state()
     target_task_id = task_id or st.session_state.get("active_task_id", "")
     task_record = get_task_by_id(target_task_id)
@@ -1170,6 +1621,8 @@ def resume_task(task_id=""):
 
 
 def delete_task(task_id):
+    if is_ui_preview_mode():
+        return False
     init_task_queue_state()
     tasks = st.session_state.get("task_queue", []) or []
     if len(tasks) <= 1:
@@ -1198,6 +1651,8 @@ def delete_task(task_id):
 
 
 def bulk_delete_tasks(task_ids):
+    if is_ui_preview_mode():
+        return 0
     init_task_queue_state()
     target_ids = {str(task_id or "").strip() for task_id in (task_ids or []) if str(task_id or "").strip()}
     tasks = st.session_state.get("task_queue", []) or []
@@ -1240,6 +1695,8 @@ def bulk_delete_tasks(task_ids):
 
 
 def auto_archive_completed_tasks(now=None, retention_days=7):
+    if is_ui_preview_mode():
+        return 0
     tasks = st.session_state.get("task_queue", []) or []
     if not tasks:
         return 0
@@ -1287,6 +1744,8 @@ def auto_archive_completed_tasks(now=None, retention_days=7):
 
 
 def restore_archived_task(task_id):
+    if is_ui_preview_mode():
+        return False
     init_task_queue_state()
     archived_tasks = st.session_state.get("archived_task_queue", []) or []
     archived_record = next((task for task in archived_tasks if task.get("id") == task_id), None)
@@ -1313,6 +1772,8 @@ def restore_archived_task(task_id):
 def save_current_config_as_template(template_name):
     clean_name = (template_name or "").strip()
     if not clean_name:
+        return None
+    if is_ui_preview_mode():
         return None
 
     init_task_queue_state()
@@ -1341,6 +1802,8 @@ def save_current_config_as_template(template_name):
 
 
 def apply_template_to_tasks(template_id, task_ids=None):
+    if is_ui_preview_mode():
+        return 0
     template = get_template_by_id(template_id)
     if not template:
         return 0
@@ -1397,6 +1860,8 @@ def build_batch_export_markdown(tasks):
 
 
 def save_draft():
+    if is_ui_preview_mode():
+        return
     draft_data = build_draft_data()
     try:
         with open(DRAFT_FILE, "w", encoding="utf-8") as file_obj:
@@ -1420,6 +1885,8 @@ def read_draft_data():
 
 
 def load_draft():
+    if is_ui_preview_mode():
+        return False
     try:
         draft_data = read_draft_data()
         if draft_data is None:
@@ -1433,6 +1900,8 @@ def load_draft():
 
 
 def apply_pending_draft_restore():
+    if is_ui_preview_mode():
+        return
     pending_draft = st.session_state.pop(PENDING_DRAFT_RESTORE_KEY, None)
     if not isinstance(pending_draft, dict):
         return
@@ -1441,6 +1910,8 @@ def apply_pending_draft_restore():
 
 
 def clear_draft():
+    if is_ui_preview_mode():
+        return
     if os.path.exists(DRAFT_FILE):
         try:
             os.remove(DRAFT_FILE)
@@ -3175,6 +3646,8 @@ def build_brief_source_confirmation(parsed_brief, source_content):
 
 
 def refresh_writing_brief_state(force=False):
+    if is_ui_preview_mode():
+        return
     raw_text = (st.session_state.get("writing_brief_raw", "") or "").strip()
     source_content = (st.session_state.get("source_content", "") or "").strip()
     signature_base = raw_text + "\n\n" + source_content
@@ -3989,6 +4462,8 @@ def render_obsidian_influence_panel(influence_map, summary):
 
 
 def run_obsidian_retrieval(force=False):
+    if is_ui_preview_mode():
+        return
     if not st.session_state.get("obsidian_enabled"):
         reset_obsidian_context()
         refresh_evidence_map(force=True)
@@ -4952,6 +5427,8 @@ def generate_script_for_current_article(api_key, base_url, model_name, script_du
 # 1. API 与外部推送函数
 # ==========================================
 def call_llm(api_key, base_url, model_name, system_prompt, user_content, image_urls=None, history=None, temperature=None):
+    if is_ui_preview_mode():
+        return build_ui_preview_chat_reply(user_content)
     if not api_key:
         st.error("Please enter an API key in the sidebar first.")
         st.stop()
@@ -6281,6 +6758,16 @@ def init_state():
         st.session_state.task_template_apply_targets = []
     if 'task_queue_bulk_cleanup_confirm' not in st.session_state:
         st.session_state.task_queue_bulk_cleanup_confirm = False
+    if 'ui_preview_mode_enabled' not in st.session_state:
+        st.session_state.ui_preview_mode_enabled = False
+    if 'ui_preview_step' not in st.session_state:
+        st.session_state.ui_preview_step = 1
+    if 'ui_preview_snapshot' not in st.session_state or not isinstance(st.session_state.ui_preview_snapshot, dict):
+        st.session_state.ui_preview_snapshot = {}
+    if 'ui_preview_notice' not in st.session_state:
+        st.session_state.ui_preview_notice = ""
+    if '_ui_preview_applied' not in st.session_state:
+        st.session_state._ui_preview_applied = False
     st.session_state.target_article_words = get_target_article_words()
     st.session_state.target_article_words_slider = get_target_article_words()
     current_role = st.session_state.get('selected_role', '')
@@ -6316,6 +6803,8 @@ def clear_ai_stage_checkpoint():
 
 
 def recover_ai_progress_if_needed():
+    if is_ui_preview_mode():
+        return
     target_step = st.session_state.get("last_completed_ai_target_step", 0) or 0
     current_step = st.session_state.get("current_step", 1)
     last_stage = st.session_state.get("last_completed_ai_stage", "")
@@ -6354,6 +6843,10 @@ def format_ai_stage_name(stage_name):
 
 
 def render_ai_progress_banner():
+    preview_notice = (st.session_state.get("ui_preview_notice", "") or "").strip()
+    if is_ui_preview_mode():
+        st.info(preview_notice or "当前为测试预览模式：不会调用 AI、不会抓取真实素材，也不会写入草稿、任务队列或飞书状态。")
+
     draft_restore_notice = st.session_state.pop(DRAFT_RESTORE_NOTICE_KEY, "")
     if draft_restore_notice:
         st.success(draft_restore_notice)
@@ -6410,6 +6903,7 @@ def render_task_queue_panel():
     pending_stage = str(st.session_state.get("pending_ai_stage", "") or "").strip()
 
     render_section_intro("任务队列", "将单篇工作流升级为可连续处理的本地生产队列。", "Queue")
+    st.markdown('<div class="queue-shell">', unsafe_allow_html=True)
     with st.container(border=True):
         metric_cols = st.columns(6)
         metric_values = [
@@ -6621,9 +7115,14 @@ def render_task_queue_panel():
                     st.info("\u5f53\u524d\u641c\u7d22\u6761\u4ef6\u4e0b\u6ca1\u6709\u547d\u4e2d\u7684\u5f52\u6863\u4efb\u52a1\u3002")
             else:
                 st.caption("\u6682\u65f6\u8fd8\u6ca1\u6709\u5f52\u6863\u4efb\u52a1\u3002")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def go_to_step(step):
-    st.session_state.current_step = step
+    resolved_step = max(1, min(6, int(step or 1)))
+    if is_ui_preview_mode():
+        apply_ui_preview_snapshot(resolved_step, notice=f"已切换到 Step {resolved_step} 的测试预览。")
+        return
+    st.session_state.current_step = resolved_step
     save_draft()
 
 
@@ -6758,6 +7257,8 @@ def append_article_version(content, stage, role=None, model=None, parent_id=None
 
 
 def bootstrap_article_versions():
+    if is_ui_preview_mode():
+        return
     ensure_article_version_state()
     versions = st.session_state.article_versions
 
@@ -7726,6 +8227,592 @@ def render_context_strip(items):
     chips = "".join([f'<span class="chip active">{item}</span>' for item in items if item])
     if chips:
         st.markdown(f'<div class="context-strip"><div class="chip-row">{chips}</div></div>', unsafe_allow_html=True)
+
+
+def inject_ui_theme():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --canvas: #f5f5f7;
+            --canvas-soft: #fbfbfd;
+            --panel: rgba(255, 255, 255, 0.92);
+            --panel-strong: rgba(255, 255, 255, 0.98);
+            --panel-dark: #111114;
+            --border: rgba(29, 29, 31, 0.08);
+            --border-strong: rgba(29, 29, 31, 0.14);
+            --text: #1d1d1f;
+            --text-muted: #6e6e73;
+            --brand: #0071e3;
+            --brand-strong: #0066cc;
+            --brand-soft: rgba(0, 113, 227, 0.10);
+            --shadow-soft: 0 14px 36px rgba(17, 17, 20, 0.06);
+            --shadow-strong: 0 24px 56px rgba(17, 17, 20, 0.10);
+            --radius-xl: 32px;
+            --radius-lg: 28px;
+            --radius-md: 22px;
+            --radius-sm: 16px;
+        }
+        html, body, .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stSidebar"],
+        [data-testid="stMarkdownContainer"],
+        .stMarkdown, .stText, .stCaption,
+        .stButton > button, .stDownloadButton > button,
+        .stTextInput input, .stTextArea textarea,
+        .stSelectbox [data-baseweb="select"] > div,
+        .stMultiSelect [data-baseweb="select"] > div,
+        .stNumberInput input, .stDateInput input,
+        .stRadio label, .stCheckbox label, .stToggle label,
+        h1, h2, h3, h4, h5, h6, p, label, li,
+        .step-label, .step-desc, .section-title, .section-subtitle,
+        .metric-card strong, .metric-card span,
+        .mode-card strong, .mode-card span,
+        .chip, .toolbar-note, .article-text-view pre {
+            font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+                "Noto Sans SC", "Source Han Sans SC", "Segoe UI", sans-serif !important;
+        }
+        body, .stApp, p, label, li,
+        .stTextInput input, .stTextArea textarea,
+        .stSelectbox [data-baseweb="select"] > div,
+        .stMultiSelect [data-baseweb="select"] > div,
+        .stNumberInput input, .stDateInput input {
+            font-weight: 400;
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        h1, h2, h3, h4, h5, h6,
+        .stButton > button, .stDownloadButton > button,
+        .step-label, .section-title {
+            font-weight: 600;
+        }
+        .material-symbols-rounded,
+        .material-symbols-outlined,
+        .material-icons,
+        [data-testid="stExpanderToggleIcon"] span,
+        [data-testid="stBaseButton-headerNoPadding"] span {
+            font-family: "Material Symbols Rounded", "Material Symbols Outlined", "Material Icons" !important;
+            font-weight: normal !important;
+            font-style: normal !important;
+            letter-spacing: normal !important;
+            text-transform: none !important;
+            white-space: nowrap !important;
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at top center, rgba(255, 255, 255, 0.94), transparent 24%),
+                linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 52%, #f2f2f4 100%);
+            color: var(--text);
+        }
+        [data-testid="stAppViewContainer"] > .main {
+            padding-top: 1.4rem;
+            background: transparent;
+        }
+        [data-testid="stHeader"] {
+            background: rgba(251, 251, 253, 0.72);
+            backdrop-filter: blur(18px);
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(15, 15, 18, 0.97), rgba(26, 26, 30, 0.96));
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(26px);
+        }
+        [data-testid="stSidebar"] * { color: #f5f5f7; }
+        [data-testid="stSidebar"] .stCaption,
+        [data-testid="stSidebar"] .stCaption *,
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
+            color: rgba(245, 245, 247, 0.60) !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"],
+        [data-testid="stSidebar"] .stExpander {
+            background: rgba(255, 255, 255, 0.05) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stSidebar"] .stExpander details summary,
+        [data-testid="stSidebar"] .stExpander details summary * {
+            color: #f5f5f7 !important;
+        }
+        [data-testid="stSidebar"] .stTabs [data-baseweb="tab-list"] {
+            gap: 0.25rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        [data-testid="stSidebar"] .stTabs [data-baseweb="tab"] {
+            color: rgba(245, 245, 247, 0.68) !important;
+        }
+        [data-testid="stSidebar"] .stTabs [aria-selected="true"] {
+            color: #ffffff !important;
+        }
+        [data-testid="stSidebar"] .stRadio label,
+        [data-testid="stSidebar"] .stRadio p,
+        [data-testid="stSidebar"] .stCheckbox label,
+        [data-testid="stSidebar"] .stCheckbox p,
+        [data-testid="stSidebar"] .stToggle label,
+        [data-testid="stSidebar"] .stToggle p {
+            color: rgba(245, 245, 247, 0.82) !important;
+        }
+        [data-testid="stSidebar"] .stTextInput input,
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] .stTextArea textarea {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.10) !important;
+            color: #f5f5f7 !important;
+            box-shadow: none !important;
+        }
+        .block-container {
+            max-width: 1480px;
+            padding-top: 0.8rem;
+            padding-bottom: 5rem;
+        }
+        .app-hero {
+            margin-bottom: 1.6rem;
+            padding: 3.2rem 3rem 2.35rem;
+            border-radius: var(--radius-xl);
+            border: 1px solid rgba(255, 255, 255, 0.45);
+            background:
+                radial-gradient(circle at top right, rgba(255, 255, 255, 0.09), transparent 28%),
+                linear-gradient(180deg, rgba(23, 23, 26, 0.98), rgba(34, 34, 38, 0.94));
+            box-shadow: var(--shadow-strong);
+            color: #f5f5f7;
+        }
+        .app-kicker {
+            display: inline-flex;
+            margin-bottom: 1rem;
+            padding: 0.42rem 0.94rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: rgba(245, 245, 247, 0.82);
+            font-size: 0.76rem;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .app-hero h1 {
+            margin: 0;
+            color: #ffffff;
+            font-size: clamp(2.75rem, 4vw, 4.6rem);
+            line-height: 1.04;
+            letter-spacing: -0.04em;
+        }
+        .app-hero p {
+            max-width: 920px;
+            margin: 0.95rem 0 1.75rem;
+            color: rgba(245, 245, 247, 0.72);
+            font-size: 1.08rem;
+            line-height: 1.72;
+        }
+        .hero-metrics, .step-grid, .chip-row, .mode-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.85rem;
+        }
+        .metric-card, .mode-card {
+            min-width: 190px;
+            padding: 1rem 1.1rem;
+            border-radius: 22px;
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            background: rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(18px);
+        }
+        .metric-card strong, .mode-card strong {
+            display: block;
+            margin-bottom: 0.28rem;
+            color: #ffffff;
+            font-size: 1rem;
+        }
+        .metric-card span, .mode-card span {
+            color: rgba(245, 245, 247, 0.64);
+            font-size: 0.87rem;
+            line-height: 1.58;
+        }
+        .stepper {
+            margin: 0.65rem 0 1.35rem;
+            padding: 0.35rem 0;
+            background: transparent;
+            border: 0;
+            box-shadow: none;
+        }
+        .step-grid { gap: 0.95rem; }
+        .stepper-item {
+            flex: 1 1 180px;
+            min-width: 160px;
+            padding: 1.18rem 1.15rem 1.1rem;
+            border-radius: 26px;
+            border: 1px solid rgba(29, 29, 31, 0.08);
+            background: rgba(255, 255, 255, 0.78);
+            box-shadow: var(--shadow-soft);
+        }
+        .stepper-item.active {
+            background: rgba(255, 255, 255, 0.96);
+            border-color: rgba(0, 113, 227, 0.22);
+            box-shadow: 0 22px 42px rgba(0, 113, 227, 0.10);
+        }
+        .stepper-item.done {
+            background: rgba(255, 255, 255, 0.84);
+            border-color: rgba(29, 29, 31, 0.06);
+        }
+        .step-index {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            margin-bottom: 0.8rem;
+            border-radius: 50%;
+            background: rgba(29, 29, 31, 0.06);
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            font-weight: 700;
+        }
+        .stepper-item.active .step-index {
+            background: var(--brand-soft);
+            color: var(--brand-strong);
+        }
+        .step-label {
+            display: block;
+            margin-bottom: 0.3rem;
+            color: var(--text);
+            font-size: 1.02rem;
+            font-weight: 700;
+        }
+        .step-desc {
+            color: var(--text-muted);
+            font-size: 0.86rem;
+            line-height: 1.58;
+        }
+        .section-head-shell {
+            margin: 0.2rem 0 1.1rem;
+        }
+        .section-head {
+            display: flex;
+            align-items: start;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+        .section-title {
+            margin: 0;
+            font-size: clamp(1.5rem, 2vw, 2.15rem);
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            color: var(--text);
+        }
+        .section-subtitle {
+            margin: 0.42rem 0 0;
+            color: var(--text-muted);
+            font-size: 1rem;
+            line-height: 1.68;
+            max-width: 820px;
+        }
+        .eyebrow {
+            display: inline-flex;
+            margin-bottom: 0.45rem;
+            color: var(--brand);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.52rem 0.82rem;
+            border-radius: 999px;
+            border: 1px solid rgba(29, 29, 31, 0.08);
+            background: rgba(255, 255, 255, 0.82);
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+        .chip.active {
+            background: var(--brand-soft);
+            border-color: rgba(0, 113, 227, 0.16);
+            color: var(--brand-strong);
+        }
+        .context-strip {
+            margin: 0.25rem 0 1rem;
+            padding: 1rem 1.15rem;
+            border-radius: 24px;
+            border: 1px solid rgba(29, 29, 31, 0.06);
+            background: rgba(255, 255, 255, 0.78);
+            box-shadow: var(--shadow-soft);
+        }
+        .toolbar-note {
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.64;
+        }
+        .stButton > button, .stDownloadButton > button {
+            min-height: 2.95rem;
+            border-radius: 999px;
+            border: 1px solid rgba(29, 29, 31, 0.08);
+            background: rgba(255, 255, 255, 0.88);
+            color: var(--text);
+            font-weight: 600;
+            box-shadow: 0 10px 24px rgba(17, 17, 20, 0.05);
+        }
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(180deg, var(--brand), var(--brand-strong));
+            color: #ffffff;
+            border-color: rgba(0, 102, 204, 0.55);
+            box-shadow: 0 18px 34px rgba(0, 113, 227, 0.22);
+        }
+        .stTextInput input, .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
+            border-radius: 18px !important;
+            border: 1px solid rgba(29, 29, 31, 0.08) !important;
+            background: rgba(255, 255, 255, 0.92) !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stMetric"], [data-testid="stMetric"] * {
+            color: var(--text) !important;
+        }
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] *,
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] *,
+        .block-container .stCaption,
+        .block-container .stCaption * {
+            color: var(--text-muted) !important;
+        }
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] * {
+            color: var(--text) !important;
+            font-weight: 700 !important;
+        }
+        .block-container .stTextInput input,
+        .block-container .stTextArea textarea,
+        .block-container .stNumberInput input,
+        .block-container .stDateInput input,
+        .block-container .stSelectbox [data-baseweb="select"] > div,
+        .block-container .stMultiSelect [data-baseweb="select"] > div {
+            color: var(--text) !important;
+        }
+        .block-container .stTextInput input::placeholder,
+        .block-container .stTextArea textarea::placeholder,
+        .block-container [data-baseweb="select"] input::placeholder {
+            color: var(--text-muted) !important;
+            opacity: 1 !important;
+        }
+        .block-container .stCheckbox label,
+        .block-container .stToggle label,
+        .block-container .stRadio label,
+        .block-container .stCheckbox p,
+        .block-container .stToggle p,
+        .block-container .stRadio p,
+        .block-container .stCheckbox span,
+        .block-container .stToggle span,
+        .block-container .stRadio span {
+            color: var(--text) !important;
+        }
+        .stCodeBlock, [data-testid="stCodeBlock"] {
+            border-radius: 22px !important;
+            border: 1px solid rgba(29, 29, 31, 0.08);
+            background: rgba(255, 255, 255, 0.94);
+        }
+        .article-text-view {
+            padding: 1.1rem 1.2rem;
+            border-radius: 22px;
+            border: 1px solid rgba(29, 29, 31, 0.08);
+            background: rgba(255, 255, 255, 0.94);
+            box-shadow: var(--shadow-soft);
+        }
+        .article-text-view pre {
+            margin: 0;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.97rem;
+            line-height: 1.9;
+            color: var(--text);
+        }
+        .queue-shell {
+            margin-top: 0.25rem;
+        }
+        .queue-shell > div[data-testid="stVerticalBlockBorderWrapper"] {
+            padding: 1.15rem 1.2rem 1rem;
+            border-radius: 30px;
+            background: rgba(255, 255, 255, 0.90);
+            box-shadow: var(--shadow-soft);
+        }
+        .queue-shell [data-testid="stMetric"] {
+            padding: 0.2rem 0.1rem 0.35rem;
+        }
+        .queue-shell [data-testid="stMetricLabel"] {
+            font-size: 0.82rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .queue-shell [data-testid="stMetricValue"] {
+            font-size: 2.15rem;
+            line-height: 1;
+        }
+        .queue-shell .stButton > button {
+            min-height: 3rem;
+        }
+        .queue-shell .stExpander {
+            background: rgba(255, 255, 255, 0.94) !important;
+            margin-top: 0.6rem;
+        }
+        .queue-shell .stExpander details summary {
+            padding-top: 0.18rem;
+            padding-bottom: 0.18rem;
+        }
+        .workbench-shell-note {
+            margin: -0.15rem 0 1rem;
+        }
+        .workbench-main,
+        .workbench-side {
+            padding: 0.25rem 0.1rem;
+        }
+        .workbench-main > div[data-testid="stVerticalBlockBorderWrapper"],
+        .workbench-side > div[data-testid="stVerticalBlockBorderWrapper"] {
+            padding: 1.05rem 1.1rem 0.98rem;
+            border-radius: 28px;
+            border: 1px solid rgba(29, 29, 31, 0.06);
+            box-shadow: var(--shadow-soft);
+        }
+        .workbench-main > div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: rgba(255, 255, 255, 0.94);
+            border-color: rgba(0, 113, 227, 0.08);
+        }
+        .workbench-side > div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: rgba(255, 255, 255, 0.86);
+        }
+        .workbench-kicker {
+            display: inline-flex;
+            margin-bottom: 0.5rem;
+            color: var(--brand);
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .workbench-subhead {
+            margin: 0 0 1rem;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            line-height: 1.64;
+        }
+        .highlight-actions {
+            margin: 0.65rem 0 0.15rem;
+        }
+        .highlight-actions > div {
+            gap: 0.75rem;
+        }
+        .highlight-actions .stButton > button {
+            min-height: 2.8rem;
+            border-radius: 999px;
+        }
+        .highlight-actions .stButton > button[kind="primary"] {
+            box-shadow: 0 16px 30px rgba(0, 113, 227, 0.16);
+        }
+        .stExpander {
+            border: 1px solid rgba(29, 29, 31, 0.08) !important;
+            border-radius: 24px !important;
+            background: rgba(255, 255, 255, 0.90) !important;
+            box-shadow: var(--shadow-soft);
+        }
+        .stExpander details summary {
+            padding-top: 0.1rem;
+            padding-bottom: 0.1rem;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            border: 1px solid rgba(29, 29, 31, 0.06);
+            border-radius: 28px;
+            background: rgba(255, 255, 255, 0.82);
+            box-shadow: var(--shadow-soft);
+        }
+        @media (max-width: 1200px) {
+            .app-hero {
+                padding: 2.6rem 2rem 2rem;
+            }
+            .app-hero h1 {
+                font-size: clamp(2.2rem, 6vw, 3.5rem);
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_app_hero():
+    st.markdown(
+        """
+        <section class="app-hero">
+            <div class="app-kicker">Editorial Production Console</div>
+            <h1>公众号文章生成助手</h1>
+            <p>以更接近 Apple 官网的极简工作台重新组织内容生产流程。把素材抓取、角色协作、定稿、高亮阅读版、配图、播客与飞书交付统一到一个克制而高密度的编辑空间。</p>
+            <div class="hero-metrics">
+                <div class="metric-card">
+                    <strong>多源聚合</strong>
+                    <span>文章链接、视频字幕、网页图片与上传文档在同一条生产链中汇合。</span>
+                </div>
+                <div class="metric-card">
+                    <strong>审稿定稿</strong>
+                    <span>编辑、审稿、精修与去 AI 定稿保持一条清晰、连续的决策路径。</span>
+                </div>
+                <div class="metric-card">
+                    <strong>一站交付</strong>
+                    <span>最终正文、高亮阅读版、飞书云文档、播客与配图建议在最后一步集中完成。</span>
+                </div>
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_stepper(current_step):
+    step_meta = [
+        ("素材输入", "汇聚文章、视频与图像素材"),
+        ("初稿生成", "选择角色并产出首版文章"),
+        ("严格审稿", "核查事实、逻辑与风格"),
+        ("定稿修订", "接收意见并形成最终版本"),
+        ("分发工作台", "脚本、配图、导出与精修"),
+    ]
+    columns = st.columns(len(step_meta))
+    for idx, ((label, desc), col) in enumerate(zip(step_meta, columns), start=1):
+        if idx < current_step:
+            class_name = "stepper-item done"
+        elif idx == current_step:
+            class_name = "stepper-item active"
+        else:
+            class_name = "stepper-item"
+        with col:
+            card_html = textwrap.dedent(f"""
+                <div class="{class_name}">
+                    <div class="step-index">{idx}</div>
+                    <span class="step-label">{label}</span>
+                    <span class="step-desc">{desc}</span>
+                </div>
+            """).strip()
+            st.markdown(card_html, unsafe_allow_html=True)
+
+
+def render_section_intro(title, subtitle=None, eyebrow=None):
+    eyebrow_html = f'<div class="eyebrow">{html_lib.escape(eyebrow)}</div>' if eyebrow else ""
+    subtitle_html = (
+        f'<p class="section-subtitle">{html_lib.escape(subtitle)}</p>'
+        if subtitle else ""
+    )
+    st.markdown(
+        f"""
+        <div class="section-head-shell">
+            {eyebrow_html}
+            <div class="section-head">
+                <div>
+                    <h2 class="section-title">{html_lib.escape(title)}</h2>
+                    {subtitle_html}
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 # ==========================================
 # 4. 页面与工作流渲染
 # ==========================================
@@ -7738,6 +8825,7 @@ if st.session_state.get("selected_reviewer") not in reviewer_prompt_map:
     st.session_state.selected_reviewer = default_reviewer_role
 if st.session_state.get("selected_reviewer_widget") not in reviewer_prompt_map:
     st.session_state.selected_reviewer_widget = st.session_state.get("selected_reviewer", default_reviewer_role)
+sync_ui_preview_mode()
 render_pending_completion_sound()
 
 with st.sidebar:
@@ -7747,6 +8835,24 @@ with st.sidebar:
     if PROMPTS_LOAD_REPORT.startswith("fallback_default"):
         st.warning("未读取到有效 prompts 配置，当前使用默认角色。请确认部署目录中的 prompts.json。")
         st.caption(PROMPTS_LOAD_REPORT)
+    st.markdown("---")
+    st.header("🧪 测试模式")
+    st.toggle("启用 UI 预览模式", key="ui_preview_mode_enabled")
+    if st.session_state.get("ui_preview_mode_enabled", False):
+        st.selectbox(
+            "预览步骤",
+            options=[1, 2, 3, 4, 5, 6],
+            key="ui_preview_step",
+            format_func=lambda value: {
+                1: "Step 1 · 素材输入",
+                2: "Step 2 · 初稿生成",
+                3: "Step 3 · 严格审稿",
+                4: "Step 4 · 修改稿确认",
+                5: "Step 5 · 去 AI 定稿",
+                6: "Step 6 · 分发工作台",
+            }.get(int(value or 1), f"Step {value}"),
+        )
+        st.caption("当前仅渲染预置假数据，用于检查每一步 UI，不会调用 AI，也不会写入真实草稿和任务状态。")
     st.header("⚙️ 引擎设置")
     api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI", "云雾API"])
     
@@ -7976,6 +9082,9 @@ if st.session_state.current_step == 1:
             enhanced_extract_clicked = st.button("增强提取内容", use_container_width=True)
 
         if standard_extract_clicked or enhanced_extract_clicked:
+            if is_ui_preview_mode():
+                apply_ui_preview_snapshot(1, notice="已刷新 Step 1 的测试素材快照。当前仍处于 UI 预览模式，不会抓取真实网页或视频。")
+                st.rerun()
             article_fetch_mode = "enhanced" if enhanced_extract_clicked else "standard"
             article_urls = [url.strip() for url in article_url_input.split('\n') if url.strip()]
             video_urls = [url.strip() for url in video_url_input.split('\n') if url.strip()]
@@ -8115,7 +9224,22 @@ if st.session_state.current_step == 1:
             with st.container(border=True):
                 render_section_intro("方案解析与来源确认", "这里显示当前写作方案主轴，以及它引用的来源是否已经进入素材池。", "Planning")
                 parsed_brief = st.session_state.get("writing_brief_parsed", {}) or {}
-                confirmations = st.session_state.get("brief_source_confirmation", []) or []
+                raw_confirmations = st.session_state.get("brief_source_confirmation", []) or []
+                confirmations = []
+                for item in raw_confirmations:
+                    if isinstance(item, dict):
+                        confirmations.append(item)
+                    else:
+                        clean_value = str(item or "").strip()
+                        if not clean_value:
+                            continue
+                        host = urlparse(clean_value).netloc.replace("www.", "").strip()
+                        confirmations.append({
+                            "url": clean_value,
+                            "host": host or clean_value,
+                            "matched": False,
+                            "matched_locator": "",
+                        })
                 grouped_signal_values = {
                     value
                     for values in (parsed_brief.get("signal_groups", {}) or {}).values()
@@ -8240,6 +9364,9 @@ if st.session_state.current_step == 1:
             with col_flow2:
                 st.markdown("<p class='toolbar-note'>自动完成角色路由、写稿、审稿、改稿和可选脚本生成，适合快速交付。</p>", unsafe_allow_html=True)
                 if st.button("🚀 一键全自动驾驶 (AI路由直达定稿)", type="primary", use_container_width=True):
+                    if is_ui_preview_mode():
+                        apply_ui_preview_snapshot(6, notice="已直接切到 Step 6 的完整交付预览。测试模式下不会执行真实 AI 路由或写作流程。")
+                        st.rerun()
                     if not api_key:
                         st.error("⚠️ 请先在左侧边栏输入 API Key！")
                         st.stop()
@@ -8424,6 +9551,9 @@ elif st.session_state.current_step == 2:
             st.rerun()
     with col2:
         if st.button(f"🚀 使用 {selected_model} 生成文章初稿"):
+            if is_ui_preview_mode():
+                apply_ui_preview_snapshot(3, notice="已切到 Step 3 的测试初稿与审稿界面。")
+                st.rerun()
             mark_ai_stage_started("draft_generation")
             with st.spinner("编辑正在分析所有素材并奋笔疾书，请耐心等待..."):
                 global_instruction = prompts_data.get("global_instruction", "")
@@ -8521,6 +9651,9 @@ elif st.session_state.current_step == 3:
                 st.rerun()
     with col3:
         if st.button(f"🔍 使用 {selected_model} 开始严格审查"):
+            if is_ui_preview_mode():
+                apply_ui_preview_snapshot(4, notice="已切到 Step 4 的测试审稿结果与修改任务界面。")
+                st.rerun()
             mark_ai_stage_started("review_generation")
             with st.spinner("主编正在核对原文素材..."):
                 if st.session_state.source_images:
@@ -8657,6 +9790,9 @@ elif st.session_state.current_step == 4:
             if review_actions and not accepted_review_items:
                 st.warning('\u5f53\u524d\u6ca1\u6709\u52fe\u9009\u4efb\u4f55\u5ba1\u7a3f\u4efb\u52a1\u3002\u82e5\u60f3\u5b8c\u5168\u5ffd\u7565\u610f\u89c1\uff0c\u8bf7\u4f7f\u7528"\u5ffd\u7565\u610f\u89c1\uff0c\u6cbf\u7528\u521d\u7a3f"\u3002')
             else:
+                if is_ui_preview_mode():
+                    apply_ui_preview_snapshot(5, notice="已切到 Step 5 的测试去 AI 定稿界面。")
+                    st.rerun()
                 mark_ai_stage_started("modification_generation")
                 with st.spinner("\u7f16\u8f91\u6b63\u5728\u6839\u636e\u4e3b\u7f16\u610f\u89c1\u751f\u6210\u4fee\u6539\u7a3f..."):
                     global_instruction = prompts_data.get("global_instruction", "")
@@ -8841,6 +9977,9 @@ elif st.session_state.current_step == 5:
         if st.button("跳过去 AI 味，直接定稿"):
             spinner_msg = f"正在将修改稿设为定稿，并生成【{script_duration}口播及分镜脚本】..." if enable_script else "正在将修改稿设为定稿..."
             with st.spinner(spinner_msg):
+                if is_ui_preview_mode():
+                    apply_ui_preview_snapshot(6, notice="已切到 Step 6 的测试交付工作台。")
+                    st.rerun()
                 skip_titles, _, skip_article_text = parse_article_generation_response(
                     st.session_state.modified_article,
                     st.session_state.get("title_candidates", []),
@@ -8869,6 +10008,9 @@ elif st.session_state.current_step == 5:
                 st.rerun()
     with col3:
         if st.button(f"使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味重写{de_ai_button_suffix}"):
+            if is_ui_preview_mode():
+                apply_ui_preview_snapshot(6, notice="已切到 Step 6 的测试定稿与高亮阅读版界面。")
+                st.rerun()
             mark_ai_stage_started("de_ai_generation")
             spinner_msg = (
                 f"正在使用 {st.session_state.get('de_ai_model', DE_AI_MODELS[0])} 去 AI 味{de_ai_button_suffix}，并生成【{script_duration}口播及分镜脚本】..."
@@ -9012,6 +10154,10 @@ elif st.session_state.current_step == 6:
     st.markdown("<p class='toolbar-note'>左侧保持主稿、复制、导出与分发链路；右侧上方用于观察 Obsidian 影响，下方保留精修对话。</p>", unsafe_allow_html=True)
     left_col, right_col = st.columns([1.45, 0.98])
     with left_col:
+        st.markdown(
+            '<div class="workbench-main"><div class="workbench-kicker">Primary Output</div><p class="workbench-subhead">把版本选择、最终正文、质量闸门和高亮阅读版集中在左侧，让主稿件始终保持最高的阅读优先级。</p>',
+            unsafe_allow_html=True,
+        )
         st.markdown("### 稿件版本时间线")
         versions = st.session_state.get("article_versions", [])
         if versions:
@@ -9239,6 +10385,7 @@ elif st.session_state.current_step == 6:
         st.divider()
         st.markdown("### 高亮阅读版")
         render_highlighted_article_panel(st.session_state.get("highlighted_article", ""))
+        st.markdown('<div class="highlight-actions">', unsafe_allow_html=True)
         step6_action_col1, step6_action_col2 = st.columns([1, 1])
         with step6_action_col1:
             if st.button("返回去 AI 步骤", key="step6_back_to_de_ai", use_container_width=True):
@@ -9246,14 +10393,22 @@ elif st.session_state.current_step == 6:
                 st.rerun()
         with step6_action_col2:
             if st.button("仅重建高亮阅读版", key="step6_rebuild_highlight", use_container_width=True):
-                st.session_state.highlighted_article = build_preserved_highlighted_html(
-                    get_article_body_text(st.session_state.get("final_article", "")),
-                    st.session_state.get("title_candidates", []),
-                    st.session_state.get("highlighted_article", ""),
-                )
+                if is_ui_preview_mode():
+                    preview_runtime = build_ui_preview_runtime(6)
+                    preview_highlight = preview_runtime.get("draft", {}).get("highlighted_article", "")
+                    if preview_highlight:
+                        st.session_state.highlighted_article = preview_highlight
+                    st.session_state.ui_preview_notice = "已在测试模式下重建高亮阅读版示例，不会调用真实模型。"
+                else:
+                    st.session_state.highlighted_article = build_preserved_highlighted_html(
+                        get_article_body_text(st.session_state.get("final_article", "")),
+                        st.session_state.get("title_candidates", []),
+                        st.session_state.get("highlighted_article", ""),
+                    )
                 save_draft()
                 st.success("已基于当前定稿重建高亮阅读版。")
                 st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
         if st.session_state.spoken_script:
             st.divider()
@@ -9269,6 +10424,9 @@ elif st.session_state.current_step == 6:
             podcast_btn_col1, podcast_btn_col2, podcast_btn_col3 = st.columns(3)
             with podcast_btn_col1:
                 if st.button("重生成播客稿", use_container_width=True):
+                    if is_ui_preview_mode():
+                        apply_ui_preview_snapshot(6, notice="已在测试预览模式下生成播客稿示例，不会调用真实 AI 或写入音频。")
+                        st.rerun()
                     with st.spinner("正在生成单人播客解说稿..."):
                         success = generate_podcast_script_for_current_article(
                             api_key,
@@ -9285,6 +10443,13 @@ elif st.session_state.current_step == 6:
                 synthesize_clicked = st.button("合成播客音频", use_container_width=True)
             with podcast_btn_col3:
                 if st.button("清除播客音频", use_container_width=True):
+                    if is_ui_preview_mode():
+                        st.session_state.podcast_audio_path = ""
+                        st.session_state.podcast_audio_manifest = {}
+                        st.session_state.podcast_last_error = ""
+                        st.session_state.ui_preview_notice = "已在测试预览模式下清空播客音频示例，不会删除真实文件。"
+                        save_draft()
+                        st.rerun()
                     audio_path = st.session_state.get("podcast_audio_path", "")
                     if audio_path and os.path.exists(audio_path):
                         try:
@@ -9304,6 +10469,14 @@ elif st.session_state.current_step == 6:
                 st.info("当前还没有播客解说稿。你可以先点击“重生成播客稿”。")
 
             if synthesize_clicked:
+                if is_ui_preview_mode():
+                    preview_draft = build_ui_preview_step_data(6)
+                    st.session_state.podcast_audio_path = preview_draft.get("podcast_audio_path", "")
+                    st.session_state.podcast_audio_manifest = clone_json_data(preview_draft.get("podcast_audio_manifest", {}))
+                    st.session_state.podcast_last_error = ""
+                    st.session_state.ui_preview_notice = "已在测试预览模式下模拟播客音频合成成功，不会调用真实 TTS。"
+                    save_draft()
+                    st.rerun()
                 if not podcast_script_segments:
                     st.error("请先生成播客解说稿，再进行音频合成。")
                 elif not (podcast_api_key or "").strip():
@@ -9372,13 +10545,17 @@ elif st.session_state.current_step == 6:
                 【文章定稿内容】：
                 """ + get_article_body_text(st.session_state.final_article)
 
-                st.session_state.image_keywords = call_llm(
-                    api_key=api_key,
-                    base_url=current_base_url,
-                    model_name=selected_model,
-                    system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。",
-                    user_content=keyword_prompt
-                )
+                if is_ui_preview_mode():
+                    st.session_state.image_keywords = build_ui_preview_step_data(6).get("image_keywords", "")
+                    st.session_state.ui_preview_notice = "已在测试模式下填充示例配图关键词。"
+                else:
+                    st.session_state.image_keywords = call_llm(
+                        api_key=api_key,
+                        base_url=current_base_url,
+                        model_name=selected_model,
+                        system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。",
+                        user_content=keyword_prompt
+                    )
                 save_draft()
                 notify_step_completed()
 
@@ -9430,6 +10607,16 @@ elif st.session_state.current_step == 6:
 
         with btn_col2:
             if st.button("\u53d1\u5e03\u5230\u98de\u4e66\u4e91\u6587\u6863", use_container_width=True):
+                if is_ui_preview_mode():
+                    preview_draft = build_ui_preview_step_data(6)
+                    st.session_state.feishu_doc_url = preview_draft.get("feishu_doc_url", "")
+                    st.session_state.feishu_doc_token = preview_draft.get("feishu_doc_token", "")
+                    st.session_state.feishu_doc_title = preview_draft.get("feishu_doc_title", "")
+                    st.session_state.feishu_published_at = preview_draft.get("feishu_published_at", "")
+                    st.session_state.feishu_publish_error = ""
+                    st.session_state.ui_preview_notice = "已在测试模式下模拟飞书云文档发布成功。"
+                    save_draft()
+                    st.rerun()
                 with st.spinner("\u6b63\u5728\u53d1\u5e03\u5230\u98de\u4e66\u4e91\u6587\u6863..."):
                     success, metadata, msg = publish_article_to_feishu_doc(
                         display_final_article,
@@ -9453,6 +10640,11 @@ elif st.session_state.current_step == 6:
 
         with btn_col3:
             if st.button("\u63a8\u9001\u5230\u98de\u4e66\u7fa4", use_container_width=True):
+                if is_ui_preview_mode():
+                    st.session_state.ui_preview_notice = "已在测试模式下模拟飞书群推送成功。"
+                    st.success("\U0001f389 测试模式下已模拟飞书群推送。")
+                    notify_step_completed()
+                    st.rerun()
                 with st.spinner("\u6b63\u5728\u63a8\u9001\u5230\u98de\u4e66..."):
                     success, msg = push_to_feishu(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
                     if success:
@@ -9463,12 +10655,19 @@ elif st.session_state.current_step == 6:
 
         with btn_col4:
             if st.button("\u65b0\u5efa\u4e0b\u4e00\u7bc7\u4efb\u52a1", use_container_width=True):
+                if is_ui_preview_mode():
+                    apply_ui_preview_snapshot(1, notice="已回到 Step 1 的测试输入界面，不会新建真实任务。")
+                    st.rerun()
                 clear_draft()
                 create_task_from_current_state(clone_current=False)
                 st.rerun()
-
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
+        st.markdown(
+            '<div class="workbench-side"><div class="workbench-kicker">Support Surfaces</div><p class="workbench-subhead">把证据地图、知识影响、对话与补充交付收纳在右侧，保证主稿与主操作维持更强的聚焦感。</p>',
+            unsafe_allow_html=True,
+        )
         should_show_evidence_map = bool(
             (st.session_state.get("final_article", "") or "").strip()
             and (st.session_state.get("source_content", "") or "").strip()
@@ -9509,40 +10708,45 @@ elif st.session_state.current_step == 6:
                         st.markdown(user_query)
     
                     with st.chat_message("assistant"):
-                        with st.spinner("思考中..."):
-                            knowledge_context = build_chat_knowledge_context()
-                            chat_sys_prompt = f"""You are an expert article refinement and source-tracing assistant.
-    
-                            [Reference source library - the only factual source for tracing]
-                            {st.session_state.source_content}
-    
-                            [Current final article]
-                            {display_final_article}
-    
-                            [Background knowledge library]
-                            {knowledge_context}
-    
-                            [Tasks]
-                            1. If the user asks for sourcing, only use the reference source library to locate the original passage. Do not treat the knowledge library as a news-fact source.
-                            2. If the user asks for a rewrite, output the replacement paragraph directly with no extra chatter.
-                            3. If the user asks for derived analysis, combine the article and the background knowledge carefully. Mention the note title first when you rely on the knowledge library.
-                            """
-    
-                            history_to_send = st.session_state.chat_history[:-1]
-    
-                            ai_response = call_llm(
-                                api_key=api_key,
-                                base_url=current_base_url,
-                                model_name=selected_model,
-                                system_prompt=chat_sys_prompt,
-                                user_content=user_query,
-                                history=history_to_send
-                            )
+                        if is_ui_preview_mode():
+                            ai_response = build_ui_preview_chat_reply(user_query)
                             st.markdown(ai_response)
+                        else:
+                            with st.spinner("思考中..."):
+                                knowledge_context = build_chat_knowledge_context()
+                                chat_sys_prompt = f"""You are an expert article refinement and source-tracing assistant.
+    
+                                [Reference source library - the only factual source for tracing]
+                                {st.session_state.source_content}
+    
+                                [Current final article]
+                                {display_final_article}
+    
+                                [Background knowledge library]
+                                {knowledge_context}
+    
+                                [Tasks]
+                                1. If the user asks for sourcing, only use the reference source library to locate the original passage. Do not treat the knowledge library as a news-fact source.
+                                2. If the user asks for a rewrite, output the replacement paragraph directly with no extra chatter.
+                                3. If the user asks for derived analysis, combine the article and the background knowledge carefully. Mention the note title first when you rely on the knowledge library.
+                                """
+    
+                                history_to_send = st.session_state.chat_history[:-1]
+    
+                                ai_response = call_llm(
+                                    api_key=api_key,
+                                    base_url=current_base_url,
+                                    model_name=selected_model,
+                                    system_prompt=chat_sys_prompt,
+                                    user_content=user_query,
+                                    history=history_to_send
+                                )
+                                st.markdown(ai_response)
     
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                 save_draft()
                 st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 
