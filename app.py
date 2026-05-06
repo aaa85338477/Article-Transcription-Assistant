@@ -1503,7 +1503,7 @@ def should_offer_draft_restore():
 
 
 def reset_active_task_to_blank():
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
     active_task_id = st.session_state.get("active_task_id", "")
@@ -1525,7 +1525,7 @@ def reset_active_task_to_blank():
 
 
 def ensure_task_queue_bootstrap():
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return
     init_task_queue_state()
     tasks = st.session_state.get("task_queue", []) or []
@@ -1555,7 +1555,7 @@ def ensure_task_queue_bootstrap():
 
 
 def create_task_from_current_state(*, clone_current=False, template_id="", task_name=""):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return st.session_state.get("active_task_id", "")
     init_task_queue_state()
     current_snapshot = build_draft_data()
@@ -1583,7 +1583,7 @@ def create_task_from_current_state(*, clone_current=False, template_id="", task_
 
 
 def switch_to_task(task_id):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
     task_record = get_task_by_id(task_id)
@@ -1602,7 +1602,7 @@ def switch_to_task(task_id):
 
 
 def resume_task(task_id=""):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
     target_task_id = task_id or st.session_state.get("active_task_id", "")
@@ -1621,7 +1621,7 @@ def resume_task(task_id=""):
 
 
 def delete_task(task_id):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
     tasks = st.session_state.get("task_queue", []) or []
@@ -1651,7 +1651,7 @@ def delete_task(task_id):
 
 
 def bulk_delete_tasks(task_ids):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return 0
     init_task_queue_state()
     target_ids = {str(task_id or "").strip() for task_id in (task_ids or []) if str(task_id or "").strip()}
@@ -1695,7 +1695,7 @@ def bulk_delete_tasks(task_ids):
 
 
 def auto_archive_completed_tasks(now=None, retention_days=7):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return 0
     tasks = st.session_state.get("task_queue", []) or []
     if not tasks:
@@ -1744,7 +1744,7 @@ def auto_archive_completed_tasks(now=None, retention_days=7):
 
 
 def restore_archived_task(task_id):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
     archived_tasks = st.session_state.get("archived_task_queue", []) or []
@@ -1773,7 +1773,7 @@ def save_current_config_as_template(template_name):
     clean_name = (template_name or "").strip()
     if not clean_name:
         return None
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return None
 
     init_task_queue_state()
@@ -1802,7 +1802,7 @@ def save_current_config_as_template(template_name):
 
 
 def apply_template_to_tasks(template_id, task_ids=None):
-    if is_ui_preview_mode():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return 0
     template = get_template_by_id(template_id)
     if not template:
