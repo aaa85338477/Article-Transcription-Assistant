@@ -1,10 +1,13 @@
+param(
+    [int]$PreferredPort = 8511
+)
+
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = "C:\Users\aaa85\AppData\Local\Python\bin\python3.14.exe"
 $appFile = Join-Path $repo "app.py"
-$url = "http://127.0.0.1:8501"
-$port = 8501
+$portSearchWindow = 50
 
 function Test-AppReady {
     param([string]$TargetUrl)
@@ -30,23 +33,49 @@ function Get-PortProcess {
     return $null
 }
 
+function Test-IsCurrentAppProcess {
+    param($ProcessRecord)
+    if (-not $ProcessRecord) {
+        return $false
+    }
+    $commandLine = ($ProcessRecord.CommandLine -or "")
+    return $commandLine -like ("*" + $appFile + "*")
+}
+
+function Resolve-TargetPort {
+    param([int]$StartPort)
+
+    for ($offset = 0; $offset -lt $portSearchWindow; $offset++) {
+        $candidatePort = $StartPort + $offset
+        $existingProcess = Get-PortProcess -TargetPort $candidatePort
+
+        if (-not $existingProcess) {
+            return @{
+                Port = $candidatePort
+                ReuseExisting = $false
+            }
+        }
+
+        if (Test-IsCurrentAppProcess -ProcessRecord $existingProcess) {
+            return @{
+                Port = $candidatePort
+                ReuseExisting = $true
+            }
+        }
+    }
+
+    throw "No available port found in range $StartPort-$($StartPort + $portSearchWindow - 1)."
+}
+
 if (-not (Test-Path $python)) {
     throw "Python executable not found: $python"
 }
 
-$existingProcess = Get-PortProcess -TargetPort $port
-if ($existingProcess -and (($existingProcess.CommandLine -or "") -notlike ("*" + $appFile + "*"))) {
-    Stop-Process -Id $existingProcess.ProcessId -Force -ErrorAction SilentlyContinue
-    Get-CimInstance Win32_Process | Where-Object {
-        ($_.CommandLine -or "") -like "*streamlit run app.py*" -and
-        ($_.CommandLine -or "") -like "*\.codex\worktrees\*"
-    } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 1
-}
+$target = Resolve-TargetPort -StartPort $PreferredPort
+$port = [int]$target.Port
+$url = "http://127.0.0.1:$port"
 
-if (-not (Test-AppReady -TargetUrl $url)) {
+if (-not $target.ReuseExisting) {
     $streamlitArgs = "-m streamlit run `"$appFile`" --server.headless true --server.port $port --browser.gatherUsageStats false"
     Start-Process -FilePath $python -ArgumentList $streamlitArgs -WorkingDirectory $repo | Out-Null
 
@@ -60,4 +89,7 @@ if (-not (Test-AppReady -TargetUrl $url)) {
 
 if (Test-AppReady -TargetUrl $url) {
     Start-Process explorer.exe $url | Out-Null
+}
+else {
+    throw "Streamlit app did not become ready on $url."
 }
