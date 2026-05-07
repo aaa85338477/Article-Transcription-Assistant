@@ -7856,7 +7856,7 @@ def get_script_sys_prompt(duration_str):
 * ✨ **视觉特效/字幕**: 屏幕突然亮起，居中显示大字特效“超级大瓜”。
 """
 
-def inject_ui_theme():
+def _legacy_inject_ui_theme():
     st.markdown(
         """
         <style>
@@ -8161,7 +8161,7 @@ def inject_ui_theme():
     )
 
 
-def render_app_hero():
+def _legacy_render_app_hero():
     st.markdown(
         """
         <section class="app-hero">
@@ -8188,7 +8188,7 @@ def render_app_hero():
     )
 
 
-def render_stepper(current_step):
+def _legacy_render_stepper(current_step):
     step_meta = [
         ("素材输入", "汇聚文章、视频与图像素材"),
         ("初稿生成", "选择角色并产出首版文章"),
@@ -8215,7 +8215,7 @@ def render_stepper(current_step):
             st.markdown(card_html, unsafe_allow_html=True)
 
 
-def render_section_intro(title, subtitle=None, eyebrow=None):
+def _legacy_render_section_intro(title, subtitle=None, eyebrow=None):
     if eyebrow:
         st.caption(eyebrow)
     st.markdown(f"#### {title}")
@@ -8246,6 +8246,7 @@ def inject_ui_theme():
             --brand: #0071e3;
             --brand-strong: #0066cc;
             --brand-soft: rgba(0, 113, 227, 0.10);
+            --success-soft: rgba(52, 199, 89, 0.12);
             --shadow-soft: 0 14px 36px rgba(17, 17, 20, 0.06);
             --shadow-strong: 0 24px 56px rgba(17, 17, 20, 0.10);
             --radius-xl: 32px;
@@ -8367,8 +8368,8 @@ def inject_ui_theme():
             padding-bottom: 5rem;
         }
         .app-hero {
-            margin-bottom: 1.6rem;
-            padding: 3.2rem 3rem 2.35rem;
+            margin-bottom: 1.1rem;
+            padding: 2.15rem 2.2rem 1.6rem;
             border-radius: var(--radius-xl);
             border: 1px solid rgba(255, 255, 255, 0.45);
             background:
@@ -8379,13 +8380,13 @@ def inject_ui_theme():
         }
         .app-kicker {
             display: inline-flex;
-            margin-bottom: 1rem;
-            padding: 0.42rem 0.94rem;
+            margin-bottom: 0.72rem;
+            padding: 0.34rem 0.82rem;
             border-radius: 999px;
             background: rgba(255, 255, 255, 0.08);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: rgba(245, 245, 247, 0.82);
-            font-size: 0.76rem;
+            font-size: 0.72rem;
             font-weight: 600;
             letter-spacing: 0.06em;
             text-transform: uppercase;
@@ -8393,40 +8394,41 @@ def inject_ui_theme():
         .app-hero h1 {
             margin: 0;
             color: #ffffff;
-            font-size: clamp(2.75rem, 4vw, 4.6rem);
-            line-height: 1.04;
+            font-family: "SF Pro Display", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif !important;
+            font-size: clamp(2.25rem, 3.3vw, 3.8rem);
+            line-height: 1.06;
             letter-spacing: -0.04em;
         }
         .app-hero p {
-            max-width: 920px;
-            margin: 0.95rem 0 1.75rem;
+            max-width: 760px;
+            margin: 0.6rem 0 1.05rem;
             color: rgba(245, 245, 247, 0.72);
-            font-size: 1.08rem;
-            line-height: 1.72;
+            font-size: 0.97rem;
+            line-height: 1.58;
         }
         .hero-metrics, .step-grid, .chip-row, .mode-grid {
             display: flex;
             flex-wrap: wrap;
-            gap: 0.85rem;
+            gap: 0.7rem;
         }
         .metric-card, .mode-card {
-            min-width: 190px;
-            padding: 1rem 1.1rem;
-            border-radius: 22px;
+            min-width: 170px;
+            padding: 0.8rem 0.92rem;
+            border-radius: 20px;
             border: 1px solid rgba(255, 255, 255, 0.10);
             background: rgba(255, 255, 255, 0.06);
             backdrop-filter: blur(18px);
         }
         .metric-card strong, .mode-card strong {
             display: block;
-            margin-bottom: 0.28rem;
+            margin-bottom: 0.18rem;
             color: #ffffff;
-            font-size: 1rem;
+            font-size: 0.94rem;
         }
         .metric-card span, .mode-card span {
             color: rgba(245, 245, 247, 0.64);
-            font-size: 0.87rem;
-            line-height: 1.58;
+            font-size: 0.82rem;
+            line-height: 1.48;
         }
         .stepper {
             margin: 0.65rem 0 1.35rem;
@@ -8451,8 +8453,8 @@ def inject_ui_theme():
             box-shadow: 0 22px 42px rgba(0, 113, 227, 0.10);
         }
         .stepper-item.done {
-            background: rgba(255, 255, 255, 0.84);
-            border-color: rgba(29, 29, 31, 0.06);
+            background: var(--success-soft);
+            border-color: rgba(52, 199, 89, 0.18);
         }
         .step-index {
             display: inline-flex;
@@ -8494,6 +8496,7 @@ def inject_ui_theme():
         }
         .section-title {
             margin: 0;
+            font-family: "SF Pro Display", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif !important;
             font-size: clamp(1.5rem, 2vw, 2.15rem);
             font-weight: 700;
             letter-spacing: -0.03em;
@@ -8510,8 +8513,8 @@ def inject_ui_theme():
             display: inline-flex;
             margin-bottom: 0.45rem;
             color: var(--brand);
-            font-size: 0.78rem;
-            font-weight: 700;
+            font-size: 0.81rem;
+            font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
         }
@@ -8544,6 +8547,12 @@ def inject_ui_theme():
             font-size: 0.92rem;
             line-height: 1.64;
         }
+        a, a:visited {
+            color: var(--brand);
+        }
+        a:hover {
+            color: var(--brand-strong);
+        }
         .stButton > button, .stDownloadButton > button {
             min-height: 2.95rem;
             border-radius: 999px;
@@ -8551,6 +8560,7 @@ def inject_ui_theme():
             background: rgba(255, 255, 255, 0.88);
             color: var(--text);
             font-weight: 600;
+            font-size: 16px;
             box-shadow: 0 10px 24px rgba(17, 17, 20, 0.05);
         }
         .stButton > button[kind="primary"] {
@@ -8559,11 +8569,44 @@ def inject_ui_theme():
             border-color: rgba(0, 102, 204, 0.55);
             box-shadow: 0 18px 34px rgba(0, 113, 227, 0.22);
         }
+        .stTextInput > div,
+        .stTextArea > div,
+        .stSelectbox > div,
+        .stMultiSelect > div {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+        .stTextInput [data-baseweb="base-input"],
+        .stTextInput [data-baseweb="input"],
+        .stTextArea [data-baseweb="base-input"],
+        .stTextArea [data-baseweb="input"],
+        .stSelectbox [data-baseweb="select"],
+        .stMultiSelect [data-baseweb="select"] {
+            border-radius: 18px !important;
+            overflow: hidden !important;
+            background: #ffffff !important;
+            box-shadow: none !important;
+        }
         .stTextInput input, .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
             border-radius: 18px !important;
             border: 1px solid rgba(29, 29, 31, 0.08) !important;
-            background: rgba(255, 255, 255, 0.92) !important;
+            background: #ffffff !important;
             box-shadow: none !important;
+        }
+        .stButton > button:focus,
+        .stButton > button:focus-visible,
+        .stDownloadButton > button:focus,
+        .stDownloadButton > button:focus-visible,
+        .stTextInput input:focus,
+        .stTextArea textarea:focus,
+        .stNumberInput input:focus,
+        .stDateInput input:focus,
+        .stSelectbox [data-baseweb="select"]:focus-within > div,
+        .stMultiSelect [data-baseweb="select"]:focus-within > div {
+            outline: none !important;
+            border-color: rgba(0, 113, 227, 0.55) !important;
+            box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.12) !important;
         }
         [data-testid="stMetric"], [data-testid="stMetric"] * {
             color: var(--text) !important;
@@ -8652,13 +8695,59 @@ def inject_ui_theme():
         .queue-shell .stButton > button {
             min-height: 3rem;
         }
+        .queue-shell .stTextInput [data-baseweb="base-input"],
+        .queue-shell .stTextInput [data-baseweb="input"],
+        .queue-shell .stSelectbox [data-baseweb="select"],
+        .queue-shell .stMultiSelect [data-baseweb="select"] {
+            border: 0 !important;
+            box-shadow: none !important;
+            background: #ffffff !important;
+        }
+        .queue-shell .stTextInput input,
+        .queue-shell .stSelectbox [data-baseweb="select"] > div,
+        .queue-shell .stMultiSelect [data-baseweb="select"] > div {
+            border: 0 !important;
+            box-shadow: none !important;
+            background: #ffffff !important;
+        }
+        .queue-shell .stTextInput input:focus,
+        .queue-shell .stSelectbox [data-baseweb="select"]:focus-within > div,
+        .queue-shell .stMultiSelect [data-baseweb="select"]:focus-within > div {
+            border-color: rgba(0, 113, 227, 0.42) !important;
+            box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.10) !important;
+        }
         .queue-shell .stExpander {
-            background: rgba(255, 255, 255, 0.94) !important;
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
             margin-top: 0.6rem;
         }
+        .queue-shell .stExpander > div {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+        .queue-shell .stExpander > details {
+            border-radius: 24px !important;
+            overflow: hidden !important;
+            background: #ffffff !important;
+            background-clip: padding-box !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
         .queue-shell .stExpander details summary {
+            margin: 0 !important;
             padding-top: 0.18rem;
             padding-bottom: 0.18rem;
+            border-radius: 24px !important;
+            background: #ffffff !important;
+            background-clip: padding-box !important;
+        }
+        .queue-shell .stExpander details summary:hover,
+        .queue-shell .stExpander details summary:focus,
+        .queue-shell .stExpander details summary:focus-visible,
+        .queue-shell .stExpander details > div {
+            background: #ffffff !important;
         }
         .workbench-shell-note {
             margin: -0.15rem 0 1rem;
@@ -8710,14 +8799,37 @@ def inject_ui_theme():
             box-shadow: 0 16px 30px rgba(0, 113, 227, 0.16);
         }
         .stExpander {
-            border: 1px solid rgba(29, 29, 31, 0.08) !important;
+            border: 0 !important;
             border-radius: 24px !important;
-            background: rgba(255, 255, 255, 0.90) !important;
-            box-shadow: var(--shadow-soft);
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+        .stExpander > div {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+        .stExpander > details {
+            border-radius: 24px !important;
+            overflow: hidden !important;
+            background: #ffffff !important;
+            background-clip: padding-box !important;
+            border: 1px solid rgba(29, 29, 31, 0.08) !important;
+            box-shadow: none !important;
         }
         .stExpander details summary {
+            margin: 0 !important;
             padding-top: 0.1rem;
             padding-bottom: 0.1rem;
+            border-radius: 24px !important;
+            background: #ffffff !important;
+            background-clip: padding-box !important;
+        }
+        .stExpander details summary:hover,
+        .stExpander details summary:focus,
+        .stExpander details summary:focus-visible,
+        .stExpander details > div {
+            background: #ffffff !important;
         }
         [data-testid="stVerticalBlockBorderWrapper"] {
             border: 1px solid rgba(29, 29, 31, 0.06);
@@ -8743,21 +8855,21 @@ def render_app_hero():
     st.markdown(
         """
         <section class="app-hero">
-            <div class="app-kicker">Editorial Production Console</div>
+            <div class="app-kicker">Editorial Workbench</div>
             <h1>公众号文章生成助手</h1>
-            <p>以更接近 Apple 官网的极简工作台重新组织内容生产流程。把素材抓取、角色协作、定稿、高亮阅读版、配图、播客与飞书交付统一到一个克制而高密度的编辑空间。</p>
+            <p>把抓取、审稿、定稿和交付收进一条高密度工作流里。</p>
             <div class="hero-metrics">
                 <div class="metric-card">
                     <strong>多源聚合</strong>
-                    <span>文章链接、视频字幕、网页图片与上传文档在同一条生产链中汇合。</span>
+                    <span>链接、字幕、图片与上传文档统一汇合。</span>
                 </div>
                 <div class="metric-card">
                     <strong>审稿定稿</strong>
-                    <span>编辑、审稿、精修与去 AI 定稿保持一条清晰、连续的决策路径。</span>
+                    <span>编辑、审稿、精修与去 AI 保持连续决策。</span>
                 </div>
                 <div class="metric-card">
                     <strong>一站交付</strong>
-                    <span>最终正文、高亮阅读版、飞书云文档、播客与配图建议在最后一步集中完成。</span>
+                    <span>正文、高亮、飞书、播客与配图集中完成。</span>
                 </div>
             </div>
         </section>
