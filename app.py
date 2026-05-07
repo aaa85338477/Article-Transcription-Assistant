@@ -4699,26 +4699,19 @@ YUNWU_MODEL_OPTIONS = [
     "qwen3.5-plus",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
-    "kimi-k2.5",
+    "gpt-5.5",
     "gpt-5.4",
     "claude-opus-4-6",
     "doubao-seed-2-0-lite-260215",
-    "gpt-5.4-mini-2026-03-17",
-    "gpt-5.4-nano",
     "gemini-3.1-pro-preview",
-    "claude-sonnet-4-6-thinking",
     "claude-opus-4-6-thinking",
-    "claude-opus-4-5-20251101-thinking",
-    "gemini-3.1-pro-preview-thinking-high",
-    "gemini-3.1-flash-lite-preview-thinking-high",
-    "MiniMax-M2.7",
-    "MiniMax-M2.7-highspeed"
+    "MiniMax-M2.7"
 ]
 DE_AI_MODEL_MIGRATION = {
     "deepseek-v3-1-terminus": "deepseek-v3.1",
     "deepseek-v3-2-exp": "deepseek-v3.2",
 }
-DE_AI_MODELS = ["deepseek-v3.1", "deepseek-v3.2", "deepseek-v4-flash", "deepseek-v4-pro", "qwen3.5-plus", "glm-5"]
+DE_AI_MODELS = ["deepseek-v3.2", "deepseek-v4-flash", "deepseek-v4-pro", "doubao-seed-2-0-lite-260215", "qwen3.6-plus", "glm-5"]
 DE_AI_VARIANTS = ["普通版", "社区文章去AI版", "自然唠嗑版", "Humanizer-zh 版"]
 DE_AI_VARIANT_DEFAULT = DE_AI_VARIANTS[0]
 DE_AI_VARIANT_COMMUNITY = DE_AI_VARIANTS[1]
