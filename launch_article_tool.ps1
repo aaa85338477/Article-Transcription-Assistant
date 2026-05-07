@@ -1,8 +1,8 @@
-$ErrorActionPreference = "Stop"
-
 param(
     [int]$PreferredPort = 8511
 )
+
+$ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = "C:\Users\aaa85\AppData\Local\Python\bin\python3.14.exe"

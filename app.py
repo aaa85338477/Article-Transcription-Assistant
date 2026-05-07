@@ -6905,7 +6905,6 @@ def render_task_queue_panel():
     render_section_intro("任务队列", "将单篇工作流升级为可连续处理的本地生产队列。", "Queue")
     st.markdown('<div class="queue-shell">', unsafe_allow_html=True)
     with st.container(border=True):
-        metric_cols = st.columns(6)
         metric_values = [
             ("全部", metrics.get("total", 0)),
             ("待处理", metrics.get("pending", 0)),
@@ -6914,9 +6913,7 @@ def render_task_queue_panel():
             ("已完成", metrics.get("completed", 0)),
             ("失败", metrics.get("failed", 0)),
         ]
-        for col, (label, value) in zip(metric_cols, metric_values):
-            with col:
-                st.metric(label, value)
+        render_queue_metric_rail(metric_values)
 
         interrupt_confirmed = False
         if pending_stage:
@@ -6926,18 +6923,6 @@ def render_task_queue_panel():
             st.session_state["task_queue_interrupt_confirm"] = False
 
         task_action_blocked = is_task_action_blocked(pending_stage, interrupt_confirmed)
-        search_cols = st.columns([1.6, 1])
-        with search_cols[0]:
-            st.text_input("搜索任务（标题 / 站点）", key="task_search_query", placeholder="PocketGamer / gamigion / King")
-        with search_cols[1]:
-            filter_options = ["全部", "待处理", "进行中", "待人工确认", "已完成", "失败"]
-            selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
-
-        reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
-        selected_status_key = None if selected_filter == "全部" else reverse_status_map.get(selected_filter)
-        search_query = st.session_state.get("task_search_query", "")
-        filtered_tasks = filter_tasks_by_query(tasks, search_query, status_filter=selected_status_key)
-        filtered_archived_tasks = filter_tasks_by_query(archived_tasks, search_query)
 
         task_options = [task.get("id", "") for task in tasks]
         task_labels = {
@@ -6945,74 +6930,108 @@ def render_task_queue_panel():
             for task in tasks
         }
         current_index = task_options.index(active_task_id) if active_task_id in task_options else 0
-        selected_task_id = st.selectbox("切换任务", options=task_options, index=current_index, format_func=lambda task_id: task_labels.get(task_id, task_id), key="task_queue_selected_id")
 
-        render_context_strip([
-            f"当前任务：{active_task.get('name', active_task_id)}",
-            f"状态：{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))}",
-            f"Step {active_task.get('current_step', 1)}",
-            f"最近更新：{active_task.get('updated_at', '')}",
-        ])
+        st.markdown("<div class='queue-current-shell'>", unsafe_allow_html=True)
+        with st.container(border=True):
+            render_section_intro("当前任务调度", "先筛选和定位任务，再继续处理、复制支线或清理旧条目。", "Active")
+            st.markdown("<div class='queue-field-shell'>", unsafe_allow_html=True)
+            st.markdown("<p class='queue-subsection-label'>搜索与筛选</p>", unsafe_allow_html=True)
+            search_cols = st.columns([1.6, 1])
+            with search_cols[0]:
+                st.text_input("搜索任务（标题 / 站点）", key="task_search_query", placeholder="PocketGamer / gamigion / King")
+            with search_cols[1]:
+                filter_options = ["全部", "待处理", "进行中", "待人工确认", "已完成", "失败"]
+                selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        switch_disabled = selected_task_id == active_task_id or task_action_blocked
-        cleanup_target_ids = [task.get("id", "") for task in tasks if task.get("status") in {"completed", "failed"}]
-        cleanup_count = len(cleanup_target_ids)
-        action_cols = st.columns([1.15, 0.9, 0.9, 0.9, 0.9, 1.15])
-        with action_cols[0]:
-            if st.button("切换到所选任务", key="switch_selected_task", type="primary", use_container_width=True, disabled=switch_disabled):
-                switch_to_task(selected_task_id)
-                st.rerun()
-        with action_cols[1]:
-            if st.button("新建空白", key="create_blank_task", use_container_width=True, disabled=task_action_blocked):
-                create_task_from_current_state(clone_current=False)
-                st.rerun()
-        with action_cols[2]:
-            if st.button("复制当前", key="clone_current_task", use_container_width=True, disabled=task_action_blocked):
-                create_task_from_current_state(clone_current=True)
-                st.rerun()
-        with action_cols[3]:
-            resume_label = "继续处理"
-            if active_task.get("status") == "failed":
-                resume_label = "失败重试"
-            if st.button(resume_label, key="resume_current_task", use_container_width=True):
-                if resume_task(active_task_id):
+            reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
+            selected_status_key = None if selected_filter == "全部" else reverse_status_map.get(selected_filter)
+            search_query = st.session_state.get("task_search_query", "")
+            filtered_tasks = filter_tasks_by_query(tasks, search_query, status_filter=selected_status_key)
+            filtered_archived_tasks = filter_tasks_by_query(archived_tasks, search_query)
+
+            st.markdown("<div class='queue-field-shell'>", unsafe_allow_html=True)
+            st.markdown("<p class='queue-subsection-label'>任务定位</p>", unsafe_allow_html=True)
+            selected_task_id = st.selectbox("切换任务", options=task_options, index=current_index, format_func=lambda task_id: task_labels.get(task_id, task_id), key="task_queue_selected_id")
+            render_context_strip([
+                f"当前任务：{active_task.get('name', active_task_id)}",
+                f"状态：{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))}",
+                f"Step {active_task.get('current_step', 1)}",
+                f"最近更新：{active_task.get('updated_at', '')}",
+            ])
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            switch_disabled = selected_task_id == active_task_id or task_action_blocked
+            cleanup_target_ids = [task.get("id", "") for task in tasks if task.get("status") in {"completed", "failed"}]
+            cleanup_count = len(cleanup_target_ids)
+            st.markdown("<div class='queue-actions-shell'>", unsafe_allow_html=True)
+            st.markdown("<p class='queue-subsection-label'>主操作</p>", unsafe_allow_html=True)
+            action_cols = st.columns([1.15, 0.9, 0.9, 0.9, 0.9, 1.15])
+            with action_cols[0]:
+                if st.button("切换到所选任务", key="switch_selected_task", type="primary", use_container_width=True, disabled=switch_disabled):
+                    switch_to_task(selected_task_id)
                     st.rerun()
-        with action_cols[4]:
-            delete_confirmed = st.session_state.get("task_queue_delete_confirm", False)
-            delete_disabled = task_action_blocked or len(tasks) <= 1 or not delete_confirmed
-            if st.button("删除任务", key="delete_selected_task", use_container_width=True, disabled=delete_disabled):
-                if delete_task(selected_task_id):
-                    st.session_state["task_queue_delete_confirm"] = False
+            with action_cols[1]:
+                if st.button("新建空白", key="create_blank_task", use_container_width=True, disabled=task_action_blocked):
+                    create_task_from_current_state(clone_current=False)
                     st.rerun()
-        with action_cols[5]:
-            bulk_cleanup_confirmed = st.session_state.get("task_queue_bulk_cleanup_confirm", False)
-            bulk_cleanup_disabled = task_action_blocked or cleanup_count == 0 or not bulk_cleanup_confirmed
-            if st.button("批量清理已完成 / 失败", key="bulk_cleanup_tasks", use_container_width=True, disabled=bulk_cleanup_disabled):
-                removed_count = bulk_delete_tasks(cleanup_target_ids)
-                if removed_count:
-                    st.session_state["task_queue_bulk_cleanup_confirm"] = False
+            with action_cols[2]:
+                if st.button("复制当前", key="clone_current_task", use_container_width=True, disabled=task_action_blocked):
+                    create_task_from_current_state(clone_current=True)
                     st.rerun()
+            with action_cols[3]:
+                resume_label = "继续处理"
+                if active_task.get("status") == "failed":
+                    resume_label = "失败重试"
+                if st.button(resume_label, key="resume_current_task", use_container_width=True):
+                    if resume_task(active_task_id):
+                        st.rerun()
+            with action_cols[4]:
+                delete_confirmed = st.session_state.get("task_queue_delete_confirm", False)
+                delete_disabled = task_action_blocked or len(tasks) <= 1 or not delete_confirmed
+                if st.button("删除任务", key="delete_selected_task", use_container_width=True, disabled=delete_disabled):
+                    if delete_task(selected_task_id):
+                        st.session_state["task_queue_delete_confirm"] = False
+                        st.rerun()
+            with action_cols[5]:
+                bulk_cleanup_confirmed = st.session_state.get("task_queue_bulk_cleanup_confirm", False)
+                bulk_cleanup_disabled = task_action_blocked or cleanup_count == 0 or not bulk_cleanup_confirmed
+                if st.button("批量清理已完成 / 失败", key="bulk_cleanup_tasks", use_container_width=True, disabled=bulk_cleanup_disabled):
+                    removed_count = bulk_delete_tasks(cleanup_target_ids)
+                    if removed_count:
+                        st.session_state["task_queue_bulk_cleanup_confirm"] = False
+                        st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        if len(tasks) <= 1:
-            st.caption("队列里至少保留一个任务；如需重做当前条目，可以直接新建空白后再删除旧任务。")
-        else:
-            delete_target = task_labels.get(selected_task_id, selected_task_id)
-            st.checkbox(f"确认删除所选任务：{delete_target}", key="task_queue_delete_confirm")
+            st.markdown(
+                "<p class='queue-note'>主操作围绕当前任务展开，模板、历史和批量导出都收进下面的折叠工具区。</p>",
+                unsafe_allow_html=True,
+            )
 
-        if cleanup_count:
-            st.checkbox(f"确认批量清理主队列中的已完成 / 失败任务（{cleanup_count} 条）", key="task_queue_bulk_cleanup_confirm")
-        else:
-            st.session_state["task_queue_bulk_cleanup_confirm"] = False
-            st.caption("当前主队列里没有可批量清理的已完成 / 失败任务。")
-
-        if selected_task_id != active_task_id:
-            if task_action_blocked:
-                st.caption("运行中任务需要先勾选确认，才能执行会中断当前 AI 调用的操作。")
+            if len(tasks) <= 1:
+                st.caption("队列里至少保留一个任务；如需重做当前条目，可以直接新建空白后再删除旧任务。")
             else:
-                st.caption("切换后会将当前编辑状态同步到所选任务。")
-        else:
-            st.caption("当前已定位到正在编辑的任务，可以直接继续处理或新建支线任务。")
+                delete_target = task_labels.get(selected_task_id, selected_task_id)
+                st.checkbox(f"确认删除所选任务：{delete_target}", key="task_queue_delete_confirm")
 
+            if cleanup_count:
+                st.checkbox(f"确认批量清理主队列中的已完成 / 失败任务（{cleanup_count} 条）", key="task_queue_bulk_cleanup_confirm")
+            else:
+                st.session_state["task_queue_bulk_cleanup_confirm"] = False
+                st.caption("当前主队列里没有可批量清理的已完成 / 失败任务。")
+
+            if selected_task_id != active_task_id:
+                if task_action_blocked:
+                    st.caption("运行中任务需要先勾选确认，才能执行会中断当前 AI 调用的操作。")
+                else:
+                    st.caption("切换后会将当前编辑状态同步到所选任务。")
+            else:
+                st.caption("当前已定位到正在编辑的任务，可以直接继续处理或新建支线任务。")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='queue-tool-shell'>", unsafe_allow_html=True)
+        render_section_intro("辅助工具区", "模板、归档和交付列表默认收起，避免它们干扰当前任务调度。", "Tools")
+        st.markdown("<p class='queue-tools-note'>模板、历史与交付台都默认折叠收纳，避免它们干扰当前任务调度。</p>", unsafe_allow_html=True)
         with st.expander("任务模板", expanded=False):
             st.caption("把常用配置存为模板，可以快速复用到后续任务。")
             st.markdown("**保存为模板**")
@@ -7115,6 +7134,7 @@ def render_task_queue_panel():
                     st.info("\u5f53\u524d\u641c\u7d22\u6761\u4ef6\u4e0b\u6ca1\u6709\u547d\u4e2d\u7684\u5f52\u6863\u4efb\u52a1\u3002")
             else:
                 st.caption("\u6682\u65f6\u8fd8\u6ca1\u6709\u5f52\u6863\u4efb\u52a1\u3002")
+        st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 def go_to_step(step):
@@ -7793,7 +7813,7 @@ def render_wrapped_article_text(text):
     normalized = text or ""
     escaped = html_lib.escape(normalized)
     st.markdown(
-        f'<div class="article-text-view"><pre>{escaped}</pre></div>',
+        f'<div class="article-text-view"><div class="article-text-body">{escaped}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -7818,6 +7838,304 @@ def render_rich_html_copy_button(html_text, copy_key, label="\U0001F4CB \u590d\u
         else:
             st.caption(message)
 
+
+def create_delivery_docx(article_text, script_text=None):
+    doc = Document()
+    doc.add_heading("【最终成稿】", level=1)
+    doc.add_paragraph(article_text)
+    if script_text:
+        doc.add_heading("【短视频 AI 分镜脚本】", level=1)
+        doc.add_paragraph(script_text)
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+
+def render_step6_script_and_podcast_panel(api_key, current_base_url, selected_model, podcast_api_key):
+    with st.container(border=True):
+        render_section_intro("脚本与播客", "把视频分镜和播客语音都收纳在这里，避免它们和主稿件争主位。", "Media")
+
+        if st.session_state.spoken_script:
+            st.markdown("#### 分镜脚本")
+            st.code(st.session_state.spoken_script, language="markdown")
+            render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step6")
+
+        if not st.session_state.get("podcast_enabled"):
+            return
+
+        st.markdown(f"#### 播客解说稿 · {st.session_state.get('podcast_duration', '5分钟')}")
+        podcast_script_segments = st.session_state.get("podcast_script_segments", []) or []
+        podcast_script_json = json.dumps(podcast_script_segments, ensure_ascii=False, indent=2) if podcast_script_segments else ""
+
+        podcast_btn_col1, podcast_btn_col2, podcast_btn_col3 = st.columns(3)
+        with podcast_btn_col1:
+            if st.button("重生成播客稿", key="step6_regen_podcast_script", use_container_width=True):
+                if is_ui_preview_mode():
+                    apply_ui_preview_snapshot(6, notice="已在测试预览模式下生成播客稿示例，不会调用真实 AI 或写入音频。")
+                    st.rerun()
+                with st.spinner("正在生成单人播客解说稿..."):
+                    success = generate_podcast_script_for_current_article(
+                        api_key,
+                        current_base_url,
+                        selected_model,
+                        st.session_state.get("podcast_duration", "5分钟"),
+                    )
+                    if success:
+                        st.success("播客解说稿已更新。")
+                    else:
+                        st.error(st.session_state.get("podcast_last_error", "播客解说稿生成失败。"))
+                    st.rerun()
+        with podcast_btn_col2:
+            synthesize_clicked = st.button("合成播客音频", key="step6_synthesize_podcast_audio", use_container_width=True)
+        with podcast_btn_col3:
+            if st.button("清除播客音频", key="step6_clear_podcast_audio", use_container_width=True):
+                if is_ui_preview_mode():
+                    st.session_state.podcast_audio_path = ""
+                    st.session_state.podcast_audio_manifest = {}
+                    st.session_state.podcast_last_error = ""
+                    st.session_state.ui_preview_notice = "已在测试预览模式下清空播客音频示例，不会删除真实文件。"
+                    save_draft()
+                    st.rerun()
+                audio_path = st.session_state.get("podcast_audio_path", "")
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except OSError:
+                        pass
+                st.session_state.podcast_audio_path = ""
+                st.session_state.podcast_audio_manifest = {}
+                st.session_state.podcast_last_error = ""
+                save_draft()
+                st.rerun()
+
+        if podcast_script_json:
+            st.code(podcast_script_json, language="json")
+            render_editor_friendly_copy_button(podcast_script_json, "podcast_script_step6")
+        else:
+            st.info("当前还没有播客解说稿。你可以先点击“重生成播客稿”。")
+
+        if synthesize_clicked:
+            if is_ui_preview_mode():
+                preview_draft = build_ui_preview_step_data(6)
+                st.session_state.podcast_audio_path = preview_draft.get("podcast_audio_path", "")
+                st.session_state.podcast_audio_manifest = clone_json_data(preview_draft.get("podcast_audio_manifest", {}))
+                st.session_state.podcast_last_error = ""
+                st.session_state.ui_preview_notice = "已在测试预览模式下模拟播客音频合成成功，不会调用真实 TTS。"
+                save_draft()
+                st.rerun()
+            if not podcast_script_segments:
+                st.error("请先生成播客解说稿，再进行音频合成。")
+            elif not (podcast_api_key or "").strip():
+                st.error("请先在侧边栏填写阿里云 DashScope API Key。")
+            else:
+                with st.spinner("正在合成播客音频..."):
+                    try:
+                        ensure_podcast_runtime_dirs()
+                        output_path, manifest = synthesize_podcast(
+                            segments=podcast_script_segments,
+                            voice=st.session_state.get("podcast_voice", DEFAULT_TTS_VOICE),
+                            api_key=podcast_api_key.strip(),
+                            output_dir=PODCAST_OUTPUT_DIR,
+                            cache_dir=PODCAST_CACHE_DIR,
+                            model=DEFAULT_TTS_MODEL,
+                        )
+                        st.session_state.podcast_audio_path = output_path
+                        st.session_state.podcast_audio_manifest = manifest
+                        st.session_state.podcast_last_error = ""
+                        save_draft()
+                        st.success("播客音频已生成。")
+                        st.rerun()
+                    except PodcastAudioError as exc:
+                        st.session_state.podcast_last_error = str(exc)
+                        save_draft()
+                        st.error(str(exc))
+
+        podcast_error = st.session_state.get("podcast_last_error", "")
+        if podcast_error:
+            st.error(podcast_error)
+
+        podcast_audio_path = st.session_state.get("podcast_audio_path", "")
+        if podcast_audio_path and os.path.exists(podcast_audio_path):
+            with open(podcast_audio_path, "rb") as podcast_audio_file:
+                podcast_audio_bytes = podcast_audio_file.read()
+            st.audio(podcast_audio_bytes, format="audio/mp3")
+            st.download_button(
+                label="下载播客 MP3",
+                data=podcast_audio_bytes,
+                file_name=os.path.basename(podcast_audio_path),
+                mime="audio/mpeg",
+                use_container_width=True,
+                key="step6_download_podcast_audio",
+            )
+            manifest = st.session_state.get("podcast_audio_manifest", {}) or {}
+            if manifest:
+                voice = manifest.get("voice", "")
+                st.caption(
+                    f"音色：{PODCAST_VOICE_LABELS.get(voice, voice)}｜"
+                    f"片段数：{manifest.get('segment_count', 0)}｜缓存命中：{manifest.get('cache_hits', 0)}"
+                )
+
+
+def render_step6_image_assistant_panel(api_key, current_base_url, selected_model):
+    with st.container(border=True):
+        render_section_intro("配图建议", "把搜图关键词视作辅助视觉层，集中放在右侧工具区。", "Visuals")
+        st.markdown(
+            '<div class="support-quiet-callout">适合在主稿与高亮阅读版确认后，最后补一轮搜图关键词。它不会改变正文，只是帮你更快找到合适的配图素材。</div>',
+            unsafe_allow_html=True,
+        )
+
+        if st.button("提取 10 个 Google 搜图关键词", key="step6_extract_image_keywords", use_container_width=True):
+            with st.spinner("正在深度分析文章，提取精确的搜图词汇..."):
+                keyword_prompt = """请根据以下文章内容，提取 10 个最适合在 Google 图片（Google Images）中搜索配图的精准关键词组合。
+                
+                【核心要求】：
+                1. 必须精准输出 10 个。
+                2. 为了在 Google 搜出最高质量的图，请尽量采用【中英文混合】或【纯英文】的专业搜索词（例如："Genshin Impact UI design", "Sensor Tower SLG revenue chart 2024", "Tencent Games logo transparent"）。
+                3. 场景具体化：不要只搜游戏名，要加上明确的修饰词（如实机演示、数据图表、买量素材、应用商店截图等）。
+                4. 直接用编号 1-10 列出，不要有任何废话解释。
+                
+                【文章定稿内容】：
+                """ + get_article_body_text(st.session_state.final_article)
+
+                if is_ui_preview_mode():
+                    st.session_state.image_keywords = build_ui_preview_step_data(6).get("image_keywords", "")
+                    st.session_state.ui_preview_notice = "已在测试模式下填充示例配图关键词。"
+                else:
+                    st.session_state.image_keywords = call_llm(
+                        api_key=api_key,
+                        base_url=current_base_url,
+                        model_name=selected_model,
+                        system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。",
+                        user_content=keyword_prompt
+                    )
+                save_draft()
+                notify_step_completed()
+
+        if st.session_state.image_keywords:
+            keyword_count = len([line for line in st.session_state.image_keywords.splitlines() if line.strip()])
+            render_context_strip([
+                "辅助工具",
+                f"已生成 {keyword_count} 组关键词",
+            ])
+            st.caption("可直接复制到 Google Images 使用；如果你已经有固定素材源，也可以跳过这一步。")
+            st.markdown('<div class="keyword-output-shell">', unsafe_allow_html=True)
+            st.code(st.session_state.image_keywords, language="markdown")
+            st.markdown('</div>', unsafe_allow_html=True)
+            render_editor_friendly_copy_button(st.session_state.image_keywords, "image_keywords_step6")
+        else:
+            st.caption("当前还没有生成配图关键词。等正文定稿后再做这一轮，通常效率更高。")
+
+
+def render_step6_delivery_actions_panel(display_final_article):
+    with st.container(border=True):
+        render_section_intro("导出与发布", "把文档导出、飞书发布和下一篇任务入口收在一张状态卡里。", "Delivery")
+
+        docx_data = create_delivery_docx(
+            display_final_article,
+            st.session_state.spoken_script if st.session_state.spoken_script else None,
+        )
+        feishu_doc_url = (st.session_state.get("feishu_doc_url", "") or "").strip()
+        feishu_doc_title = (st.session_state.get("feishu_doc_title", "") or "").strip()
+        feishu_published_at = (st.session_state.get("feishu_published_at", "") or "").strip()
+        feishu_publish_error = (st.session_state.get("feishu_publish_error", "") or "").strip()
+        word_status = "图文与脚本就绪" if st.session_state.spoken_script else "正文文档就绪"
+        feishu_status = "飞书已发布" if feishu_doc_url else ("飞书发布失败" if feishu_publish_error else "未发布飞书")
+        next_task_status = "可新建下一篇"
+
+        render_context_strip([word_status, feishu_status, next_task_status])
+        st.markdown(
+            f"""
+            <div class="delivery-status-shell">
+                <p class="delivery-status-title">当前交付状态</p>
+                <p class="delivery-status-meta">
+                    Word 导出已经可用；飞书状态会在每次发布后回写到这里。
+                    {'已存在飞书文档，可直接打开继续处理。' if feishu_doc_url else '如果你还没发到飞书，可以先导出 Word 再决定是否同步。'}
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if feishu_doc_url:
+            st.success("已发布飞书云文档。")
+            st.markdown(f"[打开飞书文档]({feishu_doc_url})")
+            if feishu_doc_title:
+                st.caption(f"文档标题：{feishu_doc_title}")
+            if feishu_published_at:
+                st.caption(f"最近发布时间：{feishu_published_at}")
+        elif feishu_publish_error:
+            st.warning(f"最近一次飞书云文档发布失败：{feishu_publish_error}")
+        else:
+            st.caption("当前还没有飞书发布结果。你可以先导出 Word，或直接发布到飞书云文档。")
+
+        st.markdown('<div class="delivery-action-label">主要交付</div>', unsafe_allow_html=True)
+        action_row_one = st.columns(2)
+        with action_row_one[0]:
+            st.download_button(
+                label="导出 Word 文档" if not st.session_state.spoken_script else "导出图文与脚本",
+                data=docx_data,
+                file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号图文与脚本_定稿.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="step6_download_docx",
+            )
+        with action_row_one[1]:
+            if st.button("发布到飞书云文档", key="step6_publish_feishu_doc", use_container_width=True):
+                if is_ui_preview_mode():
+                    preview_draft = build_ui_preview_step_data(6)
+                    st.session_state.feishu_doc_url = preview_draft.get("feishu_doc_url", "")
+                    st.session_state.feishu_doc_token = preview_draft.get("feishu_doc_token", "")
+                    st.session_state.feishu_doc_title = preview_draft.get("feishu_doc_title", "")
+                    st.session_state.feishu_published_at = preview_draft.get("feishu_published_at", "")
+                    st.session_state.feishu_publish_error = ""
+                    st.session_state.ui_preview_notice = "已在测试模式下模拟飞书云文档发布成功。"
+                    save_draft()
+                    st.rerun()
+                with st.spinner("正在发布到飞书云文档..."):
+                    success, metadata, msg = publish_article_to_feishu_doc(
+                        display_final_article,
+                        title_candidates=st.session_state.get("title_candidates", []),
+                        highlighted_html=st.session_state.get("highlighted_article", ""),
+                    )
+                    if success:
+                        for field_name, field_value in metadata.items():
+                            st.session_state[field_name] = field_value
+                        save_draft()
+                        persist_active_task_snapshot()
+                        notify_step_completed()
+                        st.success(f"飞书云文档创建成功：{metadata.get('feishu_doc_title', '新文档')}")
+                        if metadata.get("feishu_doc_url"):
+                            st.markdown(f"[打开飞书文档]({metadata.get('feishu_doc_url')})")
+                    else:
+                        st.session_state.feishu_publish_error = msg
+                        save_draft()
+                        persist_active_task_snapshot()
+                        st.error(msg)
+
+        st.markdown('<div class="delivery-action-label">分发与下一篇</div>', unsafe_allow_html=True)
+        action_row_two = st.columns(2)
+        with action_row_two[0]:
+            if st.button("推送到飞书群", key="step6_push_feishu_group", use_container_width=True):
+                if is_ui_preview_mode():
+                    st.session_state.ui_preview_notice = "已在测试模式下模拟飞书群推送成功。"
+                    st.success("测试模式下已模拟飞书群推送。")
+                    notify_step_completed()
+                    st.rerun()
+                with st.spinner("正在推送到飞书..."):
+                    success, msg = push_to_feishu(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
+                    if success:
+                        st.success("飞书推送成功。")
+                        notify_step_completed()
+                    else:
+                        st.error(f"推送失败：{msg}")
+        with action_row_two[1]:
+            if st.button("新建下一篇任务", key="step6_create_next_task", use_container_width=True):
+                if is_ui_preview_mode():
+                    apply_ui_preview_snapshot(1, notice="已回到 Step 1 的测试输入界面，不会新建真实任务。")
+                    st.rerun()
+                clear_draft()
+                create_task_from_current_state(clone_current=False)
+                st.rerun()
 
 def notify_step_completed(defer_until_rerun=False):
 
@@ -7887,7 +8205,7 @@ def _legacy_inject_ui_theme():
         .step-label, .step-desc, .section-title, .section-subtitle,
         .metric-card strong, .metric-card span,
         .mode-card strong, .mode-card span,
-        .chip, .toolbar-note, .article-text-view pre {
+        .chip, .toolbar-note, .article-text-body {
             font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
                 "Noto Sans SC", "Source Han Sans SC", "Segoe UI", sans-serif !important;
         }
@@ -8145,14 +8463,15 @@ def _legacy_inject_ui_theme():
             background: rgba(255, 255, 255, 0.82);
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
         }
-        .article-text-view pre {
+        .article-text-body {
             margin: 0;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;
-            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-            font-size: 0.97rem;
-            line-height: 1.9;
+            font-family: inherit;
+            font-size: 0.99rem;
+            line-height: 1.95;
+            letter-spacing: 0.01em;
             color: var(--text);
         }
         </style>
@@ -8229,6 +8548,22 @@ def render_context_strip(items):
         st.markdown(f'<div class="context-strip"><div class="chip-row">{chips}</div></div>', unsafe_allow_html=True)
 
 
+def render_queue_metric_rail(items):
+    cards = "".join(
+        [
+            (
+                '<div class="queue-metric-card">'
+                f'<span class="queue-metric-label">{html_lib.escape(str(label))}</span>'
+                f'<strong class="queue-metric-value">{html_lib.escape(str(value))}</strong>'
+                "</div>"
+            )
+            for label, value in items
+        ]
+    )
+    if cards:
+        st.markdown(f'<div class="queue-metric-rail">{cards}</div>', unsafe_allow_html=True)
+
+
 def inject_ui_theme():
     st.markdown(
         """
@@ -8269,7 +8604,7 @@ def inject_ui_theme():
         .step-label, .step-desc, .section-title, .section-subtitle,
         .metric-card strong, .metric-card span,
         .mode-card strong, .mode-card span,
-        .chip, .toolbar-note, .article-text-view pre {
+        .chip, .toolbar-note, .article-text-body {
             font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
                 "Noto Sans SC", "Source Han Sans SC", "Segoe UI", sans-serif !important;
         }
@@ -8332,9 +8667,47 @@ def inject_ui_theme():
             border: 1px solid rgba(255, 255, 255, 0.08) !important;
             box-shadow: none !important;
         }
-        [data-testid="stSidebar"] .stExpander details summary,
-        [data-testid="stSidebar"] .stExpander details summary * {
-            color: #f5f5f7 !important;
+        [data-testid="stSidebar"] .stExpander details summary {
+            background: #ffffff !important;
+            border: 1px solid rgba(29, 29, 31, 0.08) !important;
+            color: #1d1d1f !important;
+            -webkit-text-fill-color: #1d1d1f !important;
+            opacity: 1 !important;
+            text-shadow: none !important;
+        }
+        [data-testid="stSidebar"] .stExpander details summary *,
+        [data-testid="stSidebar"] .stExpander details summary span,
+        [data-testid="stSidebar"] .stExpander details summary div,
+        [data-testid="stSidebar"] .stExpander details summary p,
+        [data-testid="stSidebar"] .stExpander details summary svg,
+        [data-testid="stSidebar"] .stExpander details summary [data-testid="stMarkdownContainer"],
+        [data-testid="stSidebar"] .stExpander details summary [data-testid="stMarkdownContainer"] * {
+            color: #1d1d1f !important;
+            -webkit-text-fill-color: #1d1d1f !important;
+            fill: #1d1d1f !important;
+            stroke: #1d1d1f !important;
+            font-weight: 650 !important;
+            opacity: 1 !important;
+            text-shadow: none !important;
+        }
+        [data-testid="stSidebar"] .stExpander details > div {
+            background: #ffffff !important;
+            color: #1d1d1f !important;
+        }
+        [data-testid="stSidebar"] .stExpander details > div *,
+        [data-testid="stSidebar"] .stExpander details > div label,
+        [data-testid="stSidebar"] .stExpander details > div p,
+        [data-testid="stSidebar"] .stExpander details > div span,
+        [data-testid="stSidebar"] .stExpander details > div div {
+            color: #1d1d1f !important;
+            -webkit-text-fill-color: #1d1d1f !important;
+        }
+        [data-testid="stSidebar"] .stExpander details > div .stCaption,
+        [data-testid="stSidebar"] .stExpander details > div .stCaption *,
+        [data-testid="stSidebar"] .stExpander details > div [data-testid="stCaptionContainer"],
+        [data-testid="stSidebar"] .stExpander details > div [data-testid="stCaptionContainer"] * {
+            color: rgba(29, 29, 31, 0.62) !important;
+            -webkit-text-fill-color: rgba(29, 29, 31, 0.62) !important;
         }
         [data-testid="stSidebar"] .stTabs [data-baseweb="tab-list"] {
             gap: 0.25rem;
@@ -8354,6 +8727,24 @@ def inject_ui_theme():
         [data-testid="stSidebar"] .stToggle p {
             color: rgba(245, 245, 247, 0.82) !important;
         }
+        [data-testid="stSidebar"] .stTextInput > div,
+        [data-testid="stSidebar"] .stTextArea > div,
+        [data-testid="stSidebar"] .stSelectbox > div,
+        [data-testid="stSidebar"] .stMultiSelect > div {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stSidebar"] .stTextInput [data-baseweb="base-input"],
+        [data-testid="stSidebar"] .stTextInput [data-baseweb="input"],
+        [data-testid="stSidebar"] .stTextArea [data-baseweb="base-input"],
+        [data-testid="stSidebar"] .stTextArea [data-baseweb="input"],
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"],
+        [data-testid="stSidebar"] .stMultiSelect [data-baseweb="select"] {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.10) !important;
+            box-shadow: none !important;
+        }
         [data-testid="stSidebar"] .stTextInput input,
         [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
         [data-testid="stSidebar"] .stTextArea textarea {
@@ -8361,6 +8752,25 @@ def inject_ui_theme():
             border: 1px solid rgba(255, 255, 255, 0.10) !important;
             color: #f5f5f7 !important;
             box-shadow: none !important;
+        }
+        [data-testid="stSidebar"] .stTextInput input,
+        [data-testid="stSidebar"] .stTextArea textarea,
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] .stMultiSelect [data-baseweb="select"] > div,
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] input,
+        [data-testid="stSidebar"] .stMultiSelect [data-baseweb="select"] input,
+        [data-testid="stSidebar"] [data-baseweb="select"] span,
+        [data-testid="stSidebar"] [data-baseweb="select"] div[role="combobox"] {
+            color: #1d1d1f !important;
+            -webkit-text-fill-color: #1d1d1f !important;
+        }
+        [data-testid="stSidebar"] .stTextInput input::placeholder,
+        [data-testid="stSidebar"] .stTextArea textarea::placeholder,
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] input::placeholder,
+        [data-testid="stSidebar"] .stMultiSelect [data-baseweb="select"] input::placeholder {
+            color: rgba(29, 29, 31, 0.50) !important;
+            -webkit-text-fill-color: rgba(29, 29, 31, 0.50) !important;
+            opacity: 1 !important;
         }
         .block-container {
             max-width: 1480px;
@@ -8661,14 +9071,15 @@ def inject_ui_theme():
             background: rgba(255, 255, 255, 0.94);
             box-shadow: var(--shadow-soft);
         }
-        .article-text-view pre {
+        .article-text-body {
             margin: 0;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;
-            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-            font-size: 0.97rem;
-            line-height: 1.9;
+            font-family: inherit;
+            font-size: 0.99rem;
+            line-height: 1.95;
+            letter-spacing: 0.01em;
             color: var(--text);
         }
         .queue-shell {
@@ -8691,6 +9102,113 @@ def inject_ui_theme():
         .queue-shell [data-testid="stMetricValue"] {
             font-size: 2.15rem;
             line-height: 1;
+        }
+        .queue-metric-rail {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 0.75rem;
+            margin: 0.25rem 0 1rem;
+        }
+        .queue-metric-card {
+            display: flex;
+            min-height: 5rem;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 0.35rem;
+            padding: 0.9rem 1rem;
+            border-radius: 20px;
+            border: 1px solid rgba(29, 29, 31, 0.08);
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(249, 249, 250, 0.96));
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        }
+        .queue-metric-label {
+            font-size: 0.78rem;
+            line-height: 1.2;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+        .queue-metric-value {
+            font-size: 1.8rem;
+            line-height: 1;
+            color: var(--text);
+        }
+        .queue-note {
+            margin: -0.05rem 0 0.8rem;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+        }
+        .queue-subsection-label {
+            margin: 0.1rem 0 0.45rem;
+            font-size: 0.76rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+        .queue-field-shell {
+            margin-bottom: 0.7rem;
+            padding: 0.85rem 0.9rem 0.35rem;
+            border-radius: 22px;
+            background: rgba(248, 249, 252, 0.88);
+            border: 1px solid rgba(29, 29, 31, 0.05);
+        }
+        .queue-actions-shell {
+            margin-top: 0.15rem;
+            margin-bottom: 0.4rem;
+        }
+        .queue-tool-shell {
+            margin-top: 0.75rem;
+            padding-top: 0.2rem;
+            border-top: 1px solid rgba(29, 29, 31, 0.08);
+        }
+        .queue-current-shell {
+            margin-top: 0.25rem;
+            padding: 0.15rem 0 0.35rem;
+        }
+        .queue-current-shell > div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,255,0.92));
+            border: 1px solid rgba(0, 113, 227, 0.08);
+            border-radius: 28px;
+            box-shadow: 0 14px 28px rgba(0, 113, 227, 0.06);
+            padding: 1rem 1rem 0.9rem;
+        }
+        .queue-tool-shell .section-head-shell {
+            margin-top: 0.25rem;
+        }
+        .queue-tools-note {
+            margin: 0.1rem 0 0.6rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .source-result-shell {
+            margin-top: 0.75rem;
+        }
+        .source-result-shell > div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(247,249,252,0.92));
+            border: 1px solid rgba(29, 29, 31, 0.06);
+            box-shadow: var(--shadow-soft);
+        }
+        .preview-flow-note {
+            margin: 0.15rem 0 0.85rem;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.64;
+        }
+        .source-result-meta {
+            margin: 0.05rem 0 0.85rem;
+        }
+        .queue-shell input,
+        .queue-shell textarea,
+        .queue-shell select,
+        .queue-shell [data-baseweb="input"] *,
+        .queue-shell [data-baseweb="base-input"] *,
+        .queue-shell [data-baseweb="select"] *,
+        .queue-shell [data-baseweb="base-input"],
+        .queue-shell [data-baseweb="input"],
+        .queue-shell [data-baseweb="select"] {
+            border-color: transparent !important;
+            box-shadow: none !important;
         }
         .queue-shell .stButton > button {
             min-height: 3rem;
@@ -8742,6 +9260,8 @@ def inject_ui_theme():
             border-radius: 24px !important;
             background: #ffffff !important;
             background-clip: padding-box !important;
+            border: 0 !important;
+            box-shadow: none !important;
         }
         .queue-shell .stExpander details summary:hover,
         .queue-shell .stExpander details summary:focus,
@@ -8784,6 +9304,56 @@ def inject_ui_theme():
             color: var(--text-muted);
             font-size: 0.95rem;
             line-height: 1.64;
+        }
+        .support-tool-note {
+            margin: 0.05rem 0 0.9rem;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.64;
+        }
+        .support-quiet-callout {
+            margin: 0.15rem 0 0.9rem;
+            padding: 0.9rem 1rem;
+            border-radius: 18px;
+            border: 1px solid rgba(29, 29, 31, 0.06);
+            background: linear-gradient(180deg, rgba(247, 249, 252, 0.92), rgba(255, 255, 255, 0.96));
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.66;
+        }
+        .delivery-status-shell {
+            margin: 0.2rem 0 0.95rem;
+            padding: 1rem 1.05rem;
+            border-radius: 22px;
+            border: 1px solid rgba(0, 113, 227, 0.10);
+            background: linear-gradient(180deg, rgba(250, 252, 255, 0.98), rgba(245, 249, 255, 0.94));
+        }
+        .delivery-status-title {
+            margin: 0 0 0.35rem;
+            color: var(--text);
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .delivery-status-meta {
+            margin: 0.2rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            line-height: 1.62;
+        }
+        .delivery-action-label {
+            margin: 0.1rem 0 0.45rem;
+            color: var(--text-muted);
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .keyword-output-shell {
+            margin-top: 0.7rem;
+        }
+        .keyword-output-shell .stCodeBlock,
+        .keyword-output-shell [data-testid="stCodeBlock"] {
+            background: rgba(252, 253, 255, 0.96);
         }
         .highlight-actions {
             margin: 0.65rem 0 0.15rem;
@@ -8942,103 +9512,100 @@ render_pending_completion_sound()
 
 with st.sidebar:
     st.markdown("## 控制面板")
-    st.caption("管理模型、脚本生成策略与写作 Prompt，所有改动都会直接作用到当前工作流。")
+    st.caption("高频引擎设置默认展开，低频能力收进折叠区，减少侧栏纵向压力。")
     st.caption(f"Prompt 文件：{PROMPTS_FILE}")
     if PROMPTS_LOAD_REPORT.startswith("fallback_default"):
         st.warning("未读取到有效 prompts 配置，当前使用默认角色。请确认部署目录中的 prompts.json。")
         st.caption(PROMPTS_LOAD_REPORT)
     st.markdown("---")
-    st.header("🧪 测试模式")
-    st.toggle("启用 UI 预览模式", key="ui_preview_mode_enabled")
-    if st.session_state.get("ui_preview_mode_enabled", False):
-        st.selectbox(
-            "预览步骤",
-            options=[1, 2, 3, 4, 5, 6],
-            key="ui_preview_step",
-            format_func=lambda value: {
-                1: "Step 1 · 素材输入",
-                2: "Step 2 · 初稿生成",
-                3: "Step 3 · 严格审稿",
-                4: "Step 4 · 修改稿确认",
-                5: "Step 5 · 去 AI 定稿",
-                6: "Step 6 · 分发工作台",
-            }.get(int(value or 1), f"Step {value}"),
+    with st.expander("⚙️ 引擎设置", expanded=True):
+        st.caption("这里保留最常用的模型、Key 和中转站设置。")
+        api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI", "云雾API"])
+    
+        if api_provider == "BLTCY (柏拉图次元)":
+            api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
+            current_base_url = "https://api.bltcy.ai/v1"
+            available_models = BLTCY_MODEL_OPTIONS
+        elif api_provider == "云雾API":
+            api_key = st.text_input("🔑 输入云雾API Key", type="password")
+            current_base_url = "https://yunwu.ai/v1"
+            available_models = YUNWU_MODEL_OPTIONS
+        else:
+            api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
+            current_base_url = "https://api.deerapi.com/v1"
+            available_models = DEERAPI_MODEL_OPTIONS
+
+        preferred_default_models = {
+            "BLTCY (柏拉图次元)": "qwen3.5-plus",
+            "DeerAPI": "gpt-5.4",
+            "云雾API": "qwen3.6-plus",
+        }
+        preferred_default_model = preferred_default_models.get(api_provider, available_models[0])
+        default_model_idx = available_models.index(preferred_default_model) if preferred_default_model in available_models else 0
+
+        selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
+
+    with st.expander("🧪 测试模式", expanded=False):
+        st.toggle("启用 UI 预览模式", key="ui_preview_mode_enabled")
+        if st.session_state.get("ui_preview_mode_enabled", False):
+            st.selectbox(
+                "预览步骤",
+                options=[1, 2, 3, 4, 5, 6],
+                key="ui_preview_step",
+                format_func=lambda value: {
+                    1: "Step 1 · 素材输入",
+                    2: "Step 2 · 初稿生成",
+                    3: "Step 3 · 严格审稿",
+                    4: "Step 4 · 修改稿确认",
+                    5: "Step 5 · 去 AI 定稿",
+                    6: "Step 6 · 分发工作台",
+                }.get(int(value or 1), f"Step {value}"),
+            )
+            st.caption("当前仅渲染预置假数据，用于检查每一步 UI，不会调用 AI，也不会写入真实草稿和任务状态。")
+
+    with st.expander("Obsidian 知识库", expanded=False):
+        st.toggle("启用本地知识增强", key="obsidian_enabled", on_change=save_draft)
+        st.text_input("知识库路径 / wiki 路径", key="obsidian_vault_path", placeholder=r"D:\Obsidian Vault", on_change=save_draft)
+        st.slider("知识命中数", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
+        st.toggle("显示命中详情", key="obsidian_show_hits", on_change=save_draft)
+        wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
+        if st.session_state.get("obsidian_enabled"):
+            if wiki_root_preview:
+                st.caption(f"检测到 wiki 根目录：{wiki_root_preview}")
+            elif wiki_root_error:
+                st.caption(wiki_root_error)
+
+    with st.expander("🎬 视频分镜设置", expanded=False):
+        enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
+        script_duration = st.selectbox(
+            "⏱️ 设定分镜脚本目标时长",
+            ["1分钟", "3分钟", "5分钟", "8分钟"],
+            index=2,
+            disabled=not enable_script
         )
-        st.caption("当前仅渲染预置假数据，用于检查每一步 UI，不会调用 AI，也不会写入真实草稿和任务状态。")
-    st.header("⚙️ 引擎设置")
-    api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI", "云雾API"])
-    
-    if api_provider == "BLTCY (柏拉图次元)":
-        api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
-        current_base_url = "https://api.bltcy.ai/v1"
-        available_models = BLTCY_MODEL_OPTIONS
-    elif api_provider == "云雾API":
-        api_key = st.text_input("🔑 输入云雾API Key", type="password")
-        current_base_url = "https://yunwu.ai/v1"
-        available_models = YUNWU_MODEL_OPTIONS
-    else:
-        api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
-        current_base_url = "https://api.deerapi.com/v1"
-        available_models = DEERAPI_MODEL_OPTIONS
 
-    preferred_default_models = {
-        "BLTCY (柏拉图次元)": "qwen3.5-plus",
-        "DeerAPI": "gpt-5.4",
-        "云雾API": "qwen3.6-plus",
-    }
-    preferred_default_model = preferred_default_models.get(api_provider, available_models[0])
-    default_model_idx = available_models.index(preferred_default_model) if preferred_default_model in available_models else 0
+    with st.expander("🎙️ 播客语音设置", expanded=False):
+        st.toggle("启用伴生【播客解说稿】", key="podcast_enabled", on_change=save_draft)
+        st.selectbox(
+            "播客时长",
+            ["3分钟", "5分钟", "8分钟", "12分钟"],
+            key="podcast_duration",
+            on_change=save_draft,
+            disabled=not st.session_state.get("podcast_enabled", False)
+        )
+        podcast_api_key = st.text_input("输入阿里云 DashScope API Key", type="password")
+        st.session_state.podcast_tts_api_key_present = bool((podcast_api_key or "").strip())
+        st.caption("当前播客语音合成使用单音色 Qwen-TTS。")
+        st.selectbox(
+            "主播音色",
+            options=list(PODCAST_VOICE_LABELS.keys()),
+            format_func=lambda key: PODCAST_VOICE_LABELS.get(key, key),
+            key="podcast_voice",
+            on_change=save_draft,
+            disabled=not st.session_state.get("podcast_enabled", False)
+        )
 
-    selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
-    
-    st.markdown("---")
-    st.header("Obsidian 知识库")
-    st.toggle("启用本地知识增强", key="obsidian_enabled", on_change=save_draft)
-    st.text_input("知识库路径 / wiki 路径", key="obsidian_vault_path", placeholder=r"D:\Obsidian Vault", on_change=save_draft)
-    st.slider("知识命中数", min_value=3, max_value=10, step=1, key="obsidian_max_hits", on_change=save_draft)
-    st.toggle("显示命中详情", key="obsidian_show_hits", on_change=save_draft)
-    wiki_root_preview, wiki_root_error = resolve_obsidian_wiki_root(st.session_state.get("obsidian_vault_path", ""))
-    if st.session_state.get("obsidian_enabled"):
-        if wiki_root_preview:
-            st.caption(f"检测到 wiki 根目录：{wiki_root_preview}")
-        elif wiki_root_error:
-            st.caption(wiki_root_error)
-
-    st.markdown("---")
-    st.header("🎬 视频分镜设置")
-    enable_script = st.toggle("启用伴生【短视频分镜脚本】", value=False)
-    script_duration = st.selectbox(
-        "⏱️ 设定分镜脚本目标时长",
-        ["1分钟", "3分钟", "5分钟", "8分钟"],
-        index=2,
-        disabled=not enable_script
-    )
-
-    st.markdown("---")
-    st.header("播客语音设置")
-    st.toggle("启用伴生【播客解说稿】", key="podcast_enabled", on_change=save_draft)
-    st.selectbox(
-        "播客时长",
-        ["3分钟", "5分钟", "8分钟", "12分钟"],
-        key="podcast_duration",
-        on_change=save_draft,
-        disabled=not st.session_state.get("podcast_enabled", False)
-    )
-    podcast_api_key = st.text_input("输入阿里云 DashScope API Key", type="password")
-    st.session_state.podcast_tts_api_key_present = bool((podcast_api_key or "").strip())
-    st.caption("当前播客语音合成使用单音色 Qwen-TTS。")
-    st.selectbox(
-        "主播音色",
-        options=list(PODCAST_VOICE_LABELS.keys()),
-        format_func=lambda key: PODCAST_VOICE_LABELS.get(key, key),
-        key="podcast_voice",
-        on_change=save_draft,
-        disabled=not st.session_state.get("podcast_enabled", False)
-    )
-
-    st.markdown("---")
-    st.header("🗂️ 提示词管理中心")
-    with st.expander("📝 角色与全局人设配置", expanded=False):
+    with st.expander("🗂️ 提示词管理中心", expanded=False):
         tab1, tab2, tab3 = st.tabs(["✍️ 编辑人设", "🧐 审稿人设", "🌍 全局去AI味规范"])
         
         with tab1:
@@ -9114,8 +9681,7 @@ render_task_queue_panel()
 
 # --- Step 1 ---
 if st.session_state.current_step == 1:
-    st.caption("STEP 01")
-    st.markdown("## 素材输入中枢")
+    render_section_intro("素材输入中枢", "沿着方案、链接、文件、提取和预览的顺序整理素材，让后续成稿更顺畅。", "Step 01")
 
     if should_offer_draft_restore():
         with st.container(border=True):
@@ -9280,10 +9846,22 @@ if st.session_state.current_step == 1:
 
     if st.session_state.extraction_success:
         with st.container(border=True):
-            render_section_intro("聚合素材预览", "先快速检查抓取结果，再决定是走手动精调还是全自动驾驶。", "Preview")
+            st.markdown("<div class='source-result-shell'>", unsafe_allow_html=True)
+            render_section_intro("提取结果区", "按图片筛选、正文预览与方案核对的顺序快速确认素材质量，再决定后续写作路径。", "Results")
+            st.markdown("<p class='preview-flow-note'>这一层只负责确认抓取结果是否可用，避免还没看过素材就直接进入后续写稿。</p>", unsafe_allow_html=True)
             all_source_images = st.session_state.get("source_images_all", [])
+            source_article_count = len([url.strip() for url in str(st.session_state.get("article_url", "") or "").splitlines() if url.strip()])
+            source_video_count = len([url.strip() for url in str(st.session_state.get("video_url", "") or "").splitlines() if url.strip()])
+            uploaded_file_count = len(uploaded_source_files) if uploaded_source_files else 0
+            render_context_strip([
+                f"文章 {source_article_count} 篇",
+                f"视频 {source_video_count} 条",
+                f"文件 {uploaded_file_count} 个",
+                f"配图 {len(st.session_state.get('source_images', []))}/{len(all_source_images)}",
+            ])
+            st.markdown("<div class='source-result-meta'></div>", unsafe_allow_html=True)
             if all_source_images:
-                st.markdown("#### 核心配图（勾选纳入 AI 分析）")
+                render_section_intro("图片筛选", "先挑出需要一起送进后续分析链路的关键配图。", "Media")
                 toolbar_col1, toolbar_col2, _ = st.columns([1, 1, 2.4])
                 with toolbar_col1:
                     if st.button("一键全选", key="select_all_source_images", use_container_width=True):
@@ -9327,9 +9905,10 @@ if st.session_state.current_step == 1:
                     st.info("当前未勾选任何图片，后续将按纯文本模式继续。")
                 st.divider()
 
-            st.markdown("#### 合并后的文本正文")
+            render_section_intro("正文预览", "把多源素材拼接后的正文先在这里快速过一眼。", "Preview")
             preview_text = st.session_state.source_content[:1800] + "\n\n......(已省略后续内容)" if len(st.session_state.source_content) > 1800 else st.session_state.source_content
-            st.code(preview_text, language="markdown")
+            render_wrapped_article_text(preview_text)
+            st.markdown("</div>", unsafe_allow_html=True)
 
 
         if (st.session_state.get("writing_brief_raw", "") or "").strip():
@@ -10113,7 +10692,7 @@ elif st.session_state.current_step == 5:
                         st.session_state.get("podcast_duration", "5分钟"),
                     )
                 else:
-                    reset_podcast_outputs(delete_audio=True)
+                    st.markdown("<p class='toolbar-note'>当前未启用播客伴生输出，本轮将只保留图文定稿与高亮阅读版。</p>", unsafe_allow_html=True)
                 save_draft()
                 notify_step_completed(defer_until_rerun=True)
                 go_to_step(6)
@@ -10522,257 +11101,6 @@ elif st.session_state.current_step == 6:
                 st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-        if st.session_state.spoken_script:
-            st.divider()
-            st.markdown(f"### 分镜脚本 · {script_duration}")
-            st.code(st.session_state.spoken_script, language="markdown")
-            render_editor_friendly_copy_button(st.session_state.spoken_script, "spoken_script_step6")
-        if st.session_state.get("podcast_enabled"):
-            st.divider()
-            st.markdown(f"### 播客解说稿 · {st.session_state.get('podcast_duration', '5分钟')}")
-            podcast_script_segments = st.session_state.get("podcast_script_segments", []) or []
-            podcast_script_json = json.dumps(podcast_script_segments, ensure_ascii=False, indent=2) if podcast_script_segments else ""
-
-            podcast_btn_col1, podcast_btn_col2, podcast_btn_col3 = st.columns(3)
-            with podcast_btn_col1:
-                if st.button("重生成播客稿", use_container_width=True):
-                    if is_ui_preview_mode():
-                        apply_ui_preview_snapshot(6, notice="已在测试预览模式下生成播客稿示例，不会调用真实 AI 或写入音频。")
-                        st.rerun()
-                    with st.spinner("正在生成单人播客解说稿..."):
-                        success = generate_podcast_script_for_current_article(
-                            api_key,
-                            current_base_url,
-                            selected_model,
-                            st.session_state.get("podcast_duration", "5分钟"),
-                        )
-                        if success:
-                            st.success("播客解说稿已更新。")
-                        else:
-                            st.error(st.session_state.get("podcast_last_error", "播客解说稿生成失败。"))
-                        st.rerun()
-            with podcast_btn_col2:
-                synthesize_clicked = st.button("合成播客音频", use_container_width=True)
-            with podcast_btn_col3:
-                if st.button("清除播客音频", use_container_width=True):
-                    if is_ui_preview_mode():
-                        st.session_state.podcast_audio_path = ""
-                        st.session_state.podcast_audio_manifest = {}
-                        st.session_state.podcast_last_error = ""
-                        st.session_state.ui_preview_notice = "已在测试预览模式下清空播客音频示例，不会删除真实文件。"
-                        save_draft()
-                        st.rerun()
-                    audio_path = st.session_state.get("podcast_audio_path", "")
-                    if audio_path and os.path.exists(audio_path):
-                        try:
-                            os.remove(audio_path)
-                        except OSError:
-                            pass
-                    st.session_state.podcast_audio_path = ""
-                    st.session_state.podcast_audio_manifest = {}
-                    st.session_state.podcast_last_error = ""
-                    save_draft()
-                    st.rerun()
-
-            if podcast_script_json:
-                st.code(podcast_script_json, language="json")
-                render_editor_friendly_copy_button(podcast_script_json, "podcast_script_step6")
-            else:
-                st.info("当前还没有播客解说稿。你可以先点击“重生成播客稿”。")
-
-            if synthesize_clicked:
-                if is_ui_preview_mode():
-                    preview_draft = build_ui_preview_step_data(6)
-                    st.session_state.podcast_audio_path = preview_draft.get("podcast_audio_path", "")
-                    st.session_state.podcast_audio_manifest = clone_json_data(preview_draft.get("podcast_audio_manifest", {}))
-                    st.session_state.podcast_last_error = ""
-                    st.session_state.ui_preview_notice = "已在测试预览模式下模拟播客音频合成成功，不会调用真实 TTS。"
-                    save_draft()
-                    st.rerun()
-                if not podcast_script_segments:
-                    st.error("请先生成播客解说稿，再进行音频合成。")
-                elif not (podcast_api_key or "").strip():
-                    st.error("请先在侧边栏填写阿里云 DashScope API Key。")
-                else:
-                    with st.spinner("正在合成播客音频..."):
-                        try:
-                            ensure_podcast_runtime_dirs()
-                            output_path, manifest = synthesize_podcast(
-                                segments=podcast_script_segments,
-                                voice=st.session_state.get("podcast_voice", DEFAULT_TTS_VOICE),
-                                api_key=podcast_api_key.strip(),
-                                output_dir=PODCAST_OUTPUT_DIR,
-                                cache_dir=PODCAST_CACHE_DIR,
-                                model=DEFAULT_TTS_MODEL,
-                            )
-                            st.session_state.podcast_audio_path = output_path
-                            st.session_state.podcast_audio_manifest = manifest
-                            st.session_state.podcast_last_error = ""
-                            save_draft()
-                            st.success("播客音频已生成。")
-                            st.rerun()
-                        except PodcastAudioError as exc:
-                            st.session_state.podcast_last_error = str(exc)
-                            save_draft()
-                            st.error(str(exc))
-
-            podcast_error = st.session_state.get("podcast_last_error", "")
-            if podcast_error:
-                st.error(podcast_error)
-
-            podcast_audio_path = st.session_state.get("podcast_audio_path", "")
-            if podcast_audio_path and os.path.exists(podcast_audio_path):
-                with open(podcast_audio_path, "rb") as podcast_audio_file:
-                    podcast_audio_bytes = podcast_audio_file.read()
-                st.audio(podcast_audio_bytes, format="audio/mp3")
-                st.download_button(
-                    label="下载播客 MP3",
-                    data=podcast_audio_bytes,
-                    file_name=os.path.basename(podcast_audio_path),
-                    mime="audio/mpeg",
-                    use_container_width=True,
-                )
-                manifest = st.session_state.get("podcast_audio_manifest", {}) or {}
-                if manifest:
-                    voice = manifest.get("voice", "")
-                    st.caption(
-                        f"音色：{PODCAST_VOICE_LABELS.get(voice, voice)}｜"
-                        f"片段数：{manifest.get('segment_count', 0)}｜缓存命中：{manifest.get('cache_hits', 0)}"
-                    )
-
-        st.divider()
-        st.markdown("### 智能配图助手")
-        st.info("需要为文章寻找真实、高质的配图？点击下方按钮，AI 将根据文章核心内容提取 10 个精确的 Google 图片搜索关键词。")
-
-        if st.button("💡 提取 10 个 Google 搜图关键词", use_container_width=True):
-            with st.spinner("正在深度分析文章，提取精确的搜图词汇..."):
-                keyword_prompt = """请根据以下文章内容，提取 10 个最适合在 Google 图片（Google Images）中搜索配图的精准关键词组合。
-                
-                【核心要求】：
-                1. 必须精准输出 10 个。
-                2. 为了在 Google 搜出最高质量的图，请尽量采用【中英文混合】或【纯英文】的专业搜索词（例如："Genshin Impact UI design", "Sensor Tower SLG revenue chart 2024", "Tencent Games logo transparent"）。
-                3. 场景具体化：不要只搜游戏名，要加上明确的修饰词（如实机演示、数据图表、买量素材、应用商店截图等）。
-                4. 直接用编号 1-10 列出，不要有任何废话解释。
-                
-                【文章定稿内容】：
-                """ + get_article_body_text(st.session_state.final_article)
-
-                if is_ui_preview_mode():
-                    st.session_state.image_keywords = build_ui_preview_step_data(6).get("image_keywords", "")
-                    st.session_state.ui_preview_notice = "已在测试模式下填充示例配图关键词。"
-                else:
-                    st.session_state.image_keywords = call_llm(
-                        api_key=api_key,
-                        base_url=current_base_url,
-                        model_name=selected_model,
-                        system_prompt="你是一个专业的游戏媒体视觉编辑，熟知如何通过高级检索词在 Google 找到极具说服力的行业配图。",
-                        user_content=keyword_prompt
-                    )
-                save_draft()
-                notify_step_completed()
-
-        if st.session_state.image_keywords:
-            st.success("✅ 关键词提取成功！你可以直接复制这些词去 Google 搜图：")
-            st.code(st.session_state.image_keywords, language="markdown")
-            render_editor_friendly_copy_button(st.session_state.image_keywords, "image_keywords_step6")
-            
-        st.divider()
-
-        def create_docx(article_text, script_text=None):
-            doc = Document()
-            doc.add_heading('【最终成稿】', level=1)
-            doc.add_paragraph(article_text)
-            
-            if script_text:
-                doc.add_heading('【短视频 AI 分镜脚本】', level=1)
-                doc.add_paragraph(script_text)
-            
-            bio = io.BytesIO()
-            doc.save(bio)
-            return bio.getvalue()
-            
-        docx_data = create_docx(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
-
-        feishu_doc_url = (st.session_state.get("feishu_doc_url", "") or "").strip()
-        feishu_doc_title = (st.session_state.get("feishu_doc_title", "") or "").strip()
-        feishu_published_at = (st.session_state.get("feishu_published_at", "") or "").strip()
-        feishu_publish_error = (st.session_state.get("feishu_publish_error", "") or "").strip()
-        if feishu_doc_url:
-            st.success("\u5df2\u53d1\u5e03\u98de\u4e66\u4e91\u6587\u6863\u3002")
-            st.markdown(f"[\u6253\u5f00\u98de\u4e66\u6587\u6863]({feishu_doc_url})")
-            if feishu_doc_title:
-                st.caption(f"\u6587\u6863\u6807\u9898\uff1a{feishu_doc_title}")
-            if feishu_published_at:
-                st.caption(f"\u6700\u8fd1\u53d1\u5e03\u65f6\u95f4\uff1a{feishu_published_at}")
-        elif feishu_publish_error:
-            st.warning(f"\u6700\u8fd1\u4e00\u6b21\u98de\u4e66\u4e91\u6587\u6863\u53d1\u5e03\u5931\u8d25\uff1a{feishu_publish_error}")
-
-        btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
-        with btn_col1:
-             st.download_button(
-                label="\u5bfc\u51fa Word \u6587\u6863" if not st.session_state.spoken_script else "\u5bfc\u51fa\u56fe\u6587\u4e0e\u811a\u672c",
-                data=docx_data,
-                file_name="\u516c\u4f17\u53f7\u6587\u7ae0_\u5b9a\u7a3f.docx" if not st.session_state.spoken_script else "\u516c\u4f17\u53f7\u56fe\u6587\u4e0e\u811a\u672c_\u5b9a\u7a3f.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
-            )
-
-        with btn_col2:
-            if st.button("\u53d1\u5e03\u5230\u98de\u4e66\u4e91\u6587\u6863", use_container_width=True):
-                if is_ui_preview_mode():
-                    preview_draft = build_ui_preview_step_data(6)
-                    st.session_state.feishu_doc_url = preview_draft.get("feishu_doc_url", "")
-                    st.session_state.feishu_doc_token = preview_draft.get("feishu_doc_token", "")
-                    st.session_state.feishu_doc_title = preview_draft.get("feishu_doc_title", "")
-                    st.session_state.feishu_published_at = preview_draft.get("feishu_published_at", "")
-                    st.session_state.feishu_publish_error = ""
-                    st.session_state.ui_preview_notice = "已在测试模式下模拟飞书云文档发布成功。"
-                    save_draft()
-                    st.rerun()
-                with st.spinner("\u6b63\u5728\u53d1\u5e03\u5230\u98de\u4e66\u4e91\u6587\u6863..."):
-                    success, metadata, msg = publish_article_to_feishu_doc(
-                        display_final_article,
-                        title_candidates=st.session_state.get("title_candidates", []),
-                        highlighted_html=st.session_state.get("highlighted_article", ""),
-                    )
-                    if success:
-                        for field_name, field_value in metadata.items():
-                            st.session_state[field_name] = field_value
-                        save_draft()
-                        persist_active_task_snapshot()
-                        notify_step_completed()
-                        st.success(f"\u98de\u4e66\u4e91\u6587\u6863\u521b\u5efa\u6210\u529f\uff1a{metadata.get('feishu_doc_title', '\u65b0\u6587\u6863')}")
-                        if metadata.get("feishu_doc_url"):
-                            st.markdown(f"[\u6253\u5f00\u98de\u4e66\u6587\u6863]({metadata.get('feishu_doc_url')})")
-                    else:
-                        st.session_state.feishu_publish_error = msg
-                        save_draft()
-                        persist_active_task_snapshot()
-                        st.error(msg)
-
-        with btn_col3:
-            if st.button("\u63a8\u9001\u5230\u98de\u4e66\u7fa4", use_container_width=True):
-                if is_ui_preview_mode():
-                    st.session_state.ui_preview_notice = "已在测试模式下模拟飞书群推送成功。"
-                    st.success("\U0001f389 测试模式下已模拟飞书群推送。")
-                    notify_step_completed()
-                    st.rerun()
-                with st.spinner("\u6b63\u5728\u63a8\u9001\u5230\u98de\u4e66..."):
-                    success, msg = push_to_feishu(display_final_article, st.session_state.spoken_script if st.session_state.spoken_script else None)
-                    if success:
-                        st.success("\U0001f389 \u98de\u4e66\u63a8\u9001\u6210\u529f\uff01")
-                        notify_step_completed()
-                    else:
-                        st.error(f"\u274c \u63a8\u9001\u5931\u8d25\uff1a{msg}")
-
-        with btn_col4:
-            if st.button("\u65b0\u5efa\u4e0b\u4e00\u7bc7\u4efb\u52a1", use_container_width=True):
-                if is_ui_preview_mode():
-                    apply_ui_preview_snapshot(1, notice="已回到 Step 1 的测试输入界面，不会新建真实任务。")
-                    st.rerun()
-                clear_draft()
-                create_task_from_current_state(clone_current=False)
-                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
@@ -10791,6 +11119,7 @@ elif st.session_state.current_step == 6:
         )
 
         if should_show_evidence_map:
+
             with st.container(border=True):
                 render_evidence_map_panel(
                     st.session_state.get("evidence_map", []),
@@ -10805,6 +11134,10 @@ elif st.session_state.current_step == 6:
                 )
 
         with st.container(border=True):
+            render_step6_script_and_podcast_panel(api_key, current_base_url, selected_model, podcast_api_key)
+            render_step6_image_assistant_panel(api_key, current_base_url, selected_model)
+            render_step6_delivery_actions_panel(display_final_article)
+
             render_section_intro("精修对话区", "保留消息历史与输入框，用于继续追问出处或改写段落。", "对话")
             chat_container = st.container(height=360)
     
