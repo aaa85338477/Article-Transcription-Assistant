@@ -101,6 +101,34 @@ class ArticleExtractionTests(unittest.TestCase):
         self.assertIn("正常中文内容", text)
         self.assertNotIn("è¿™", text)
 
+    def test_extract_article_content_prefers_utf8_bytes_for_direct_html_fetch(self):
+        url = "https://www.gamigion.com/kohort-raises-7m-to-build-ai-user-acquisition-agents-for-mobile-gaming/"
+        correct_html = "<html><body><article><p>Loader</p><p>这是正常中文内容。</p></article></body></html>"
+        mojibake_html = correct_html.encode("utf-8").decode("latin-1")
+        origin_response = FakeResponse(
+            status_code=200,
+            text=mojibake_html,
+            content=correct_html.encode("utf-8"),
+            headers={"Content-Type": "text/html; charset=iso-8859-1"},
+            url=url,
+        )
+
+        captured_html = {}
+
+        def fake_extract(html_text):
+            captured_html["value"] = html_text
+            return "Loader\n这是正常中文内容。"
+
+        with mock.patch.object(self.helpers, "trafilatura", types.SimpleNamespace(extract=fake_extract)):
+            with mock.patch.object(self.helpers.requests, "get", return_value=origin_response):
+                text, images, error = self.helpers.extract_article_content_with_fallback(url)
+
+        self.assertIsNone(error)
+        self.assertEqual(images, [])
+        self.assertIn("这是正常中文内容", text)
+        self.assertIn("这是正常中文内容", captured_html.get("value", ""))
+        self.assertNotIn("æ", captured_html.get("value", ""))
+
     def test_extract_article_content_uses_stealthy_scrapling_for_enhanced_mode(self):
         url = "https://www.gamespot.com/articles/test-story/"
         call_order = []

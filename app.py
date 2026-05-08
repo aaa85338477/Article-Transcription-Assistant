@@ -5955,9 +5955,24 @@ def extract_article_content(url):
         }
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        text = trafilatura.extract(response.text)
-        soup = BeautifulSoup(response.text, 'html.parser')
+
+        response_html = ""
+        raw_content = getattr(response, "content", b"") or b""
+        if raw_content:
+            for encoding in ("utf-8-sig", "utf-8", getattr(response, "encoding", ""), getattr(response, "apparent_encoding", "")):
+                clean_encoding = str(encoding or "").strip()
+                if not clean_encoding:
+                    continue
+                try:
+                    response_html = raw_content.decode(clean_encoding)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+        if not response_html:
+            response_html = response.text or ""
+
+        text = trafilatura.extract(response_html)
+        soup = BeautifulSoup(response_html, 'html.parser')
         
         noise_tags = ['aside', 'nav', 'footer', 'header']
         for noise in soup.find_all(noise_tags):
@@ -6268,7 +6283,22 @@ def extract_article_content_with_fallback(url, fetch_mode="standard"):
         if content_type and 'text/html' not in content_type and 'application/xhtml+xml' not in content_type:
             raise ValueError(f'Unsupported content type from origin: {content_type}')
 
-        text, images = extract_article_text_and_images_from_html(response.text, page_url)
+        response_html = ""
+        raw_content = getattr(response, "content", b"") or b""
+        if raw_content:
+            for encoding in ("utf-8-sig", "utf-8", getattr(response, "encoding", ""), getattr(response, "apparent_encoding", "")):
+                clean_encoding = str(encoding or "").strip()
+                if not clean_encoding:
+                    continue
+                try:
+                    response_html = raw_content.decode(clean_encoding)
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+        if not response_html:
+            response_html = response.text or ""
+
+        text, images = extract_article_text_and_images_from_html(response_html, page_url)
         if text:
             return text, images
         raise ValueError('Page body was empty after extraction.')
