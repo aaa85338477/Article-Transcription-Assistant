@@ -7,6 +7,9 @@ from pathlib import Path
 import os
 import html as html_lib
 from docx import Document
+from docx.enum.text import WD_COLOR_INDEX
+from docx.oxml.ns import qn
+from docx.shared import RGBColor
 from openai import OpenAI
 import httpx
 import requests
@@ -7832,8 +7835,161 @@ def render_rich_html_copy_button(html_text, copy_key, label="\U0001F4CB \u590d\u
             st.caption(message)
 
 
-def create_delivery_docx(article_text, script_text=None):
+def set_docx_run_font(run, font_name="微软雅黑", bold=None, color_rgb=None, highlight=None):
+    if run is None:
+        return
+
+    run.font.name = font_name
+    r_pr = run._element.get_or_add_rPr()
+    r_fonts = r_pr.get_or_add_rFonts()
+    r_fonts.set(qn("w:ascii"), font_name)
+    r_fonts.set(qn("w:hAnsi"), font_name)
+    r_fonts.set(qn("w:eastAsia"), font_name)
+    r_fonts.set(qn("w:cs"), font_name)
+
+    if bold is not None:
+        run.bold = bool(bold)
+    if color_rgb:
+        run.font.color.rgb = RGBColor(*color_rgb)
+    if highlight is not None:
+        run.font.highlight_color = highlight
+
+
+def apply_docx_default_font(doc, font_name="微软雅黑"):
+    for style_name in ("Normal", "Heading 1", "Heading 2", "Heading 3", "List Bullet", "List Number"):
+        try:
+            style = doc.styles[style_name]
+        except Exception:
+            continue
+        style.font.name = font_name
+        style_element = getattr(style, "_element", None)
+        if style_element is None:
+            continue
+        r_pr = style_element.get_or_add_rPr()
+        r_fonts = r_pr.get_or_add_rFonts()
+        r_fonts.set(qn("w:ascii"), font_name)
+        r_fonts.set(qn("w:hAnsi"), font_name)
+        r_fonts.set(qn("w:eastAsia"), font_name)
+        r_fonts.set(qn("w:cs"), font_name)
+
+
+def append_docx_inline_html(paragraph, node, style_state=None, font_name="微软雅黑"):
+    style_state = dict(style_state or {})
+    bold = bool(style_state.get("bold", False))
+    color_rgb = style_state.get("color_rgb")
+    highlight = style_state.get("highlight")
+
+    if getattr(node, "name", None) is None:
+        text = str(node)
+        if text:
+            run = paragraph.add_run(text)
+            set_docx_run_font(run, font_name=font_name, bold=bold, color_rgb=color_rgb, highlight=highlight)
+        return
+
+    tag_name = str(node.name).lower()
+    if tag_name == "br":
+        run = paragraph.add_run()
+        set_docx_run_font(run, font_name=font_name, bold=bold, color_rgb=color_rgb, highlight=highlight)
+        run.add_break()
+        return
+
+    next_state = dict(style_state)
+    if tag_name in {"strong", "b"}:
+        next_state["bold"] = True
+    elif tag_name == "span":
+        class_names = {str(item).strip().lower() for item in (node.get("class") or [])}
+        if "highlight-positive" in class_names:
+            next_state["bold"] = True
+            next_state["color_rgb"] = (31, 87, 184)
+            next_state["highlight"] = WD_COLOR_INDEX.TURQUOISE
+        elif "highlight-risk" in class_names:
+            next_state["bold"] = True
+            next_state["color_rgb"] = (179, 38, 30)
+            next_state["highlight"] = WD_COLOR_INDEX.PINK
+
+    for child in getattr(node, "children", []):
+        append_docx_inline_html(paragraph, child, style_state=next_state, font_name=font_name)
+
+
+def append_highlighted_html_to_docx(doc, html_text, font_name="微软雅黑"):
+    sanitized_html = sanitize_highlighted_article(html_text or "")
+    if not sanitized_html:
+        return False
+
+    soup = BeautifulSoup(f"<div>{sanitized_html}</div>", "html.parser")
+    root = soup.find("div")
+    if root is None:
+        return False
+
+    appended = False
+    for child in root.children:
+        tag_name = str(getattr(child, "name", "") or "").lower()
+        if not tag_name:
+            if str(child).strip():
+                paragraph = doc.add_paragraph()
+                append_docx_inline_html(paragraph, child, font_name=font_name)
+                appended = True
+            continue
+
+        if tag_name == "h1":
+            paragraph = doc.add_paragraph(style="Heading 1")
+        elif tag_name == "h2":
+            paragraph = doc.add_paragraph(style="Heading 2")
+        elif tag_name == "h3":
+            paragraph = doc.add_paragraph(style="Heading 3")
+        elif tag_name == "li":
+            paragraph = doc.add_paragraph(style="List Bullet")
+        elif tag_name in {"ul", "ol"}:
+            for item in child.find_all("li", recursive=False):
+                list_style = "List Number" if tag_name == "ol" else "List Bullet"
+                paragraph = doc.add_paragraph(style=list_style)
+                append_docx_inline_html(paragraph, item, font_name=font_name)
+                appended = True
+            continue
+        else:
+            paragraph = doc.add_paragraph()
+
+        append_docx_inline_html(paragraph, child, font_name=font_name)
+        appended = True
+
+    return appended
+
+
+def append_plain_text_block_to_docx(doc, text, style_name=None, font_name="微软雅黑", bold=False):
+    paragraph = doc.add_paragraph(style=style_name) if style_name else doc.add_paragraph()
+    lines = str(text or "").splitlines() or [""]
+    for index, line in enumerate(lines):
+        if index:
+            break_run = paragraph.add_run()
+            set_docx_run_font(break_run, font_name=font_name, bold=bold)
+            break_run.add_break()
+        run = paragraph.add_run(line)
+        set_docx_run_font(run, font_name=font_name, bold=bold)
+    return paragraph
+
+
+def create_delivery_docx(article_text, highlighted_html="", script_text=None):
     doc = Document()
+    font_name = "微软雅黑"
+    apply_docx_default_font(doc, font_name=font_name)
+
+    heading = doc.add_paragraph(style="Heading 1")
+    heading_run = heading.add_run("【高亮阅读版】")
+    set_docx_run_font(heading_run, font_name=font_name, bold=True)
+
+    appended_highlight = append_highlighted_html_to_docx(doc, highlighted_html, font_name=font_name)
+    if not appended_highlight:
+        append_plain_text_block_to_docx(doc, article_text, font_name=font_name)
+
+    if script_text:
+        script_heading = doc.add_paragraph(style="Heading 1")
+        script_heading_run = script_heading.add_run("【短视频 AI 分镜脚本】")
+        set_docx_run_font(script_heading_run, font_name=font_name, bold=True)
+        append_plain_text_block_to_docx(doc, script_text, font_name=font_name)
+
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
     doc.add_heading("【最终成稿】", level=1)
     doc.add_paragraph(article_text)
     if script_text:
@@ -8025,6 +8181,7 @@ def render_step6_delivery_actions_panel(display_final_article):
 
         docx_data = create_delivery_docx(
             display_final_article,
+            st.session_state.get("highlighted_article", ""),
             st.session_state.spoken_script if st.session_state.spoken_script else None,
         )
         feishu_doc_url = (st.session_state.get("feishu_doc_url", "") or "").strip()
