@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 TARGET_FUNCTIONS = {
     "sanitize_editor_prompt",
+    "get_target_length_bounds",
     "build_target_length_instruction",
     "build_article_structure_instruction",
     "build_article_output_instruction",
@@ -18,6 +19,7 @@ TARGET_FUNCTIONS = {
     "build_reviewer_system_prompt",
     "build_editor_system_prompt",
     "build_modification_system_prompt",
+    "rerun_article_generation_if_length_overrun",
     "build_modification_user_content",
     "parse_review_actions",
     "build_selected_review_feedback",
@@ -156,6 +158,10 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("4-5 `##` sections", long_instruction)
         self.assertIn("Markdown", medium_instruction)
 
+    def test_target_length_bounds_use_plus_minus_twenty_percent(self):
+        self.assertEqual(self.helpers.get_target_length_bounds(1500), (1200, 1800))
+        self.assertEqual(self.helpers.get_target_length_bounds(500), (400, 600))
+
     def test_article_output_instruction_requires_background_and_two_blocks(self):
         instruction = self.helpers.build_article_output_instruction()
 
@@ -232,6 +238,8 @@ class PromptStructureTests(unittest.TestCase):
         self.assertIn("[Length Preservation Protocol | Highest Priority]", template)
         self.assertIn("Current input-draft body length", template)
         self.assertIn("Do not turn a 500-word draft into an 800-900-word article.", template)
+        self.assertIn("allow +/-20%", template)
+        self.assertIn("1200-1800", template)
 
     def test_de_ai_prompt_template_variants_add_style_rules_without_changing_output_protocol(self):
         role_name = "\u53d1\u884c\u4e3b\u7f16"
@@ -544,17 +552,17 @@ class PromptStructureTests(unittest.TestCase):
             "2. Title B\n"
             "3. Title C\n\n"
             f"{BODY_MARKER}\n"
-            "Intro paragraph one.\n\n"
-            "Intro paragraph two.\n\n"
+            + ("Intro paragraph one. " * 7).strip() + "\n\n"
+            + ("Intro paragraph two. " * 7).strip() + "\n\n"
             "## Section One\n\n"
-            "Section one paragraph one.\n\n"
-            "Section one paragraph two.\n\n"
+            + ("Section one paragraph one. " * 7).strip() + "\n\n"
+            + ("Section one paragraph two. " * 7).strip() + "\n\n"
             "## Section Two\n\n"
-            "Section two paragraph one.\n\n"
-            "Section two paragraph two.\n\n"
+            + ("Section two paragraph one. " * 7).strip() + "\n\n"
+            + ("Section two paragraph two. " * 7).strip() + "\n\n"
             "## Section Three\n\n"
-            "Section three paragraph one.\n\n"
-            "Section three paragraph two."
+            + ("Section three paragraph one. " * 7).strip() + "\n\n"
+            + ("Section three paragraph two. " * 7).strip()
         )
         report = self.helpers.build_publish_quality_gate_report(
             article_text,
@@ -573,6 +581,9 @@ class PromptStructureTests(unittest.TestCase):
         self.assertEqual(report["warn_count"], 0)
         self.assertEqual(report["h2_count"], 3)
         self.assertEqual(report["expected_h2_range"], (3, 5))
+        item_map = {item["key"]: item for item in report["items"]}
+        self.assertEqual(item_map["length_control"]["status"], "pass")
+        self.assertEqual(report["target_length_bounds"], (1200, 1800))
 
     def test_publish_quality_gate_blocks_missing_structure_and_banned_terms(self):
         article_text = (
@@ -599,6 +610,27 @@ class PromptStructureTests(unittest.TestCase):
         self.assertEqual(item_map["h2_count"]["status"], "fail")
         self.assertEqual(item_map["term_rules"]["status"], "fail")
         self.assertEqual(item_map["highlight"]["status"], "warn")
+
+    def test_publish_quality_gate_flags_length_overrun_against_strict_target_bounds(self):
+        article_text = (
+            f"{TITLE_MARKER}\n"
+            "1. Title A\n"
+            "2. Title B\n"
+            "3. Title C\n\n"
+            f"{BODY_MARKER}\n"
+            + ("A" * 1801)
+        )
+        report = self.helpers.build_publish_quality_gate_report(
+            article_text,
+            title_candidates=["Title A", "Title B", "Title C"],
+            highlighted_article="<p>Highlighted</p>",
+            term_scan_summary={},
+            target_words=1500,
+        )
+        item_map = {item["key"]: item for item in report["items"]}
+
+        self.assertEqual(item_map["length_control"]["status"], "fail")
+        self.assertIn("1200-1800", item_map["length_control"]["detail"])
 
 
     def test_publish_quality_gate_flags_humanizer_risk_when_ai_patterns_are_obvious(self):
@@ -701,6 +733,28 @@ class PromptStructureTests(unittest.TestCase):
 
         self.assertIn("length_overrun", issues)
 
+    def test_detect_auto_retry_issues_does_not_relax_length_overrun_based_on_long_reference(self):
+        article_text = (
+            f"{BODY_MARKER}\\n"
+            + ("A" * 610)
+        )
+        reference_article = (
+            f"{BODY_MARKER}\\n"
+            + ("B" * 1200)
+        )
+
+        issues = self.helpers.detect_auto_retry_issues(
+            article_text,
+            explicit_title_candidates=["Title A", "Title B", "Title C"],
+            highlighted_article="<p>Highlighted</p>",
+            require_highlight=False,
+            target_words=500,
+            reference_article_text=reference_article,
+            check_length=True,
+        )
+
+        self.assertIn("length_overrun", issues)
+
     def test_auto_retry_instruction_and_notice_reflect_requested_repairs(self):
         instruction = self.helpers.build_auto_retry_instruction(
             ["titles", "h2_count", "highlight"],
@@ -745,7 +799,72 @@ class PromptStructureTests(unittest.TestCase):
 
         self.assertIn("压缩式改写", instruction)
         self.assertIn("500", instruction)
+        self.assertIn("400-600", instruction)
         self.assertIn("篇幅控制", notice)
+
+    def test_rerun_article_generation_if_length_overrun_retries_with_strict_target_range(self):
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return (
+                f"{TITLE_MARKER}\n"
+                "1. Retry A\n"
+                "2. Retry B\n"
+                "3. Retry C\n\n"
+                f"{BODY_MARKER}\n"
+                + ("B" * 560)
+            )
+
+        initial_response = (
+            f"{TITLE_MARKER}\n"
+            "1. Draft A\n"
+            "2. Draft B\n"
+            "3. Draft C\n\n"
+            f"{BODY_MARKER}\n"
+            + ("A" * 760)
+        )
+
+        retried, payload = self.helpers.rerun_article_generation_if_length_overrun(
+            initial_response,
+            system_prompt="SYSTEM",
+            user_content="USER",
+            fallback_titles=["Old A", "Old B", "Old C"],
+            api_key="key",
+            base_url="https://example.com",
+            model_name="model",
+            target_words=500,
+            llm_caller=fake_call_llm,
+        )
+
+        self.assertTrue(retried)
+        self.assertIn("400-600", captured["system_prompt"])
+        self.assertEqual(payload["title_candidates"], ["Retry A", "Retry B", "Retry C"])
+        self.assertEqual(payload["target_bounds"], (400, 600))
+        self.assertLessEqual(payload["article_body_length"], 600)
+
+    def test_rerun_article_generation_if_length_overrun_skips_retry_when_within_range(self):
+        response = (
+            f"{TITLE_MARKER}\n"
+            "1. Draft A\n"
+            "2. Draft B\n"
+            "3. Draft C\n\n"
+            f"{BODY_MARKER}\n"
+            + ("A" * 580)
+        )
+
+        retried, payload = self.helpers.rerun_article_generation_if_length_overrun(
+            response,
+            system_prompt="SYSTEM",
+            user_content="USER",
+            fallback_titles=["Old A", "Old B", "Old C"],
+            target_words=500,
+            llm_caller=lambda **kwargs: self.fail("llm_caller should not be used"),
+        )
+
+        self.assertFalse(retried)
+        self.assertEqual(payload["title_candidates"], ["Draft A", "Draft B", "Draft C"])
+        self.assertEqual(payload["target_bounds"], (400, 600))
 
     def test_rerun_de_ai_from_quality_gate_uses_current_final_article_and_returns_updated_outputs(self):
         current_final_article = (

@@ -2009,6 +2009,19 @@ def get_target_article_words():
         value = 1500
     return max(200, min(5000, value))
 
+
+def get_target_length_bounds(target_words=None):
+    resolved_words = target_words if target_words not in (None, "") else get_target_article_words()
+    try:
+        value = int(resolved_words)
+    except Exception:
+        value = get_target_article_words()
+    value = max(200, min(5000, value))
+    lower_bound = max(1, int(value * 0.8))
+    upper_bound = max(lower_bound, int(value * 1.2))
+    return lower_bound, upper_bound
+
+
 def sync_target_article_words():
     raw_value = st.session_state.get("target_article_words_slider", get_target_article_words())
     try:
@@ -2035,9 +2048,10 @@ def sync_selected_reviewer():
 
 def build_target_length_instruction():
     target_words = get_target_article_words()
+    lower_bound, upper_bound = get_target_length_bounds(target_words)
     return (
         f"[Global Length Requirement | Highest Priority]\n"
-        f"Target length for this run: about {target_words} words (allow +/-10%).\n"
+        f"Target length for this run: about {target_words} words (allow +/-20%, keep the body within about {lower_bound}-{upper_bound} words whenever possible).\n"
         "If any role prompt contains a fixed word-count target, ignore it and follow this run-level target instead."
     )
 
@@ -2148,6 +2162,69 @@ def build_modification_system_prompt(global_instruction, term_rules_instruction=
         global_instruction.strip() if isinstance(global_instruction, str) else "",
     ]
     return "\n\n".join([part for part in prompt_parts if part])
+
+
+def rerun_article_generation_if_length_overrun(
+    article_response,
+    *,
+    system_prompt,
+    user_content,
+    fallback_titles=None,
+    api_key="",
+    base_url="",
+    model_name="",
+    image_urls=None,
+    temperature=None,
+    target_words=None,
+    llm_caller=None,
+):
+    llm_caller = llm_caller or call_llm
+    fallback_titles = fallback_titles or []
+    resolved_target_words = target_words if target_words is not None else get_target_article_words()
+    lower_bound, upper_bound = get_target_length_bounds(resolved_target_words)
+
+    parsed_titles, _, article_text = parse_article_generation_response(article_response, fallback_titles)
+    article_body_length = len(get_article_body_text(article_text))
+    payload = {
+        "title_candidates": parsed_titles,
+        "article_text": article_text,
+        "article_body_length": article_body_length,
+        "target_bounds": (lower_bound, upper_bound),
+        "retry_response": "",
+        "retry_instruction": "",
+    }
+    if article_body_length <= upper_bound:
+        return False, payload
+
+    retry_instruction = "\n".join([
+        "[Length Correction | Highest Priority]",
+        f"The current body is about {article_body_length} words/characters, which exceeds the target range of {lower_bound}-{upper_bound}.",
+        f"Rewrite the full article so the final body lands within about {lower_bound}-{upper_bound} words/characters.",
+        "Keep the same core facts, title group, and section structure, but compress wording instead of expanding.",
+        "Delete redundant explanation, repeated judgments, long scene-setting, and dragged-out conclusions.",
+        "Do not add new examples, new background sections, or extra wrap-up paragraphs.",
+    ])
+    retry_response = llm_caller(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=model_name,
+        system_prompt=system_prompt + "\n\n" + retry_instruction,
+        user_content=user_content,
+        image_urls=image_urls,
+        temperature=temperature,
+    )
+    retry_titles, _, retry_article_text = parse_article_generation_response(
+        retry_response,
+        parsed_titles or fallback_titles,
+    )
+    payload.update({
+        "title_candidates": retry_titles,
+        "article_text": retry_article_text,
+        "article_body_length": len(get_article_body_text(retry_article_text)),
+        "retry_response": retry_response,
+        "retry_instruction": retry_instruction,
+    })
+    return True, payload
 
 
 def parse_banned_terms_text(text):
@@ -2407,6 +2484,8 @@ def build_publish_quality_gate_report(
     title_count = len(resolved_titles)
 
     article_body = get_article_body_text(article_text)
+    article_body_length = len(article_body)
+    lower_bound, upper_bound = get_target_length_bounds(target_words)
     expected_h2_range = get_expected_h2_range(target_words)
     min_h2, max_h2 = expected_h2_range
 
@@ -2461,6 +2540,13 @@ def build_publish_quality_gate_report(
         else:
             items.append({"key": "section_balance", "label": "小节均衡度", "status": "pass", "detail": "各个 `##` 小节段落数基本均衡。"})
 
+    if article_body_length > upper_bound:
+        items.append({"key": "length_control", "label": "篇幅控制", "status": "fail", "detail": f"当前正文约 {article_body_length} 字，超出目标区间 {lower_bound}-{upper_bound}，建议压缩回目标范围内。"})
+    elif article_body_length < lower_bound:
+        items.append({"key": "length_control", "label": "篇幅控制", "status": "warn", "detail": f"当前正文约 {article_body_length} 字，低于目标区间 {lower_bound}-{upper_bound}，如需更完整表达可酌情补充。"})
+    else:
+        items.append({"key": "length_control", "label": "篇幅控制", "status": "pass", "detail": f"当前正文约 {article_body_length} 字，落在目标区间 {lower_bound}-{upper_bound} 内。"})
+
     if (highlighted_article or "").strip():
         items.append({"key": "highlight", "label": "高亮阅读版", "status": "pass", "detail": "高亮阅读版已生成。"})
     else:
@@ -2498,6 +2584,8 @@ def build_publish_quality_gate_report(
         "items": items,
         "h2_count": h2_count,
         "expected_h2_range": expected_h2_range,
+        "target_length_bounds": (lower_bound, upper_bound),
+        "article_body_length": article_body_length,
         "intro_paragraph_count": len(intro_paragraphs),
         "title_count": title_count,
     }
@@ -2528,18 +2616,7 @@ def detect_auto_retry_issues(
             issue_keys.append("highlight")
         if item.get("key") == "humanizer_risk" and include_humanizer_risk and item.get("status") == "fail":
             issue_keys.append("humanizer_risk")
-    if check_length:
-        article_body_length = len(get_article_body_text(article_text))
-        reference_body_length = len(get_article_body_text(reference_article_text))
-        try:
-            resolved_target_words = int(target_words or 0)
-        except (TypeError, ValueError):
-            resolved_target_words = 0
-        allowed_length = int(resolved_target_words * 1.2) if resolved_target_words > 0 else 0
-        if reference_body_length > 0:
-            expansion_limit = int(reference_body_length * 1.15)
-            allowed_length = max(allowed_length, expansion_limit) if allowed_length else expansion_limit
-        if allowed_length and article_body_length > allowed_length:
+        if item.get("key") == "length_control" and check_length and item.get("status") == "fail":
             issue_keys.append("length_overrun")
     return issue_keys
 
@@ -2552,7 +2629,12 @@ def build_auto_retry_instruction(
     issue_detail_map=None,
 ):
     issue_set = set(issue_keys or [])
+    handle_length_overrun = "length_overrun" in issue_set
+    if handle_length_overrun:
+        issue_set = set(issue_set)
+        issue_set.discard("length_overrun")
     min_h2, max_h2 = get_expected_h2_range(target_words)
+    lower_bound, upper_bound = get_target_length_bounds(target_words)
     instructions = ["【自动补跑修正】请只修复下面这些结构问题，再重新完整输出一次。"]
     if "titles" in issue_set:
         instructions.append("- 重新补齐备选标题，必须保留 3-5 个标题。")
@@ -2570,6 +2652,11 @@ def build_auto_retry_instruction(
             instructions.append(
                 f"- 本次只做压缩式改写，保持核心事实、标题组和结构不变，把正文控制回约 {target_words} 字（允许 ±10%），不要继续扩写。"
             )
+        instructions.append("- 删除多余的解释、重复判断、额外案例和拖长收尾，优先压缩而不是补充。")
+    if handle_length_overrun:
+        instructions.append(
+            f"- 本次只做压缩式改写，保持核心事实、标题组和结构不变，把正文控制回约 {target_words} 字左右（目标区间 {lower_bound}-{upper_bound} 字），不要继续扩写。"
+        )
         instructions.append("- 删除多余的解释、重复判断、额外案例和拖长收尾，优先压缩而不是补充。")
     if "humanizer_risk" in issue_set:
         issue_detail_map = issue_detail_map if isinstance(issue_detail_map, dict) else {}
@@ -4875,21 +4962,22 @@ def build_de_ai_prompt_template(
         target_words = int(target_words)
     except Exception:
         target_words = 1500
+    lower_bound, upper_bound = get_target_length_bounds(target_words)
     current_article_length = len(get_article_body_text(current_article_text))
     if current_article_length > 0:
         length_instruction = "\n".join([
             "[Length Preservation Protocol | Highest Priority]",
-            f"Target length for this run: about {target_words} words/characters (allow +/-10%).",
+            f"Target length for this run: about {target_words} words/characters (allow +/-20%, keep the body within about {lower_bound}-{upper_bound}).",
             f"Current input-draft body length: about {current_article_length} words/characters.",
             "The de-AI rewrite must preserve length discipline. Rewrite wording first; do not expand the article just because you are making it sound more human.",
-            "If the current input draft is already close to the target, keep the final body within about +/-10% of the current input length whenever possible.",
+            f"The final body should land within about {lower_bound}-{upper_bound} words/characters whenever possible, even if the current input draft is longer.",
             "Do not add new long background sections, extra examples, extra conclusions, or extra explanation unless the original draft is clearly missing essential context.",
             "For short articles, prefer slight compression over expansion. Do not turn a 500-word draft into an 800-900-word article.",
         ])
     else:
         length_instruction = "\n".join([
             "[Length Preservation Protocol | Highest Priority]",
-            f"Target length for this run: about {target_words} words/characters (allow +/-10%).",
+            f"Target length for this run: about {target_words} words/characters (allow +/-20%, keep the body within about {lower_bound}-{upper_bound}).",
             "The de-AI rewrite must preserve length discipline. Rewrite wording first; do not expand the article just because you are making it sound more human.",
             "Do not add new long background sections, extra examples, extra conclusions, or extra explanation unless the original draft is clearly missing essential context.",
         ])
@@ -10262,10 +10350,19 @@ if st.session_state.current_step == 1:
                             api_key=api_key, base_url=current_base_url, model_name=selected_model,
                             system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
                         )
-                        draft_titles, _, draft_article_text = parse_article_generation_response(
+                        _, draft_retry_payload = rerun_article_generation_if_length_overrun(
                             draft_response,
-                            st.session_state.get("title_candidates", []),
+                            system_prompt=final_editor_system_prompt,
+                            user_content=draft_content,
+                            fallback_titles=st.session_state.get("title_candidates", []),
+                            api_key=api_key,
+                            base_url=current_base_url,
+                            model_name=selected_model,
+                            image_urls=st.session_state.source_images,
+                            target_words=get_target_article_words(),
                         )
+                        draft_titles = draft_retry_payload["title_candidates"]
+                        draft_article_text = draft_retry_payload["article_text"]
                         st.session_state.title_candidates = draft_titles
                         st.session_state.draft_article = draft_article_text
                         append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=chosen_editor, model=selected_model)
@@ -10315,13 +10412,18 @@ if st.session_state.current_step == 1:
                             system_prompt=modification_prompt, user_content=content_to_modify
                         )
 
-                        final_titles, _, final_article_text = parse_article_generation_response(
-
+                        _, final_retry_payload = rerun_article_generation_if_length_overrun(
                             final_response,
-
-                            st.session_state.get("title_candidates", []),
-
+                            system_prompt=modification_prompt,
+                            user_content=content_to_modify,
+                            fallback_titles=st.session_state.get("title_candidates", []),
+                            api_key=api_key,
+                            base_url=current_base_url,
+                            model_name=selected_model,
+                            target_words=get_target_article_words(),
                         )
+                        final_titles = final_retry_payload["title_candidates"]
+                        final_article_text = final_retry_payload["article_text"]
 
                         st.session_state.title_candidates = final_titles
 
@@ -10422,13 +10524,19 @@ elif st.session_state.current_step == 2:
                     image_urls=st.session_state.source_images
                 )
 
-                draft_titles, _, draft_article_text = parse_article_generation_response(
-
+                _, draft_retry_payload = rerun_article_generation_if_length_overrun(
                     draft_response,
-
-                    st.session_state.get("title_candidates", []),
-
+                    system_prompt=final_editor_system_prompt,
+                    user_content=editor_user_content,
+                    fallback_titles=st.session_state.get("title_candidates", []),
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    model_name=selected_model,
+                    image_urls=st.session_state.source_images,
+                    target_words=get_target_article_words(),
                 )
+                draft_titles = draft_retry_payload["title_candidates"]
+                draft_article_text = draft_retry_payload["article_text"]
 
                 st.session_state.title_candidates = draft_titles
 
@@ -10661,13 +10769,18 @@ elif st.session_state.current_step == 4:
                         user_content=content_to_modify
                     )
 
-                    modified_titles, _, modified_article_text = parse_article_generation_response(
-
+                    _, modified_retry_payload = rerun_article_generation_if_length_overrun(
                         modified_response,
-
-                        st.session_state.get("title_candidates", []),
-
+                        system_prompt=modification_prompt,
+                        user_content=content_to_modify,
+                        fallback_titles=st.session_state.get("title_candidates", []),
+                        api_key=api_key,
+                        base_url=current_base_url,
+                        model_name=selected_model,
+                        target_words=get_target_article_words(),
                     )
+                    modified_titles = modified_retry_payload["title_candidates"]
+                    modified_article_text = modified_retry_payload["article_text"]
 
                     st.session_state.title_candidates = modified_titles
 
@@ -11062,9 +11175,11 @@ elif st.session_state.current_step == 6:
                 st.warning("当前稿件基本可用，但还有一些建议优化项。")
 
             expected_range = publish_quality_gate.get("expected_h2_range", (3, 5))
+            target_length_bounds = publish_quality_gate.get("target_length_bounds", get_target_length_bounds(get_target_article_words()))
             st.caption(
                 f"红项 {publish_quality_gate.get('fail_count', 0)} 个｜黄项 {publish_quality_gate.get('warn_count', 0)} 个｜当前 `##` 数量 {publish_quality_gate.get('h2_count', 0)}｜建议范围 {expected_range[0]}-{expected_range[1]}"
             )
+            st.caption(f"当前篇幅目标区间：{target_length_bounds[0]}-{target_length_bounds[1]} 字")
             status_label_map = {
                 "pass": "通过",
                 "warn": "提醒",
