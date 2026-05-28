@@ -15,6 +15,7 @@ from docx.shared import RGBColor
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 TARGET_FUNCTIONS = {
     "sanitize_highlighted_article",
+    "build_delivery_docx_filename",
     "set_docx_run_font",
     "apply_docx_default_font",
     "append_docx_inline_html",
@@ -56,6 +57,24 @@ class DeliveryDocxTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.helpers = load_delivery_helpers()
+
+    def test_build_delivery_docx_filename_prefers_first_title_candidate(self):
+        file_name = self.helpers.build_delivery_docx_filename(
+            ['容器型IP的叙事越界：《王者荣耀》衍生矩阵的跨品类阵痛', '备用标题'],
+            has_script=False,
+        )
+        self.assertEqual(file_name, '容器型IP的叙事越界：《王者荣耀》衍生矩阵的跨品类阵痛.docx')
+
+    def test_build_delivery_docx_filename_sanitizes_invalid_characters_and_adds_script_suffix(self):
+        file_name = self.helpers.build_delivery_docx_filename(
+            ['增长实验：A/B测试 / 海外买量?'],
+            has_script=True,
+        )
+        self.assertEqual(file_name, '增长实验：A B测试 海外买量_图文与脚本.docx')
+
+    def test_build_delivery_docx_filename_falls_back_when_no_title_candidates_exist(self):
+        file_name = self.helpers.build_delivery_docx_filename([], has_script=False)
+        self.assertEqual(file_name, '公众号文章_定稿.docx')
 
     def test_create_delivery_docx_uses_highlighted_html_and_preserves_formatting(self):
         highlighted_html = (

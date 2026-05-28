@@ -4758,32 +4758,6 @@ def should_stream_llm_request(base_url, model_name):
     return "yunwu.ai/v1" in base_url and model_name in {"qwen3.5-plus", "qwen3.6-plus"}
 
 
-BLTCY_MODEL_OPTIONS = [
-    "qwen3.5-plus",
-    "kimi-k2.5",
-    "gpt-5.4",
-    "claude-opus-4-6",
-    "gpt-5.4-mini-2026-03-17",
-    "gpt-5.4-nano",
-    "gemini-3.1-pro-preview",
-    "claude-sonnet-4-6-thinking",
-    "claude-opus-4-6-thinking",
-    "claude-opus-4-5-20251101-thinking",
-    "gemini-3.1-pro-preview-thinking-high",
-    "gemini-3.1-flash-lite-preview-thinking-high",
-    "MiniMax-M2.7",
-    "MiniMax-M2.7-highspeed"
-]
-DEERAPI_MODEL_OPTIONS = [
-    "gpt-5.4",
-    "qwen3.5-27b",
-    "qwen3.5-flash",
-    "gpt-5.4-nano",
-    "gemini-3.1-pro-preview",
-    "gemini-3.1-pro-preview-thinking",
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-preview-thinking"
-]
 YUNWU_MODEL_OPTIONS = [
     "qwen3.6-plus",
     "qwen3.5-plus",
@@ -4797,6 +4771,18 @@ YUNWU_MODEL_OPTIONS = [
     "claude-opus-4-6-thinking",
     "MiniMax-M2.7"
 ]
+
+
+def get_default_api_provider_config():
+    return {
+        "provider_name": "云雾API",
+        "api_key_label": "🔑 输入云雾API Key",
+        "base_url": "https://yunwu.ai/v1",
+        "available_models": list(YUNWU_MODEL_OPTIONS),
+        "preferred_default_model": "qwen3.6-plus",
+    }
+
+
 DE_AI_MODEL_MIGRATION = {
     "deepseek-v3-1-terminus": "deepseek-v3.1",
     "deepseek-v3-2-exp": "deepseek-v3.2",
@@ -5671,6 +5657,27 @@ def build_feishu_doc_title(article_text, title_candidates=None, fallback_title="
     if active_task:
         return str(active_task.get("name", fallback_title) or fallback_title)[:120]
     return fallback_title
+
+
+def build_delivery_docx_filename(title_candidates=None, has_script=False, fallback_title="\u516c\u4f17\u53f7\u6587\u7ae0_\u5b9a\u7a3f"):
+    titles = []
+    if isinstance(title_candidates, str):
+        for raw_line in title_candidates.splitlines():
+            clean_line = re.sub(r"^\s*\d+[\.\)\uff0e\u3001]\s*", "", str(raw_line or "").strip())
+            if clean_line:
+                titles.append(clean_line)
+    else:
+        for item in title_candidates or []:
+            clean_line = str(item or "").strip()
+            if clean_line:
+                titles.append(clean_line)
+    preferred_title = str(titles[0] if titles else fallback_title).strip()
+    preferred_title = re.sub(r'[\\/:*?"<>|]+', " ", preferred_title)
+    preferred_title = re.sub(r"\s+", " ", preferred_title).strip().rstrip(".")
+    if not preferred_title:
+        preferred_title = fallback_title
+    suffix = "_\u56fe\u6587\u4e0e\u811a\u672c" if has_script else ""
+    return f"{preferred_title}{suffix}.docx"
 
 
 def feishu_html_to_plain_text(html_text):
@@ -8302,6 +8309,10 @@ def render_step6_delivery_actions_panel(display_final_article):
             st.session_state.get("highlighted_article", ""),
             st.session_state.spoken_script if st.session_state.spoken_script else None,
         )
+        docx_file_name = build_delivery_docx_filename(
+            st.session_state.get("title_candidates", []),
+            has_script=bool(st.session_state.spoken_script),
+        )
         feishu_doc_url = (st.session_state.get("feishu_doc_url", "") or "").strip()
         feishu_doc_title = (st.session_state.get("feishu_doc_title", "") or "").strip()
         feishu_published_at = (st.session_state.get("feishu_published_at", "") or "").strip()
@@ -8342,7 +8353,7 @@ def render_step6_delivery_actions_panel(display_final_article):
             st.download_button(
                 label="导出 Word 文档" if not st.session_state.spoken_script else "导出图文与脚本",
                 data=docx_data,
-                file_name="公众号文章_定稿.docx" if not st.session_state.spoken_script else "公众号图文与脚本_定稿.docx",
+                file_name=docx_file_name,
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True,
                 key="step6_download_docx",
@@ -9788,27 +9799,12 @@ with st.sidebar:
     st.markdown("---")
     with st.expander("⚙️ 引擎设置", expanded=True):
         st.caption("这里保留最常用的模型、Key 和中转站设置。")
-        api_provider = st.selectbox("🌐 选择 API 中转站", ["BLTCY (柏拉图次元)", "DeerAPI", "云雾API"])
-    
-        if api_provider == "BLTCY (柏拉图次元)":
-            api_key = st.text_input("🔑 输入 BLTCY Key", type="password")
-            current_base_url = "https://api.bltcy.ai/v1"
-            available_models = BLTCY_MODEL_OPTIONS
-        elif api_provider == "云雾API":
-            api_key = st.text_input("🔑 输入云雾API Key", type="password")
-            current_base_url = "https://yunwu.ai/v1"
-            available_models = YUNWU_MODEL_OPTIONS
-        else:
-            api_key = st.text_input("🔑 输入 DeerAPI Key", type="password")
-            current_base_url = "https://api.deerapi.com/v1"
-            available_models = DEERAPI_MODEL_OPTIONS
-
-        preferred_default_models = {
-            "BLTCY (柏拉图次元)": "qwen3.5-plus",
-            "DeerAPI": "gpt-5.4",
-            "云雾API": "qwen3.6-plus",
-        }
-        preferred_default_model = preferred_default_models.get(api_provider, available_models[0])
+        provider_config = get_default_api_provider_config()
+        st.caption(f"当前固定中转站：{provider_config['provider_name']}")
+        api_key = st.text_input(provider_config["api_key_label"], type="password")
+        current_base_url = provider_config["base_url"]
+        available_models = provider_config["available_models"]
+        preferred_default_model = provider_config["preferred_default_model"]
         default_model_idx = available_models.index(preferred_default_model) if preferred_default_model in available_models else 0
 
         selected_model = st.selectbox("🧠 选择驱动模型", available_models, index=default_model_idx)
