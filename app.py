@@ -6,6 +6,8 @@ import io
 from pathlib import Path
 import os
 import html as html_lib
+import ast
+import types
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 from docx.oxml.ns import qn
@@ -21,7 +23,9 @@ import base64
 import hashlib
 import textwrap
 import tomllib
+import threading
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 import time
 import ctypes
 try:
@@ -67,6 +71,11 @@ PENDING_DRAFT_RESTORE_KEY = "_pending_draft_restore"
 DRAFT_RESTORE_NOTICE_KEY = "_draft_restore_notice"
 TASK_QUEUE_NOTICE_KEY = "_task_queue_notice"
 QUALITY_GATE_NOTICE_KEY = "_quality_gate_notice"
+AUTODRIVE_ACTIVE_RUN_STATES = {"queued", "running"}
+AUTODRIVE_BACKGROUND_MAX_WORKERS = 2
+AUTODRIVE_BACKGROUND_JOBS = {}
+AUTODRIVE_BACKGROUND_LOCK = threading.Lock()
+AUTODRIVE_BACKGROUND_RUNTIME_LOG_LIMIT = 80
 
 DRAFT_STATE_KEYS = [
     'current_step', 'article_url', 'video_url', 'source_content',
@@ -1026,6 +1035,86 @@ def update_task_run_state(
     return True
 
 
+def write_task_queue_data(queue_payload):
+    normalized_payload = dict(queue_payload or {})
+    with open(TASK_QUEUE_FILE, "w", encoding="utf-8") as file_obj:
+        json.dump(normalized_payload, file_obj, ensure_ascii=False, indent=2)
+
+
+def update_task_run_state_on_disk(
+    task_id,
+    *,
+    run_mode=None,
+    run_state=None,
+    run_stage=None,
+    run_owner_token=None,
+    started_at=None,
+    finished_at=None,
+    last_run_error=None,
+    autodrive_config_snapshot=None,
+    task_snapshot=None,
+):
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        return False
+
+    queue_data = read_task_queue_data() or {}
+    tasks = [item for item in queue_data.get("tasks", []) if isinstance(item, dict)]
+    task_record = next((item for item in tasks if item.get("id") == clean_task_id), None)
+    if not task_record:
+        return False
+
+    if task_snapshot is not None:
+        refresh_task_record(task_record, task_snapshot)
+    else:
+        refresh_task_record(task_record)
+
+    if run_mode is not None:
+        task_record["run_mode"] = str(run_mode or "manual")
+    if run_state is not None:
+        task_record["run_state"] = str(run_state or "idle")
+    if run_stage is not None:
+        task_record["run_stage"] = str(run_stage or "")
+    if run_owner_token is not None:
+        task_record["run_owner_token"] = str(run_owner_token or "")
+    if started_at is not None:
+        task_record["run_started_at"] = str(started_at or "")
+    if finished_at is not None:
+        task_record["run_finished_at"] = str(finished_at or "")
+    if last_run_error is not None:
+        task_record["last_run_error"] = str(last_run_error or "")
+    if autodrive_config_snapshot is not None:
+        task_record["autodrive_config_snapshot"] = build_autodrive_config_snapshot(autodrive_config_snapshot)
+
+    queue_data["tasks"] = tasks
+    queue_data["archived_tasks"] = [item for item in queue_data.get("archived_tasks", []) if isinstance(item, dict)]
+    queue_data["templates"] = [item for item in queue_data.get("templates", []) if isinstance(item, dict)]
+    queue_data["active_task_id"] = queue_data.get("active_task_id", "") or ""
+    write_task_queue_data(queue_data)
+    return True
+
+
+def persist_task_snapshot_on_disk(task_id, draft_data=None):
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        return False
+
+    queue_data = read_task_queue_data() or {}
+    tasks = [item for item in queue_data.get("tasks", []) if isinstance(item, dict)]
+    task_record = next((item for item in tasks if item.get("id") == clean_task_id), None)
+    if not task_record:
+        return False
+
+    snapshot = clone_json_data(draft_data or {})
+    refresh_task_record(task_record, snapshot)
+    queue_data["tasks"] = tasks
+    queue_data["archived_tasks"] = [item for item in queue_data.get("archived_tasks", []) if isinstance(item, dict)]
+    queue_data["templates"] = [item for item in queue_data.get("templates", []) if isinstance(item, dict)]
+    queue_data["active_task_id"] = queue_data.get("active_task_id", "") or ""
+    write_task_queue_data(queue_data)
+    return True
+
+
 def read_task_queue_data():
     if not os.path.exists(TASK_QUEUE_FILE):
         return None
@@ -1094,6 +1183,307 @@ def init_task_queue_state():
     archived_count = auto_archive_completed_tasks()
     if queue_changed and not archived_count:
         save_task_queue_state()
+
+
+def sync_task_queue_runtime_from_disk():
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
+        return 0
+
+    try:
+        queue_data = read_task_queue_data() or {}
+    except Exception:
+        return 0
+
+    disk_tasks = [refresh_task_record(task) for task in [clone_json_data(item) for item in queue_data.get("tasks", []) if isinstance(item, dict)]]
+    disk_archived = [refresh_task_record(task) for task in [clone_json_data(item) for item in queue_data.get("archived_tasks", []) if isinstance(item, dict)]]
+    active_task_id = st.session_state.get("active_task_id", "")
+    changed = 0
+
+    local_tasks = st.session_state.get("task_queue", []) or []
+    local_archived = st.session_state.get("archived_task_queue", []) or []
+    local_task_map = {task.get("id", ""): task for task in local_tasks if isinstance(task, dict)}
+    local_archived_map = {task.get("id", ""): task for task in local_archived if isinstance(task, dict)}
+
+    merged_tasks = []
+    for disk_task in disk_tasks:
+        task_id = disk_task.get("id", "")
+        local_task = local_task_map.get(task_id)
+        if not local_task:
+            merged_tasks.append(disk_task)
+            changed += 1
+            continue
+
+        if task_id == active_task_id:
+            runtime_fields = (
+                "status",
+                "current_step",
+                "updated_at",
+                "resume_stage",
+                "last_error",
+                "run_mode",
+                "run_state",
+                "run_stage",
+                "run_owner_token",
+                "run_started_at",
+                "run_finished_at",
+                "last_run_error",
+                "autodrive_config_snapshot",
+            )
+            for field_name in runtime_fields:
+                local_task[field_name] = clone_json_data(disk_task.get(field_name))
+            merged_tasks.append(local_task)
+        else:
+            merged_tasks.append(disk_task)
+            if local_task != disk_task:
+                changed += 1
+
+    merged_archived = []
+    for disk_task in disk_archived:
+        task_id = disk_task.get("id", "")
+        local_task = local_archived_map.get(task_id)
+        if not local_task or local_task != disk_task:
+            changed += 1
+        merged_archived.append(disk_task)
+
+    st.session_state.task_queue = merged_tasks
+    st.session_state.archived_task_queue = merged_archived
+    return changed
+
+
+class _HeadlessSessionState(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
+class _HeadlessStatusContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def update(self, **kwargs):
+        return None
+
+
+class _HeadlessSpinnerContext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _HeadlessStreamlitProxy:
+    def __init__(self):
+        self.session_state = _HeadlessSessionState()
+
+    def write(self, *args, **kwargs):
+        return None
+
+    def success(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+    def info(self, *args, **kwargs):
+        return None
+
+    def caption(self, *args, **kwargs):
+        return None
+
+    def markdown(self, *args, **kwargs):
+        return None
+
+    def spinner(self, *args, **kwargs):
+        return _HeadlessSpinnerContext()
+
+    def status(self, *args, **kwargs):
+        return _HeadlessStatusContext()
+
+    def rerun(self):
+        return None
+
+
+def build_background_autodrive_launch_payload(api_key, current_base_url, selected_model, available_models, enable_script=False, script_duration="60秒"):
+    return {
+        "api_key": str(api_key or "").strip(),
+        "current_base_url": str(current_base_url or "").strip(),
+        "selected_model": str(selected_model or "").strip(),
+        "available_models": clone_json_data(available_models or []),
+        "enable_script": bool(enable_script),
+        "script_duration": str(script_duration or "60秒"),
+    }
+
+
+def prune_background_autodrive_jobs():
+    with AUTODRIVE_BACKGROUND_LOCK:
+        stale_ids = []
+        for task_id, job in AUTODRIVE_BACKGROUND_JOBS.items():
+            future = job.get("future")
+            if future is None or future.done():
+                stale_ids.append(task_id)
+        for task_id in stale_ids:
+            AUTODRIVE_BACKGROUND_JOBS.pop(task_id, None)
+    return len(AUTODRIVE_BACKGROUND_JOBS)
+
+
+def is_background_autodrive_running(task_id=""):
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        return False
+    prune_background_autodrive_jobs()
+    with AUTODRIVE_BACKGROUND_LOCK:
+        job = AUTODRIVE_BACKGROUND_JOBS.get(clean_task_id)
+        future = (job or {}).get("future")
+        return bool(future and not future.done())
+
+
+def load_headless_autodrive_runtime():
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(Path(__file__).resolve()))
+    module = types.ModuleType(f"autodrive_headless_{datetime.now().strftime('%Y%m%d%H%M%S%f')}")
+    module.__dict__.update({
+        "__file__": str(Path(__file__).resolve()),
+        "st": _HeadlessStreamlitProxy(),
+        "components": types.SimpleNamespace(),
+    })
+
+    def should_skip_import(node):
+        if isinstance(node, ast.Import):
+            return any(alias.name.startswith("streamlit") for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            module_name = node.module or ""
+            return module_name.startswith("streamlit")
+        return False
+
+    allowed_nodes = (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in tree.body:
+        if not isinstance(node, allowed_nodes):
+            continue
+        if should_skip_import(node):
+            continue
+        compiled = compile(ast.Module(body=[node], type_ignores=[]), filename=str(Path(__file__).resolve()), mode="exec")
+        exec(compiled, module.__dict__)
+
+    module.save_draft = lambda: None
+    module.notify_step_completed = lambda defer_until_rerun=False: None
+    module.go_to_step = lambda step: module.st.session_state.__setitem__("current_step", int(step or 1))
+    module.st.rerun = lambda: None
+    module.is_ui_preview_mode = lambda: False
+    return module
+
+
+def run_headless_autodrive_task(task_id, run_owner_token, launch_payload):
+    runtime = load_headless_autodrive_runtime()
+    runtime.st.session_state.clear()
+    runtime.st.session_state.ui_preview_mode_enabled = False
+    runtime.st.session_state._task_queue_loaded = False
+    runtime.init_task_queue_state()
+    task_record = runtime.get_task_by_id(task_id)
+    if not task_record:
+        raise RuntimeError(f"Task not found for background autodrive: {task_id}")
+
+    runtime.apply_draft_data(task_record.get("snapshot", {}))
+    runtime.st.session_state.active_task_id = task_id
+    runtime.persist_active_task_snapshot = lambda draft_data=None: runtime.persist_task_snapshot_on_disk(
+        task_id,
+        draft_data if draft_data is not None else runtime.build_draft_data(),
+    )
+    runtime.update_task_run_state = lambda target_task_id, **kwargs: runtime.update_task_run_state_on_disk(target_task_id, **kwargs)
+    prompts_data = runtime.load_prompts()
+    return runtime.run_autodrive_phase1(
+        launch_payload.get("api_key", ""),
+        launch_payload.get("current_base_url", ""),
+        prompts_data,
+        launch_payload.get("available_models", []),
+        launch_payload.get("selected_model", ""),
+        enable_script=launch_payload.get("enable_script", False),
+        script_duration=launch_payload.get("script_duration", "60秒"),
+        run_owner_token=run_owner_token,
+        background_mode=True,
+    )
+
+
+def _background_autodrive_worker(task_id, run_owner_token, launch_payload):
+    try:
+        run_headless_autodrive_task(task_id, run_owner_token, launch_payload)
+    except Exception as exc:
+        update_task_run_state_on_disk(
+            task_id,
+            run_state="failed",
+            run_stage="worker",
+            run_owner_token=run_owner_token,
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            last_run_error=f"后台自动驾驶失败：{exc}",
+        )
+        raise
+    finally:
+        with AUTODRIVE_BACKGROUND_LOCK:
+            AUTODRIVE_BACKGROUND_JOBS.pop(task_id, None)
+
+
+def get_background_autodrive_executor():
+    executor = globals().get("_AUTODRIVE_BACKGROUND_EXECUTOR")
+    if executor is None:
+        executor = ThreadPoolExecutor(
+            max_workers=AUTODRIVE_BACKGROUND_MAX_WORKERS,
+            thread_name_prefix="autodrive-bg",
+        )
+        globals()["_AUTODRIVE_BACKGROUND_EXECUTOR"] = executor
+    return executor
+
+
+def start_background_autodrive_job(task_id, launch_payload, autodrive_config_snapshot=None, task_snapshot=None):
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        return False, "缺少任务 ID。"
+    if not str((launch_payload or {}).get("api_key", "") or "").strip():
+        return False, "请先在侧栏填写当前 API Key，再启动后台自动驾驶。"
+
+    prune_background_autodrive_jobs()
+    with AUTODRIVE_BACKGROUND_LOCK:
+        existing = AUTODRIVE_BACKGROUND_JOBS.get(clean_task_id)
+        future = (existing or {}).get("future")
+        if future and not future.done():
+            return False, "当前任务已经在后台自动驾驶中。"
+
+        run_owner_token = f"autodrive-bg-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        snapshot = clone_json_data(task_snapshot or {})
+        update_task_run_state(
+            clean_task_id,
+            run_mode="autodrive",
+            run_state="queued",
+            run_stage="queued",
+            run_owner_token=run_owner_token,
+            started_at="",
+            finished_at="",
+            last_run_error="",
+            autodrive_config_snapshot=autodrive_config_snapshot or {},
+            task_snapshot=snapshot,
+        )
+        future = get_background_autodrive_executor().submit(
+            _background_autodrive_worker,
+            clean_task_id,
+            run_owner_token,
+            clone_json_data(launch_payload or {}),
+        )
+        AUTODRIVE_BACKGROUND_JOBS[clean_task_id] = {
+            "future": future,
+            "run_owner_token": run_owner_token,
+            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    return True, run_owner_token
 
 
 def persist_active_task_snapshot(draft_data=None):
@@ -1788,13 +2178,14 @@ def switch_to_task(task_id):
     if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
-    task_record = get_task_by_id(task_id)
-    if not task_record:
-        return False
-
     current_active_id = st.session_state.get("active_task_id", "")
     if current_active_id and current_active_id != task_id:
         persist_active_task_snapshot()
+        sync_task_queue_runtime_from_disk()
+
+    task_record = get_task_by_id(task_id)
+    if not task_record:
+        return False
 
     st.session_state.active_task_id = task_id
     st.session_state[TASK_QUEUE_NOTICE_KEY] = f"已切换到任务：{task_record.get('name', task_id)}"
@@ -1807,13 +2198,16 @@ def resume_task(task_id=""):
     if bool(st.session_state.get("ui_preview_mode_enabled", False)):
         return False
     init_task_queue_state()
+    sync_task_queue_runtime_from_disk()
     target_task_id = task_id or st.session_state.get("active_task_id", "")
     task_record = get_task_by_id(target_task_id)
     if not task_record:
         return False
 
     snapshot = clone_json_data(task_record.get("snapshot", {}))
-    target_step = int(task_record.get("current_step", snapshot.get("current_step", 1) or 1))
+    snapshot_step = int(snapshot.get("current_step", 1) or 1)
+    record_step = int(task_record.get("current_step", snapshot_step) or snapshot_step)
+    target_step = max(record_step, snapshot_step)
     snapshot["current_step"] = target_step
     snapshot["last_ai_error"] = ""
     st.session_state.active_task_id = target_task_id
@@ -7268,6 +7662,8 @@ def build_task_interrupt_notice(task_name, pending_stage):
 
 def render_task_queue_panel():
     init_task_queue_state()
+    prune_background_autodrive_jobs()
+    sync_task_queue_runtime_from_disk()
     tasks = st.session_state.get("task_queue", []) or []
     if not tasks:
         return
@@ -7334,12 +7730,37 @@ def render_task_queue_panel():
             st.markdown("<div class='queue-field-shell'>", unsafe_allow_html=True)
             st.markdown("<p class='queue-subsection-label'>任务定位</p>", unsafe_allow_html=True)
             selected_task_id = st.selectbox("切换任务", options=task_options, index=current_index, format_func=lambda task_id: task_labels.get(task_id, task_id), key="task_queue_selected_id")
-            render_context_strip([
+            runtime_state = str(active_task.get("run_state", "") or "idle")
+            runtime_stage = str(active_task.get("run_stage", "") or "")
+            runtime_labels = {
+                "idle": "空闲",
+                "queued": "排队中",
+                "running": "后台运行中",
+                "completed": "后台完成",
+                "failed": "后台失败",
+                "cancelled": "已取消",
+            }
+            stage_labels = {
+                "queued": "排队",
+                "preflight": "预检",
+                "draft": "初稿",
+                "review": "审稿",
+                "revision": "修稿",
+                "de_ai": "去 AI",
+                "delivery": "交付",
+                "worker": "后台执行器",
+            }
+            context_items = [
                 f"当前任务：{active_task.get('name', active_task_id)}",
                 f"状态：{TASK_STATUS_LABELS.get(active_task.get('status', 'pending'), active_task.get('status', 'pending'))}",
                 f"Step {active_task.get('current_step', 1)}",
                 f"最近更新：{active_task.get('updated_at', '')}",
-            ])
+            ]
+            if runtime_state in AUTODRIVE_ACTIVE_RUN_STATES or runtime_state in {"completed", "failed"}:
+                context_items.append(f"运行态：{runtime_labels.get(runtime_state, runtime_state)}")
+            if runtime_stage:
+                context_items.append(f"阶段：{stage_labels.get(runtime_stage, runtime_stage)}")
+            render_context_strip(context_items)
             st.markdown("</div>", unsafe_allow_html=True)
 
             switch_disabled = selected_task_id == active_task_id or task_action_blocked
@@ -8701,7 +9122,17 @@ def build_de_ai_stage_label(variant):
     return "去AI味定稿"
 
 
-def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_models, selected_model, enable_script=False, script_duration="60秒"):
+def run_autodrive_phase1(
+    api_key,
+    current_base_url,
+    prompts_data,
+    available_models,
+    selected_model,
+    enable_script=False,
+    script_duration="60秒",
+    run_owner_token="",
+    background_mode=False,
+):
     config = {
         "target_words": st.session_state.get("autodrive_target_words", 1500),
         "editor_role": st.session_state.get("autodrive_editor_role", ""),
@@ -8725,7 +9156,7 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
     save_draft()
 
     active_task_id = ""
-    run_owner_token = ""
+    run_owner_token = str(run_owner_token or "").strip()
     current_run_stage = "preflight"
     init_task_queue_state()
     active_task_id = st.session_state.get("active_task_id", "")
@@ -8734,7 +9165,8 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
         active_task_id = st.session_state.get("active_task_id", "")
     if active_task_id:
         persist_active_task_snapshot()
-        run_owner_token = f"autodrive-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        if not run_owner_token:
+            run_owner_token = f"autodrive-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
         update_task_run_state(
             active_task_id,
             run_mode="autodrive",
@@ -9084,9 +9516,12 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
                 )
             status.update(label="全自动驾驶执行完成，即将跳转到交付工作台。", state="complete", expanded=False)
 
-        notify_step_completed(defer_until_rerun=True)
-        go_to_step(6)
-        st.rerun()
+        if background_mode:
+            st.session_state.current_step = 6
+        else:
+            notify_step_completed(defer_until_rerun=True)
+            go_to_step(6)
+            st.rerun()
         return True
     except Exception as exc:
         st.session_state.last_ai_error = f"全自动驾驶失败：{exc}"
@@ -11086,17 +11521,34 @@ if st.session_state.current_step == 1:
 
                     confirm_col, cancel_col = st.columns(2)
                     with confirm_col:
-                        if st.button("确认配置并启动自动驾驶", key="confirm_autodrive_phase1", type="primary", use_container_width=True):
+                        if st.button("确认配置并加入后台自动驾驶", key="confirm_autodrive_phase1", type="primary", use_container_width=True):
                             save_draft()
-                            run_autodrive_phase1(
+                            active_task_id = st.session_state.get("active_task_id", "")
+                            if not active_task_id:
+                                ensure_task_queue_bootstrap()
+                                active_task_id = st.session_state.get("active_task_id", "")
+                            persist_active_task_snapshot()
+                            launch_payload = build_background_autodrive_launch_payload(
                                 api_key,
                                 current_base_url,
-                                prompts_data,
-                                available_models,
                                 selected_model,
+                                available_models,
                                 enable_script=enable_script,
                                 script_duration=script_duration,
                             )
+                            started, launch_message = start_background_autodrive_job(
+                                active_task_id,
+                                launch_payload,
+                                autodrive_config_snapshot=current_autodrive_config,
+                                task_snapshot=build_draft_data(),
+                            )
+                            if started:
+                                st.session_state.autodrive_config_open = False
+                                st.session_state[TASK_QUEUE_NOTICE_KEY] = "当前任务已加入后台自动驾驶，可继续切换到其他任务编辑。"
+                                save_draft()
+                                st.rerun()
+                            else:
+                                st.warning(launch_message)
                     with cancel_col:
                         if st.button("取消自动驾驶", key="cancel_autodrive_phase1", use_container_width=True):
                             st.session_state.autodrive_config_open = False

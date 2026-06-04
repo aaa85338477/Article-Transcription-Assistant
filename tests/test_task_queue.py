@@ -28,9 +28,13 @@ TARGET_FUNCTIONS = {
     "build_blank_task_snapshot",
     "build_batch_export_markdown",
     "build_autodrive_config_snapshot",
+    "build_background_autodrive_launch_payload",
     "is_placeholder_task_name",
     "refresh_task_record",
+    "sync_task_queue_runtime_from_disk",
     "update_task_run_state",
+    "update_task_run_state_on_disk",
+    "persist_task_snapshot_on_disk",
     "draft_has_meaningful_content",
     "snapshots_equivalent",
     "is_task_action_blocked",
@@ -110,6 +114,8 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.helpers.TASK_QUEUE_NOTICE_KEY = "_task_queue_notice"
         self.helpers.init_task_queue_state = lambda: None
         self.helpers.save_task_queue_state = lambda: None
+        self.helpers.read_task_queue_data = lambda: (_ for _ in ()).throw(RuntimeError("task queue file unavailable in this test"))
+        self.helpers.write_task_queue_data = lambda payload: None
         self.helpers.queue_draft_restore = lambda snapshot: None
         self.helpers.get_task_by_id = lambda task_id: next(
             (task for task in self.helpers.st.session_state.get("task_queue", []) if task.get("id") == task_id),
@@ -446,6 +452,94 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertEqual(task_record["snapshot"]["current_step"], 3)
         self.assertEqual(task_record["snapshot"]["draft_article"], "Updated draft")
         self.assertIn("saved", calls)
+
+    def test_build_background_autodrive_launch_payload_keeps_runtime_inputs(self):
+        payload = self.helpers.build_background_autodrive_launch_payload(
+            " sk-test ",
+            "https://yunwu.ai/v1",
+            "qwen3.6-plus",
+            ["qwen3.6-plus", "gpt-5.5"],
+            enable_script=True,
+            script_duration="5分钟",
+        )
+
+        self.assertEqual(payload["api_key"], "sk-test")
+        self.assertEqual(payload["current_base_url"], "https://yunwu.ai/v1")
+        self.assertEqual(payload["selected_model"], "qwen3.6-plus")
+        self.assertEqual(payload["available_models"], ["qwen3.6-plus", "gpt-5.5"])
+        self.assertTrue(payload["enable_script"])
+        self.assertEqual(payload["script_duration"], "5分钟")
+
+    def test_update_task_run_state_on_disk_updates_only_target_record(self):
+        written_payloads = []
+        queue_payload = {
+            "active_task_id": "T001",
+            "tasks": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "snapshot": {"current_step": 2, "draft_article": "A"},
+                },
+                {
+                    "id": "T002",
+                    "name": "Task Two",
+                    "snapshot": {"current_step": 1, "draft_article": "B"},
+                },
+            ],
+            "archived_tasks": [],
+            "templates": [],
+        }
+        self.helpers.read_task_queue_data = lambda: json.loads(json.dumps(queue_payload, ensure_ascii=False))
+        self.helpers.write_task_queue_data = lambda payload: written_payloads.append(payload)
+
+        updated = self.helpers.update_task_run_state_on_disk(
+            "T001",
+            run_mode="autodrive",
+            run_state="running",
+            run_stage="draft",
+            run_owner_token="token-bg",
+            started_at="2026-04-23 10:00:00",
+            autodrive_config_snapshot={"editor_role": "发行主编"},
+            task_snapshot={"current_step": 3, "draft_article": "Updated A"},
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(len(written_payloads), 1)
+        persisted = written_payloads[0]
+        task_one = next(item for item in persisted["tasks"] if item["id"] == "T001")
+        task_two = next(item for item in persisted["tasks"] if item["id"] == "T002")
+        self.assertEqual(task_one["run_state"], "running")
+        self.assertEqual(task_one["run_stage"], "draft")
+        self.assertEqual(task_one["snapshot"]["draft_article"], "Updated A")
+        self.assertEqual(task_two["snapshot"]["draft_article"], "B")
+
+    def test_persist_task_snapshot_on_disk_refreshes_target_snapshot(self):
+        written_payloads = []
+        queue_payload = {
+            "active_task_id": "T001",
+            "tasks": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "snapshot": {"current_step": 2, "draft_article": "A"},
+                }
+            ],
+            "archived_tasks": [],
+            "templates": [],
+        }
+        self.helpers.read_task_queue_data = lambda: json.loads(json.dumps(queue_payload, ensure_ascii=False))
+        self.helpers.write_task_queue_data = lambda payload: written_payloads.append(payload)
+
+        persisted = self.helpers.persist_task_snapshot_on_disk(
+            "T001",
+            {"current_step": 6, "final_article": "Final body"},
+        )
+
+        self.assertTrue(persisted)
+        self.assertEqual(len(written_payloads), 1)
+        task_one = written_payloads[0]["tasks"][0]
+        self.assertEqual(task_one["snapshot"]["final_article"], "Final body")
+        self.assertEqual(task_one["current_step"], 6)
 
     def test_queue_metrics_and_batch_export_include_completed_artifacts(self):
         tasks = [
