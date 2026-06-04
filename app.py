@@ -95,7 +95,13 @@ DRAFT_STATE_KEYS = [
     'evidence_map', 'evidence_summary', 'evidence_signature',
     'writing_brief_raw', 'writing_brief_parsed', 'writing_brief_mode',
     'writing_brief_summary', 'brief_topic', 'brief_sources',
-    'brief_evidence_map', 'brief_evidence_summary', 'brief_source_confirmation'
+    'brief_evidence_map', 'brief_evidence_summary', 'brief_source_confirmation',
+    'autodrive_target_words', 'autodrive_editor_role', 'autodrive_editor_model',
+    'autodrive_reviewer_role', 'autodrive_reviewer_model',
+    'autodrive_revision_role', 'autodrive_revision_model',
+    'autodrive_de_ai_model', 'autodrive_de_ai_variant',
+    'autodrive_publish_word', 'autodrive_publish_feishu', 'autodrive_push_feishu_group',
+    'autodrive_last_docx_file_name', 'autodrive_last_docx_generated_at', 'autodrive_last_docx_path'
 ]
 
 TASK_TEMPLATE_CONFIG_KEYS = [
@@ -605,8 +611,110 @@ def get_selected_reviewer_prompt(prompts_data):
     return reviewer_map.get(selected_role, reviewer_map[next(iter(reviewer_map))])
 
 
+def normalize_autodrive_config(config, prompts_data, available_models, de_ai_models=None):
+    de_ai_models = list(de_ai_models or [])
+    editor_options = list((prompts_data.get("editors", {}) or {}).keys())
+    reviewer_options = list(get_reviewer_prompt_map(prompts_data).keys())
+    normalized = dict(config or {})
+
+    def resolve_option(value, options, fallback=""):
+        if value in options:
+            return value
+        return options[0] if options else fallback
+
+    def resolve_flag(value):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    target_words = normalized.get("target_words", 1500)
+    try:
+        target_words = int(target_words)
+    except (TypeError, ValueError):
+        target_words = 1500
+    if target_words <= 0:
+        target_words = 1500
+
+    normalized["target_words"] = target_words
+    normalized["editor_role"] = resolve_option(normalized.get("editor_role", ""), editor_options)
+    normalized["editor_model"] = resolve_option(normalized.get("editor_model", ""), available_models)
+    normalized["reviewer_role"] = resolve_option(normalized.get("reviewer_role", ""), reviewer_options)
+    normalized["reviewer_model"] = resolve_option(normalized.get("reviewer_model", ""), available_models)
+    normalized["revision_role"] = resolve_option(normalized.get("revision_role", ""), editor_options)
+    normalized["revision_model"] = resolve_option(normalized.get("revision_model", ""), available_models)
+    normalized["de_ai_model"] = resolve_option(normalized.get("de_ai_model", ""), de_ai_models)
+    normalized["de_ai_variant"] = (
+        normalized.get("de_ai_variant")
+        if normalized.get("de_ai_variant") in DE_AI_VARIANTS
+        else DE_AI_VARIANT_DEFAULT
+    )
+    normalized["publish_word"] = resolve_flag(normalized.get("publish_word", True))
+    normalized["publish_feishu"] = resolve_flag(normalized.get("publish_feishu", True))
+    normalized["push_feishu_group"] = resolve_flag(normalized.get("push_feishu_group", False))
+    return normalized
+
+
+def build_autodrive_default_config(prompts_data, available_models, de_ai_models=None, selected_model=""):
+    selected_model = (selected_model or "").strip()
+    current_editor_role = str(st.session_state.get("selected_role", "") or "").strip()
+    current_reviewer_role = str(st.session_state.get("selected_reviewer", "") or "").strip()
+    current_target_words = st.session_state.get("target_article_words", 1500)
+    current_de_ai_model = str(st.session_state.get("de_ai_model", "") or "").strip()
+    current_de_ai_variant = str(st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT) or "").strip()
+
+    config = {
+        "target_words": current_target_words,
+        "editor_role": current_editor_role,
+        "editor_model": selected_model,
+        "reviewer_role": current_reviewer_role,
+        "reviewer_model": selected_model,
+        "revision_role": current_editor_role,
+        "revision_model": selected_model,
+        "de_ai_model": current_de_ai_model,
+        "de_ai_variant": current_de_ai_variant,
+        "publish_word": True,
+        "publish_feishu": True,
+        "push_feishu_group": False,
+    }
+    return normalize_autodrive_config(config, prompts_data, available_models, de_ai_models=de_ai_models)
+
+
 def build_draft_data():
     return {key: clone_json_data(st.session_state[key]) for key in DRAFT_STATE_KEYS if key in st.session_state}
+
+
+def apply_autodrive_config_to_session(config, sync_widget_state=True):
+    normalized = dict(config or {})
+    if sync_widget_state:
+        st.session_state.autodrive_target_words = normalized.get("target_words", 1500)
+        st.session_state.autodrive_editor_role = normalized.get("editor_role", "")
+        st.session_state.autodrive_editor_model = normalized.get("editor_model", "")
+        st.session_state.autodrive_reviewer_role = normalized.get("reviewer_role", "")
+        st.session_state.autodrive_reviewer_model = normalized.get("reviewer_model", "")
+        st.session_state.autodrive_revision_role = normalized.get("revision_role", "")
+        st.session_state.autodrive_revision_model = normalized.get("revision_model", "")
+        st.session_state.autodrive_de_ai_model = normalized.get("de_ai_model", "")
+        st.session_state.autodrive_de_ai_variant = normalized.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
+        st.session_state.autodrive_publish_word = bool(normalized.get("publish_word", True))
+        st.session_state.autodrive_publish_feishu = bool(normalized.get("publish_feishu", True))
+        st.session_state.autodrive_push_feishu_group = bool(normalized.get("push_feishu_group", False))
+
+    if normalized.get("editor_role"):
+        st.session_state.selected_role = normalized.get("editor_role", "")
+        st.session_state.selected_role_widget = normalized.get("editor_role", "")
+    if normalized.get("reviewer_role"):
+        st.session_state.selected_reviewer = normalized.get("reviewer_role", "")
+        st.session_state.selected_reviewer_widget = normalized.get("reviewer_role", "")
+    st.session_state.target_article_words = normalized.get("target_words", 1500)
+    st.session_state.target_article_words_slider = normalized.get("target_words", 1500)
+    if normalized.get("de_ai_model"):
+        st.session_state.de_ai_model = normalized.get("de_ai_model", "")
+        st.session_state.quality_gate_retry_model = normalized.get("de_ai_model", "")
+    st.session_state.de_ai_variant = normalized.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
 
 
 def is_ui_preview_mode():
@@ -998,6 +1106,21 @@ def build_blank_task_snapshot(base_snapshot=None):
         "brief_evidence_map": [],
         "brief_evidence_summary": "",
         "brief_source_confirmation": [],
+        "autodrive_target_words": 1500,
+        "autodrive_editor_role": "",
+        "autodrive_editor_model": "",
+        "autodrive_reviewer_role": "",
+        "autodrive_reviewer_model": "",
+        "autodrive_revision_role": "",
+        "autodrive_revision_model": "",
+        "autodrive_de_ai_model": "",
+        "autodrive_de_ai_variant": globals().get("DE_AI_VARIANT_DEFAULT", "标准版"),
+        "autodrive_publish_word": True,
+        "autodrive_publish_feishu": True,
+        "autodrive_push_feishu_group": False,
+        "autodrive_last_docx_file_name": "",
+        "autodrive_last_docx_generated_at": "",
+        "autodrive_last_docx_path": "",
     }
     for key, value in reset_defaults.items():
         snapshot[key] = clone_json_data(value)
@@ -2148,13 +2271,42 @@ def build_editor_system_prompt(editor_prompt, global_instruction):
     return "\n\n".join([part for part in prompt_parts if part])
 
 
-def build_modification_system_prompt(global_instruction, term_rules_instruction=""):
+def build_modification_role_instruction(revision_role_name="", revision_role_prompt=""):
+    clean_role_name = str(revision_role_name or "").strip()
+    clean_role_prompt = sanitize_editor_prompt(revision_role_prompt)
+    if not clean_role_prompt:
+        return ""
+    role_label = clean_role_name or "修改稿编辑"
+    return (
+        f"当前修改稿执行角色：{role_label}\n"
+        "请优先遵守以下改稿人设与写作取向，再根据审稿意见完成定向修订：\n"
+        f"{clean_role_prompt}"
+    )
+
+
+def build_modification_system_prompt(global_instruction, term_rules_instruction="", revision_role_name="", revision_role_prompt=""):
     base_prompt = (
         "你是一名资深中文游戏内容编辑，负责根据审稿意见对文章做定向修订。"
         "请在保留核心事实、分析骨架、标题组和文章结构的前提下完成修改，不要重写成另一篇完全不同的稿子。"
     )
+    role_instruction_builder = globals().get("build_modification_role_instruction")
+    if callable(role_instruction_builder):
+        role_instruction = role_instruction_builder(revision_role_name, revision_role_prompt)
+    else:
+        clean_role_name = str(revision_role_name or "").strip()
+        clean_role_prompt = sanitize_editor_prompt(revision_role_prompt)
+        if clean_role_prompt:
+            role_label = clean_role_name or "修改稿编辑"
+            role_instruction = (
+                f"当前修改稿执行角色：{role_label}\n"
+                "请优先遵守以下改稿人设与写作取向，再根据审稿意见完成定向修订：\n"
+                f"{clean_role_prompt}"
+            )
+        else:
+            role_instruction = ""
     prompt_parts = [
         base_prompt,
+        role_instruction,
         build_target_length_instruction(),
         build_article_structure_instruction(),
         build_article_output_instruction(),
@@ -6783,6 +6935,38 @@ def init_state():
         st.session_state.pending_completion_sound = False
     if 'target_article_words' not in st.session_state:
         st.session_state.target_article_words = 1500
+    if 'autodrive_config_open' not in st.session_state:
+        st.session_state.autodrive_config_open = False
+    if 'autodrive_target_words' not in st.session_state:
+        st.session_state.autodrive_target_words = st.session_state.get("target_article_words", 1500)
+    if 'autodrive_editor_role' not in st.session_state:
+        st.session_state.autodrive_editor_role = st.session_state.get("selected_role", "")
+    if 'autodrive_editor_model' not in st.session_state:
+        st.session_state.autodrive_editor_model = ""
+    if 'autodrive_reviewer_role' not in st.session_state:
+        st.session_state.autodrive_reviewer_role = st.session_state.get("selected_reviewer", DEFAULT_REVIEWER_ROLE)
+    if 'autodrive_reviewer_model' not in st.session_state:
+        st.session_state.autodrive_reviewer_model = ""
+    if 'autodrive_revision_role' not in st.session_state:
+        st.session_state.autodrive_revision_role = st.session_state.get("selected_role", "")
+    if 'autodrive_revision_model' not in st.session_state:
+        st.session_state.autodrive_revision_model = ""
+    if 'autodrive_de_ai_model' not in st.session_state:
+        st.session_state.autodrive_de_ai_model = st.session_state.get("de_ai_model", DE_AI_MODELS[0])
+    if 'autodrive_de_ai_variant' not in st.session_state:
+        st.session_state.autodrive_de_ai_variant = st.session_state.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
+    if 'autodrive_publish_word' not in st.session_state:
+        st.session_state.autodrive_publish_word = True
+    if 'autodrive_publish_feishu' not in st.session_state:
+        st.session_state.autodrive_publish_feishu = True
+    if 'autodrive_push_feishu_group' not in st.session_state:
+        st.session_state.autodrive_push_feishu_group = False
+    if 'autodrive_last_docx_file_name' not in st.session_state:
+        st.session_state.autodrive_last_docx_file_name = ""
+    if 'autodrive_last_docx_generated_at' not in st.session_state:
+        st.session_state.autodrive_last_docx_generated_at = ""
+    if 'autodrive_last_docx_path' not in st.session_state:
+        st.session_state.autodrive_last_docx_path = ""
     if 'selected_role_widget' not in st.session_state:
         st.session_state.selected_role_widget = st.session_state.get('selected_role', '')
     if 'selected_reviewer' not in st.session_state:
@@ -8415,6 +8599,357 @@ def render_step6_delivery_actions_panel(display_final_article):
                 clear_draft()
                 create_task_from_current_state(clone_current=False)
                 st.rerun()
+
+def save_autodrive_delivery_docx(docx_data, file_name):
+    if not docx_data:
+        raise ValueError("Word 导出内容为空，无法写入文件。")
+    safe_name = (file_name or "").strip() or "公众号文章_定稿.docx"
+    export_dir = Path("runtime_exports")
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_path = export_dir / safe_name
+    export_path.write_bytes(docx_data)
+    resolved_path = str(export_path.resolve())
+    st.session_state.autodrive_last_docx_file_name = safe_name
+    st.session_state.autodrive_last_docx_generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.autodrive_last_docx_path = resolved_path
+    return resolved_path
+
+
+def build_de_ai_stage_label(variant):
+    if variant == DE_AI_VARIANT_COMMUNITY:
+        return "去AI味定稿（社区版）"
+    if variant == DE_AI_VARIANT_CHAT:
+        return "去AI味定稿（唠嗑版）"
+    if variant == DE_AI_VARIANT_HUMANIZER:
+        return "去AI味定稿（Humanizer版）"
+    return "去AI味定稿"
+
+
+def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_models, selected_model, enable_script=False, script_duration="60秒"):
+    config = {
+        "target_words": st.session_state.get("autodrive_target_words", 1500),
+        "editor_role": st.session_state.get("autodrive_editor_role", ""),
+        "editor_model": st.session_state.get("autodrive_editor_model", "") or selected_model,
+        "reviewer_role": st.session_state.get("autodrive_reviewer_role", ""),
+        "reviewer_model": st.session_state.get("autodrive_reviewer_model", "") or selected_model,
+        "revision_role": st.session_state.get("autodrive_revision_role", ""),
+        "revision_model": st.session_state.get("autodrive_revision_model", "") or selected_model,
+        "de_ai_model": st.session_state.get("autodrive_de_ai_model", ""),
+        "de_ai_variant": st.session_state.get("autodrive_de_ai_variant", DE_AI_VARIANT_DEFAULT),
+        "publish_word": st.session_state.get("autodrive_publish_word", True),
+        "publish_feishu": st.session_state.get("autodrive_publish_feishu", True),
+        "push_feishu_group": st.session_state.get("autodrive_push_feishu_group", False),
+    }
+    normalized = normalize_autodrive_config(config, prompts_data, available_models, de_ai_models=DE_AI_MODELS)
+    # The confirmation panel widgets already own the autodrive_* keys in this run.
+    # Only sync the downstream workflow state here to avoid Streamlit widget mutation errors.
+    apply_autodrive_config_to_session(normalized, sync_widget_state=False)
+    st.session_state.autodrive_config_open = False
+    st.session_state.last_ai_error = ""
+    save_draft()
+
+    if not (st.session_state.get("source_content", "") or "").strip():
+        st.error("当前任务还没有可用的素材正文，无法启动全自动驾驶。")
+        return False
+
+    editor_role = normalized.get("editor_role", "")
+    editor_model = normalized.get("editor_model", "") or selected_model
+    reviewer_role = normalized.get("reviewer_role", "")
+    reviewer_model = normalized.get("reviewer_model", "") or editor_model
+    revision_role = normalized.get("revision_role", "") or editor_role
+    revision_model = normalized.get("revision_model", "") or editor_model
+    de_ai_model = normalized.get("de_ai_model", "") or st.session_state.get("de_ai_model", DE_AI_MODELS[0])
+    de_ai_variant = normalized.get("de_ai_variant", DE_AI_VARIANT_DEFAULT)
+    publish_word = normalized.get("publish_word", True)
+    publish_feishu = normalized.get("publish_feishu", True)
+    push_feishu_group = normalized.get("push_feishu_group", False)
+    execution_model = revision_model or editor_model or selected_model
+
+    reviewer_map = get_reviewer_prompt_map(prompts_data)
+    editor_prompt = prompts_data["editors"].get(editor_role, "")
+    reviewer_prompt = reviewer_map.get(reviewer_role, reviewer_map[next(iter(reviewer_map))] if reviewer_map else "")
+    revision_role_prompt = prompts_data["editors"].get(revision_role, "")
+    global_instruction = prompts_data.get("global_instruction", "")
+    anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，必须且只能基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
+
+    st.session_state.autodrive_last_docx_file_name = ""
+    st.session_state.autodrive_last_docx_generated_at = ""
+    st.session_state.autodrive_last_docx_path = ""
+    st.session_state.feishu_publish_error = ""
+    save_draft()
+
+    try:
+        with st.status("自动驾驶已启动，正在按确认配置推进全流程...", expanded=True) as status:
+            st.write(f"已确认主编：**{editor_role}**（{editor_model}）")
+            st.write(f"已确认审稿人员：**{reviewer_role}**（{reviewer_model}）")
+            st.write(f"已确认修改稿人员：**{revision_role}**（{revision_model}）")
+            st.write(f"已确认去 AI 模型：**{de_ai_model}** / {de_ai_variant}")
+
+            mark_ai_stage_started("draft_generation")
+            st.write("正在生成初稿...")
+            final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
+            if (st.session_state.get("writing_brief_raw", "") or "").strip():
+                draft_content = build_planned_editor_user_content(
+                    st.session_state.get("writing_brief_raw", ""),
+                    st.session_state.source_content,
+                    st.session_state.get("obsidian_research_brief", ""),
+                    use_images=bool(st.session_state.source_images),
+                )
+            else:
+                draft_content = build_editor_user_content(
+                    st.session_state.source_content,
+                    st.session_state.get("obsidian_research_brief", ""),
+                    use_images=bool(st.session_state.source_images),
+                )
+            draft_response = call_llm(
+                api_key=api_key,
+                base_url=current_base_url,
+                model_name=editor_model,
+                system_prompt=final_editor_system_prompt,
+                user_content=draft_content,
+                image_urls=st.session_state.source_images,
+            )
+            _, draft_retry_payload = rerun_article_generation_if_length_overrun(
+                draft_response,
+                system_prompt=final_editor_system_prompt,
+                user_content=draft_content,
+                fallback_titles=st.session_state.get("title_candidates", []),
+                api_key=api_key,
+                base_url=current_base_url,
+                model_name=editor_model,
+                image_urls=st.session_state.source_images,
+                target_words=normalized.get("target_words", get_target_article_words()),
+            )
+            st.session_state.title_candidates = draft_retry_payload["title_candidates"]
+            st.session_state.draft_article = draft_retry_payload["article_text"]
+            st.session_state.review_feedback = ""
+            st.session_state.review_actions = []
+            st.session_state.accepted_review_items = []
+            st.session_state.modified_article = ""
+            st.session_state.final_article = ""
+            st.session_state.highlighted_article = ""
+            st.session_state.spoken_script = ""
+            append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=editor_role, model=editor_model)
+            checkpoint_ai_stage("draft_generation", target_step=3)
+            save_draft()
+
+            mark_ai_stage_started("review_generation")
+            st.write("正在执行严格审稿...")
+            final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
+            combined_content = build_reviewer_user_content(
+                st.session_state.source_content,
+                st.session_state.draft_article,
+                st.session_state.get("obsidian_research_brief", ""),
+                title_candidates=st.session_state.get("title_candidates", []),
+                writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
+            )
+            st.session_state.review_feedback = call_llm(
+                api_key=api_key,
+                base_url=current_base_url,
+                model_name=reviewer_model,
+                system_prompt=final_reviewer_system_prompt,
+                user_content=combined_content,
+                image_urls=st.session_state.source_images,
+            )
+            hydrate_review_action_state(st.session_state.review_feedback, reset_selection=True)
+            st.session_state.accepted_review_items = [
+                action.get("id")
+                for action in (st.session_state.get("review_actions", []) or [])
+                if action.get("id")
+            ]
+            checkpoint_ai_stage("review_generation", target_step=4)
+            save_draft()
+
+            mark_ai_stage_started("modification_generation")
+            st.write("正在自动接受整套审稿意见并生成修改稿...")
+            modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
+            modification_term_rules_instruction = build_term_rules_instruction(
+                modification_banned_terms,
+                modification_default_replacements,
+            )
+            modification_prompt = build_modification_system_prompt(
+                global_instruction,
+                term_rules_instruction=modification_term_rules_instruction,
+                revision_role_name=revision_role,
+                revision_role_prompt=revision_role_prompt,
+            )
+            selected_review_feedback = build_selected_review_feedback(
+                st.session_state.get("review_actions", []),
+                st.session_state.get("accepted_review_items", []),
+            )
+            content_to_modify = build_modification_user_content(
+                selected_review_feedback or st.session_state.review_feedback,
+                st.session_state.draft_article,
+                title_candidates=st.session_state.get("title_candidates", []),
+            )
+            modified_response = call_llm(
+                api_key=api_key,
+                base_url=current_base_url,
+                model_name=revision_model,
+                system_prompt=modification_prompt,
+                user_content=content_to_modify,
+            )
+            _, modified_retry_payload = rerun_article_generation_if_length_overrun(
+                modified_response,
+                system_prompt=modification_prompt,
+                user_content=content_to_modify,
+                fallback_titles=st.session_state.get("title_candidates", []),
+                api_key=api_key,
+                base_url=current_base_url,
+                model_name=revision_model,
+                target_words=normalized.get("target_words", get_target_article_words()),
+            )
+            st.session_state.title_candidates = modified_retry_payload["title_candidates"]
+            st.session_state.modified_article = modified_retry_payload["article_text"]
+            st.session_state.final_article = ""
+            st.session_state.highlighted_article = ""
+            append_article_version(st.session_state.modified_article, "自动驾驶修改稿", role=revision_role, model=revision_model)
+            checkpoint_ai_stage("modification_generation", target_step=5)
+            save_draft()
+
+            mark_ai_stage_started("de_ai_generation")
+            st.write("正在进入去 AI 定稿与高亮阅读版生成...")
+            de_ai_banned_terms, de_ai_default_replacements, _, _ = resolve_active_term_rules("de_ai")
+            de_ai_term_rules_instruction = build_term_rules_instruction(
+                de_ai_banned_terms,
+                de_ai_default_replacements,
+            )
+            st.session_state.de_ai_prompt_template = build_de_ai_prompt_template(
+                editor_role,
+                editor_prompt,
+                st.session_state.get("source_content", ""),
+                variant=de_ai_variant,
+                term_rules_instruction=de_ai_term_rules_instruction,
+                current_article_text=st.session_state.get("modified_article", ""),
+                writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
+            )
+            de_ai_response = call_llm(
+                api_key=api_key,
+                base_url=current_base_url,
+                model_name=de_ai_model,
+                system_prompt=st.session_state.de_ai_prompt_template,
+                user_content=st.session_state.modified_article,
+                temperature=st.session_state.get("de_ai_temperature", 0.75),
+            )
+            pure_titles, pure_article, highlighted_article = parse_de_ai_dual_output(
+                de_ai_response,
+                fallback_titles=st.session_state.get("title_candidates", []),
+            )
+            retry_issue_keys = detect_auto_retry_issues(
+                build_structured_article_text(pure_titles, pure_article),
+                explicit_title_candidates=pure_titles,
+                highlighted_article=highlighted_article,
+                require_highlight=True,
+                target_words=normalized.get("target_words", get_target_article_words()),
+                reference_article_text=st.session_state.get("modified_article", ""),
+                check_length=True,
+            )
+            if retry_issue_keys:
+                st.write("检测到去 AI 定稿需要自动重跑，正在进行二次修正...")
+                retry_instruction = build_auto_retry_instruction(
+                    retry_issue_keys,
+                    target_words=normalized.get("target_words", get_target_article_words()),
+                    require_highlight=True,
+                    reference_article_text=st.session_state.get("modified_article", ""),
+                )
+                retry_response = call_llm(
+                    api_key=api_key,
+                    base_url=current_base_url,
+                    model_name=de_ai_model,
+                    system_prompt=st.session_state.de_ai_prompt_template + "\n\n" + retry_instruction,
+                    user_content=st.session_state.modified_article,
+                    temperature=st.session_state.get("de_ai_temperature", 0.75),
+                )
+                pure_titles, pure_article, highlighted_article = parse_de_ai_dual_output(
+                    retry_response,
+                    fallback_titles=pure_titles or st.session_state.get("title_candidates", []),
+                )
+            st.session_state.title_candidates = pure_titles
+            st.session_state.final_article = build_structured_article_text(pure_titles, pure_article) or (de_ai_response or "").strip()
+            st.session_state.highlighted_article = highlighted_article
+            append_article_version(
+                st.session_state.final_article,
+                build_de_ai_stage_label(de_ai_variant),
+                role=editor_role,
+                model=de_ai_model,
+                highlighted_article=highlighted_article,
+            )
+            if enable_script:
+                st.write("正在生成口播与分镜脚本...")
+                generate_script_for_current_article(api_key, current_base_url, execution_model, script_duration)
+            else:
+                st.session_state.spoken_script = ""
+
+            if st.session_state.get("podcast_enabled"):
+                st.write("正在生成播客脚本...")
+                generate_podcast_script_for_current_article(
+                    api_key,
+                    current_base_url,
+                    execution_model,
+                    st.session_state.get("podcast_duration", "5分钟"),
+                )
+            else:
+                reset_podcast_outputs(delete_audio=True)
+
+            checkpoint_ai_stage("de_ai_generation", target_step=6)
+            save_draft()
+
+            if publish_word:
+                st.write("正在生成 Word 定稿文件...")
+                docx_data = create_delivery_docx(
+                    st.session_state.final_article,
+                    st.session_state.get("highlighted_article", ""),
+                    st.session_state.spoken_script if st.session_state.spoken_script else None,
+                )
+                docx_file_name = build_delivery_docx_filename(
+                    st.session_state.get("title_candidates", []),
+                    has_script=bool(st.session_state.spoken_script),
+                )
+                saved_docx_path = save_autodrive_delivery_docx(docx_data, docx_file_name)
+                st.write(f"Word 已生成：`{saved_docx_path}`")
+                save_draft()
+
+            if publish_feishu:
+                st.write("正在发布到飞书云文档...")
+                success, metadata, msg = publish_article_to_feishu_doc(
+                    st.session_state.final_article,
+                    title_candidates=st.session_state.get("title_candidates", []),
+                    highlighted_html=st.session_state.get("highlighted_article", ""),
+                )
+                if success:
+                    for field_name, field_value in metadata.items():
+                        st.session_state[field_name] = field_value
+                    st.session_state.feishu_publish_error = ""
+                    st.write("飞书云文档发布成功。")
+                else:
+                    st.session_state.feishu_publish_error = msg
+                    st.warning(f"飞书云文档发布失败：{msg}")
+                save_draft()
+
+            if push_feishu_group:
+                st.write("正在推送到飞书群...")
+                push_success, push_msg = push_to_feishu(
+                    st.session_state.final_article,
+                    st.session_state.spoken_script if st.session_state.spoken_script else None,
+                )
+                if push_success:
+                    st.write("飞书群推送成功。")
+                else:
+                    st.warning(f"飞书群推送失败：{push_msg}")
+
+            save_draft()
+            status.update(label="全自动驾驶执行完成，即将跳转到交付工作台。", state="complete", expanded=False)
+
+        notify_step_completed(defer_until_rerun=True)
+        go_to_step(6)
+        st.rerun()
+        return True
+    except Exception as exc:
+        st.session_state.last_ai_error = f"全自动驾驶失败：{exc}"
+        save_draft()
+        st.error(f"全自动驾驶执行失败：{exc}")
+        return False
+
 
 def notify_step_completed(defer_until_rerun=False):
 
@@ -10317,162 +10852,96 @@ if st.session_state.current_step == 1:
                     st.rerun()
 
             with col_flow2:
-                st.markdown("<p class='toolbar-note'>自动完成角色路由、写稿、审稿、改稿和可选脚本生成，适合快速交付。</p>", unsafe_allow_html=True)
-                if st.button("🚀 一键全自动驾驶 (AI路由直达定稿)", type="primary", use_container_width=True):
-                    if is_ui_preview_mode():
-                        apply_ui_preview_snapshot(6, notice="已直接切到 Step 6 的完整交付预览。测试模式下不会执行真实 AI 路由或写作流程。")
-                        st.rerun()
-                    if not api_key:
-                        st.error("⚠️ 请先在左侧边栏输入 API Key！")
-                        st.stop()
+                st.markdown("<p class='toolbar-note'>先确认主编、审稿、改稿与去 AI 配置，再自动完成全流程写稿与交付，适合标准化批量产出。</p>", unsafe_allow_html=True)
+                auto_drive_clicked = st.button("🚘 一键全自动驾驶（先确认配置）", type="primary", use_container_width=True)
 
-                    with st.status("🤖 全自动驾驶已启动，AI 正在接管工作流...", expanded=True) as status:
-                        st.write("🔍 正在分析素材内容，为您匹配最佳编辑人设...")
-                        editor_names = list(prompts_data["editors"].keys())
-                        routing_prompt = f"""你是一个智能路由系统。请阅读以下素材，判断哪种身份最适合将其改写为深度文章。
-                        请只输出角色的完整名称，绝不允许包含任何其他标点或解释废话！
-                        可选角色：{', '.join(editor_names)}"""
-
-                        routing_input = st.session_state.source_content[:5000]
-                        if (st.session_state.get("writing_brief_summary", "") or "").strip():
-                            routing_input = (
-                                "[Planning brief]\n"
-                                + st.session_state.get("writing_brief_summary", "")
-                                + "\n\n================\n\n[Source packet]\n"
-                                + st.session_state.source_content[:5000]
-                            )
-
-                        chosen_editor_raw = call_llm(
-                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                            system_prompt=routing_prompt, user_content=routing_input
-                        )
-
-                        chosen_editor = chosen_editor_raw.strip() if chosen_editor_raw else ""
-                        if chosen_editor not in editor_names:
-                            chosen_editor = editor_names[0]
-
-                        st.session_state.selected_role = chosen_editor
-                        st.write(f"✅ 意图识别完成，已自动指派：**【{chosen_editor}】**")
-
-                        st.write("✍️ 编辑正在奋笔疾书，生成初稿中...")
-                        editor_prompt = prompts_data["editors"][chosen_editor]
-                        global_instruction = prompts_data.get("global_instruction", "")
-                        final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
-
-                        if (st.session_state.get("writing_brief_raw", "") or "").strip():
-                            draft_content = build_planned_editor_user_content(
-                                st.session_state.get("writing_brief_raw", ""),
-                                st.session_state.source_content,
-                                st.session_state.get("obsidian_research_brief", ""),
-                                use_images=bool(st.session_state.source_images)
-                            )
-                        else:
-                            draft_content = build_editor_user_content(
-                                st.session_state.source_content,
-                                st.session_state.get("obsidian_research_brief", ""),
-                                use_images=bool(st.session_state.source_images)
-                            )
-                        draft_response = call_llm(
-                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                            system_prompt=final_editor_system_prompt, user_content=draft_content, image_urls=st.session_state.source_images
-                        )
-                        _, draft_retry_payload = rerun_article_generation_if_length_overrun(
-                            draft_response,
-                            system_prompt=final_editor_system_prompt,
-                            user_content=draft_content,
-                            fallback_titles=st.session_state.get("title_candidates", []),
-                            api_key=api_key,
-                            base_url=current_base_url,
-                            model_name=selected_model,
-                            image_urls=st.session_state.source_images,
-                            target_words=get_target_article_words(),
-                        )
-                        draft_titles = draft_retry_payload["title_candidates"]
-                        draft_article_text = draft_retry_payload["article_text"]
-                        st.session_state.title_candidates = draft_titles
-                        st.session_state.draft_article = draft_article_text
-                        append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=chosen_editor, model=selected_model)
-                        save_draft()
-
-                        st.write("🧐 审稿主编介入，正在极其严苛地核对原文与逻辑...")
-                        reviewer_prompt = get_selected_reviewer_prompt(prompts_data)
-                        anti_hallucination_instruction = "\n\n【⚠️ 强制系统级指令：严禁幻觉】：你在审查事实时，**必须且只能**基于下方提供给你的【原始素材文本】！绝对不允许使用自身知识库进行事实核对。"
-                        final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
-
-                        combined_content = build_reviewer_user_content(
-                            st.session_state.source_content,
-                            st.session_state.draft_article,
-                            st.session_state.get("obsidian_research_brief", ""),
-                            title_candidates=st.session_state.get("title_candidates", []),
-                            writing_brief_summary=st.session_state.get("writing_brief_summary", ""),
-                        )
-                        st.session_state.review_feedback = call_llm(
-                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                            system_prompt=final_reviewer_system_prompt, user_content=combined_content, image_urls=st.session_state.source_images
-                        )
-                        hydrate_review_action_state(st.session_state.review_feedback, reset_selection=True)
-
-                        save_draft()
-                        st.write("✨ 接收修改意见，正在进行最终打磨...")
-                        modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
-                        modification_term_rules_instruction = build_term_rules_instruction(
-                            modification_banned_terms,
-                            modification_default_replacements,
-                        )
-                        modification_prompt = build_modification_system_prompt(
-                            global_instruction,
-                            term_rules_instruction=modification_term_rules_instruction,
-                        )
-                        selected_review_feedback = build_selected_review_feedback(
-                            st.session_state.get("review_actions", []),
-                            st.session_state.get("accepted_review_items", []),
-                        )
-                        content_to_modify = build_modification_user_content(
-                            selected_review_feedback or st.session_state.review_feedback,
-                            st.session_state.draft_article,
-                            title_candidates=st.session_state.get("title_candidates", []),
-                        )
-
-                        final_response = call_llm(
-                            api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                            system_prompt=modification_prompt, user_content=content_to_modify
-                        )
-
-                        _, final_retry_payload = rerun_article_generation_if_length_overrun(
-                            final_response,
-                            system_prompt=modification_prompt,
-                            user_content=content_to_modify,
-                            fallback_titles=st.session_state.get("title_candidates", []),
-                            api_key=api_key,
-                            base_url=current_base_url,
-                            model_name=selected_model,
-                            target_words=get_target_article_words(),
-                        )
-                        final_titles = final_retry_payload["title_candidates"]
-                        final_article_text = final_retry_payload["article_text"]
-
-                        st.session_state.title_candidates = final_titles
-
-                        st.session_state.final_article = final_article_text
-                        append_article_version(st.session_state.final_article, "自动驾驶定稿", role=chosen_editor, model=selected_model)
-                        save_draft()
-
-                        if enable_script:
-                            st.write("🎬 正在同步生成口播与纯中文分镜脚本...")
-                            script_sys_prompt = get_script_sys_prompt(script_duration)
-                            st.session_state.spoken_script = call_llm(
-                                api_key=api_key, base_url=current_base_url, model_name=selected_model,
-                                system_prompt=script_sys_prompt,
-                                user_content=f"【请将以下深度文章转化为供剪映AI解析的{script_duration}口播与分镜脚本】：\n\n{st.session_state.final_article}"
-                            )
-                        else:
-                            st.session_state.spoken_script = ""
-
-                        status.update(label="🎉 全自动驾驶完成！即将跳转定稿页。", state="complete", expanded=False)
-
-                    notify_step_completed(defer_until_rerun=True)
-                    go_to_step(6)
+            if auto_drive_clicked:
+                if is_ui_preview_mode():
+                    apply_ui_preview_snapshot(6, notice="已直接切到 Step 6 的完整交付预览。测试模式下不会执行真实自动驾驶流程。")
                     st.rerun()
+                if not api_key:
+                    st.error("⚠️ 请先在左侧边栏输入 API Key！")
+                    st.stop()
+                default_autodrive_config = build_autodrive_default_config(
+                    prompts_data,
+                    available_models,
+                    de_ai_models=DE_AI_MODELS,
+                    selected_model=selected_model,
+                )
+                apply_autodrive_config_to_session(default_autodrive_config)
+                st.session_state.autodrive_config_open = True
+                save_draft()
+                st.rerun()
+
+            if st.session_state.get("autodrive_config_open"):
+                current_autodrive_config = normalize_autodrive_config(
+                    {
+                        "target_words": st.session_state.get("autodrive_target_words", 1500),
+                        "editor_role": st.session_state.get("autodrive_editor_role", ""),
+                        "editor_model": st.session_state.get("autodrive_editor_model", "") or selected_model,
+                        "reviewer_role": st.session_state.get("autodrive_reviewer_role", ""),
+                        "reviewer_model": st.session_state.get("autodrive_reviewer_model", "") or selected_model,
+                        "revision_role": st.session_state.get("autodrive_revision_role", ""),
+                        "revision_model": st.session_state.get("autodrive_revision_model", "") or selected_model,
+                        "de_ai_model": st.session_state.get("autodrive_de_ai_model", ""),
+                        "de_ai_variant": st.session_state.get("autodrive_de_ai_variant", DE_AI_VARIANT_DEFAULT),
+                        "publish_word": st.session_state.get("autodrive_publish_word", True),
+                        "publish_feishu": st.session_state.get("autodrive_publish_feishu", True),
+                        "push_feishu_group": st.session_state.get("autodrive_push_feishu_group", False),
+                    },
+                    prompts_data,
+                    available_models,
+                    de_ai_models=DE_AI_MODELS,
+                )
+                apply_autodrive_config_to_session(current_autodrive_config)
+
+                reviewer_options = list(get_reviewer_prompt_map(prompts_data).keys())
+                editor_options = list((prompts_data.get("editors", {}) or {}).keys())
+
+                with st.container(border=True):
+                    render_section_intro("自动驾驶配置确认", "先锁定这轮自动驾驶的角色、模型和交付动作，再启动完整自动化流程。", "Auto")
+                    render_context_strip([
+                        f"目标字数：约 {st.session_state.get('autodrive_target_words', 1500)} 字",
+                        f"主编：{st.session_state.get('autodrive_editor_role', '') or '未设置'}",
+                        f"审稿：{st.session_state.get('autodrive_reviewer_role', '') or '未设置'}",
+                        f"修改稿：{st.session_state.get('autodrive_revision_role', '') or '未设置'}",
+                        f"去 AI：{st.session_state.get('autodrive_de_ai_model', '') or '未设置'} / {st.session_state.get('autodrive_de_ai_variant', DE_AI_VARIANT_DEFAULT)}",
+                    ])
+
+                    config_col1, config_col2 = st.columns(2)
+                    with config_col1:
+                        st.slider("全稿目标字数", min_value=200, max_value=5000, step=100, key="autodrive_target_words")
+                        st.selectbox("主编角色", editor_options, key="autodrive_editor_role")
+                        st.selectbox("主编模型", available_models, key="autodrive_editor_model")
+                        st.selectbox("审稿角色", reviewer_options, key="autodrive_reviewer_role")
+                        st.selectbox("审稿模型", available_models, key="autodrive_reviewer_model")
+                    with config_col2:
+                        st.selectbox("修改稿人员", editor_options, key="autodrive_revision_role")
+                        st.selectbox("修改稿模型", available_models, key="autodrive_revision_model")
+                        st.selectbox("去 AI 模型", DE_AI_MODELS, key="autodrive_de_ai_model")
+                        st.selectbox("去 AI 风格版本", DE_AI_VARIANTS, key="autodrive_de_ai_variant")
+                        st.checkbox("自动生成 Word 定稿文件", key="autodrive_publish_word")
+                        st.checkbox("自动发布飞书云文档", key="autodrive_publish_feishu")
+                        st.checkbox("自动推送飞书群", key="autodrive_push_feishu_group")
+
+                    confirm_col, cancel_col = st.columns(2)
+                    with confirm_col:
+                        if st.button("确认配置并启动自动驾驶", key="confirm_autodrive_phase1", type="primary", use_container_width=True):
+                            save_draft()
+                            run_autodrive_phase1(
+                                api_key,
+                                current_base_url,
+                                prompts_data,
+                                available_models,
+                                selected_model,
+                                enable_script=enable_script,
+                                script_duration=script_duration,
+                            )
+                    with cancel_col:
+                        if st.button("取消自动驾驶", key="cancel_autodrive_phase1", use_container_width=True):
+                            st.session_state.autodrive_config_open = False
+                            save_draft()
+                            st.rerun()
 # --- Step 2 (手动模式) ---
 elif st.session_state.current_step == 2:
     render_section_intro("初稿生成", "选择合适的编辑角色，确认当前模型与写作规范，然后输出首版文章。", "Step 02")
