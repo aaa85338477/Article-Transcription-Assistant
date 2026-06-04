@@ -10,6 +10,7 @@ TARGET_FUNCTIONS = {
     "sync_reviewer_prompt_config",
     "build_autodrive_default_config",
     "normalize_autodrive_config",
+    "apply_autodrive_config_to_session",
     "sanitize_editor_prompt",
     "build_modification_role_instruction",
 }
@@ -149,6 +150,37 @@ class AutodrivePhase1Tests(unittest.TestCase):
         self.assertFalse(normalized["publish_feishu"])
         self.assertTrue(normalized["push_feishu_group"])
 
+    def test_normalize_autodrive_config_forces_revision_to_follow_editor(self):
+        prompts_data = {
+            "editors": {"发行主编": "prompt-a", "深度作者": "prompt-b"},
+            "reviewers": {"严审编辑": "review-a"},
+            "default_reviewer_role": "严审编辑",
+        }
+        normalized = self.helpers.normalize_autodrive_config(
+            {
+                "target_words": 1800,
+                "editor_role": "深度作者",
+                "editor_model": "gpt-5.5",
+                "reviewer_role": "严审编辑",
+                "reviewer_model": "qwen3.6-plus",
+                "revision_role": "发行主编",
+                "revision_model": "qwen3.6-plus",
+                "de_ai_model": "glm-5",
+                "de_ai_variant": self.helpers.DE_AI_VARIANT_DEFAULT,
+                "publish_word": True,
+                "publish_feishu": True,
+                "push_feishu_group": False,
+            },
+            prompts_data,
+            available_models=["qwen3.6-plus", "gpt-5.5"],
+            de_ai_models=["deepseek-v4-pro", "glm-5"],
+        )
+
+        self.assertEqual(normalized["editor_role"], "深度作者")
+        self.assertEqual(normalized["editor_model"], "gpt-5.5")
+        self.assertEqual(normalized["revision_role"], "深度作者")
+        self.assertEqual(normalized["revision_model"], "gpt-5.5")
+
     def test_build_modification_role_instruction_includes_reviser_persona(self):
         role_block = self.helpers.build_modification_role_instruction(
             "改稿主编",
@@ -157,6 +189,67 @@ class AutodrivePhase1Tests(unittest.TestCase):
 
         self.assertIn("当前修改稿执行角色：改稿主编", role_block)
         self.assertIn("你偏好更冷静、短句、判断先行。", role_block)
+
+    def test_apply_autodrive_config_can_skip_widget_state_sync(self):
+        self.helpers.st.session_state.update(
+            {
+                "autodrive_target_words": 1500,
+                "autodrive_editor_role": "旧编辑A",
+                "autodrive_editor_model": "old-editor-model",
+                "autodrive_reviewer_role": "旧审稿人",
+                "autodrive_reviewer_model": "old-reviewer-model",
+                "autodrive_revision_role": "旧改稿人",
+                "autodrive_revision_model": "old-revision-model",
+                "autodrive_de_ai_model": "old-deai-model",
+                "autodrive_de_ai_variant": self.helpers.DE_AI_VARIANT_DEFAULT,
+                "autodrive_publish_word": True,
+                "autodrive_publish_feishu": True,
+                "autodrive_push_feishu_group": False,
+                "selected_role": "旧编辑A",
+                "selected_role_widget": "旧编辑A",
+                "selected_reviewer": "旧审稿人",
+                "selected_reviewer_widget": "旧审稿人",
+                "target_article_words": 1500,
+                "target_article_words_slider": 1500,
+                "de_ai_model": "old-deai-model",
+                "quality_gate_retry_model": "old-deai-model",
+                "de_ai_variant": self.helpers.DE_AI_VARIANT_DEFAULT,
+            }
+        )
+
+        self.helpers.apply_autodrive_config_to_session(
+            {
+                "target_words": 2200,
+                "editor_role": "新编辑B",
+                "editor_model": "new-editor-model",
+                "reviewer_role": "新审稿人",
+                "reviewer_model": "new-reviewer-model",
+                "revision_role": "新改稿人",
+                "revision_model": "new-revision-model",
+                "de_ai_model": "new-deai-model",
+                "de_ai_variant": self.helpers.DE_AI_VARIANT_CHAT,
+                "publish_word": False,
+                "publish_feishu": False,
+                "push_feishu_group": True,
+            },
+            sync_widget_state=False,
+        )
+
+        self.assertEqual(self.helpers.st.session_state["autodrive_target_words"], 1500)
+        self.assertEqual(self.helpers.st.session_state["autodrive_editor_role"], "旧编辑A")
+        self.assertEqual(self.helpers.st.session_state["autodrive_reviewer_role"], "旧审稿人")
+        self.assertEqual(self.helpers.st.session_state["autodrive_de_ai_model"], "old-deai-model")
+        self.assertEqual(self.helpers.st.session_state["autodrive_publish_feishu"], True)
+
+        self.assertEqual(self.helpers.st.session_state["selected_role"], "新编辑B")
+        self.assertEqual(self.helpers.st.session_state["selected_role_widget"], "新编辑B")
+        self.assertEqual(self.helpers.st.session_state["selected_reviewer"], "新审稿人")
+        self.assertEqual(self.helpers.st.session_state["selected_reviewer_widget"], "新审稿人")
+        self.assertEqual(self.helpers.st.session_state["target_article_words"], 2200)
+        self.assertEqual(self.helpers.st.session_state["target_article_words_slider"], 2200)
+        self.assertEqual(self.helpers.st.session_state["de_ai_model"], "new-deai-model")
+        self.assertEqual(self.helpers.st.session_state["quality_gate_retry_model"], "new-deai-model")
+        self.assertEqual(self.helpers.st.session_state["de_ai_variant"], self.helpers.DE_AI_VARIANT_CHAT)
 
 
 if __name__ == "__main__":

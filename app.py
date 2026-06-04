@@ -644,8 +644,8 @@ def normalize_autodrive_config(config, prompts_data, available_models, de_ai_mod
     normalized["editor_model"] = resolve_option(normalized.get("editor_model", ""), available_models)
     normalized["reviewer_role"] = resolve_option(normalized.get("reviewer_role", ""), reviewer_options)
     normalized["reviewer_model"] = resolve_option(normalized.get("reviewer_model", ""), available_models)
-    normalized["revision_role"] = resolve_option(normalized.get("revision_role", ""), editor_options)
-    normalized["revision_model"] = resolve_option(normalized.get("revision_model", ""), available_models)
+    normalized["revision_role"] = normalized["editor_role"]
+    normalized["revision_model"] = normalized["editor_model"]
     normalized["de_ai_model"] = resolve_option(normalized.get("de_ai_model", ""), de_ai_models)
     normalized["de_ai_variant"] = (
         normalized.get("de_ai_variant")
@@ -10904,7 +10904,7 @@ if st.session_state.current_step == 1:
                         f"目标字数：约 {st.session_state.get('autodrive_target_words', 1500)} 字",
                         f"主编：{st.session_state.get('autodrive_editor_role', '') or '未设置'}",
                         f"审稿：{st.session_state.get('autodrive_reviewer_role', '') or '未设置'}",
-                        f"修改稿：{st.session_state.get('autodrive_revision_role', '') or '未设置'}",
+                        f"修稿：沿用主编（{st.session_state.get('autodrive_editor_role', '') or '未设置'}）",
                         f"去 AI：{st.session_state.get('autodrive_de_ai_model', '') or '未设置'} / {st.session_state.get('autodrive_de_ai_variant', DE_AI_VARIANT_DEFAULT)}",
                     ])
 
@@ -10916,8 +10916,13 @@ if st.session_state.current_step == 1:
                         st.selectbox("审稿角色", reviewer_options, key="autodrive_reviewer_role")
                         st.selectbox("审稿模型", available_models, key="autodrive_reviewer_model")
                     with config_col2:
-                        st.selectbox("修改稿人员", editor_options, key="autodrive_revision_role")
-                        st.selectbox("修改稿模型", available_models, key="autodrive_revision_model")
+                        st.markdown("**修改稿人员**")
+                        st.caption("默认沿用主编角色与模型，不再单独选择。")
+                        st.info(
+                            f"将沿用：{st.session_state.get('autodrive_editor_role', '') or '未设置'} / "
+                            f"{st.session_state.get('autodrive_editor_model', '') or '未设置'}",
+                            icon="📝",
+                        )
                         st.selectbox("去 AI 模型", DE_AI_MODELS, key="autodrive_de_ai_model")
                         st.selectbox("去 AI 风格版本", DE_AI_VARIANTS, key="autodrive_de_ai_variant")
                         st.checkbox("自动生成 Word 定稿文件", key="autodrive_publish_word")
