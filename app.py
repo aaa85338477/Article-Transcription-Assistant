@@ -979,6 +979,7 @@ def refresh_task_record(task_record, task_snapshot=None):
     task_record["run_started_at"] = str(task_record.get("run_started_at", "") or "")
     task_record["run_finished_at"] = str(task_record.get("run_finished_at", "") or "")
     task_record["last_run_error"] = str(task_record.get("last_run_error", "") or "")
+    task_record["run_cancel_requested"] = bool(task_record.get("run_cancel_requested", False))
     config_snapshot = task_record.get("autodrive_config_snapshot", {})
     task_record["autodrive_config_snapshot"] = clone_json_data(config_snapshot) if isinstance(config_snapshot, dict) else {}
     if is_placeholder_task_name(task_record.get("name", "")):
@@ -997,6 +998,7 @@ def update_task_run_state(
     started_at=None,
     finished_at=None,
     last_run_error=None,
+    run_cancel_requested=None,
     autodrive_config_snapshot=None,
     task_snapshot=None,
     save_queue=True,
@@ -1027,6 +1029,8 @@ def update_task_run_state(
         task_record["run_finished_at"] = str(finished_at or "")
     if last_run_error is not None:
         task_record["last_run_error"] = str(last_run_error or "")
+    if run_cancel_requested is not None:
+        task_record["run_cancel_requested"] = bool(run_cancel_requested)
     if autodrive_config_snapshot is not None:
         task_record["autodrive_config_snapshot"] = build_autodrive_config_snapshot(autodrive_config_snapshot)
 
@@ -1051,6 +1055,7 @@ def update_task_run_state_on_disk(
     started_at=None,
     finished_at=None,
     last_run_error=None,
+    run_cancel_requested=None,
     autodrive_config_snapshot=None,
     task_snapshot=None,
 ):
@@ -1083,6 +1088,8 @@ def update_task_run_state_on_disk(
         task_record["run_finished_at"] = str(finished_at or "")
     if last_run_error is not None:
         task_record["last_run_error"] = str(last_run_error or "")
+    if run_cancel_requested is not None:
+        task_record["run_cancel_requested"] = bool(run_cancel_requested)
     if autodrive_config_snapshot is not None:
         task_record["autodrive_config_snapshot"] = build_autodrive_config_snapshot(autodrive_config_snapshot)
 
@@ -1227,10 +1234,20 @@ def sync_task_queue_runtime_from_disk():
                 "run_started_at",
                 "run_finished_at",
                 "last_run_error",
+                "run_cancel_requested",
                 "autodrive_config_snapshot",
             )
             for field_name in runtime_fields:
                 local_task[field_name] = clone_json_data(disk_task.get(field_name))
+            active_runtime_state = str(disk_task.get("run_state", "") or "")
+            local_run_owner = str(local_task.get("run_owner_token", "") or "")
+            disk_run_owner = str(disk_task.get("run_owner_token", "") or "")
+            should_sync_snapshot = (
+                active_runtime_state in {"queued", "running", "completed", "failed", "cancelled"}
+                and (not local_run_owner or local_run_owner == disk_run_owner)
+            )
+            if should_sync_snapshot:
+                local_task["snapshot"] = clone_json_data(disk_task.get("snapshot", {}) or {})
             merged_tasks.append(local_task)
         else:
             merged_tasks.append(disk_task)
@@ -1349,6 +1366,43 @@ def is_background_autodrive_running(task_id=""):
         return bool(future and not future.done())
 
 
+def request_background_autodrive_cancel(task_id):
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        return False, "缺少任务 ID。"
+    task_record = get_task_by_id(clean_task_id)
+    if not task_record:
+        return False, "未找到对应任务。"
+    runtime_state = str(task_record.get("run_state", "") or "idle")
+    if runtime_state not in AUTODRIVE_ACTIVE_RUN_STATES:
+        return False, "当前任务没有正在运行的后台自动驾驶。"
+    if bool(task_record.get("run_cancel_requested", False)):
+        return False, "当前任务已经发出取消请求，等待本轮阶段收尾。"
+    update_task_run_state(
+        clean_task_id,
+        run_cancel_requested=True,
+        task_snapshot=clone_json_data(task_record.get("snapshot", {}) or {}),
+    )
+    return True, "已请求停止后台自动驾驶，当前阶段完成后会尽快收尾。"
+
+
+def should_cancel_background_autodrive(task_id, run_owner_token):
+    clean_task_id = str(task_id or "").strip()
+    owner_token = str(run_owner_token or "").strip()
+    if not clean_task_id or not owner_token:
+        return False
+    try:
+        queue_data = read_task_queue_data() or {}
+    except Exception:
+        return False
+    tasks = [item for item in queue_data.get("tasks", []) if isinstance(item, dict)]
+    task_record = next((item for item in tasks if item.get("id") == clean_task_id), None)
+    if not task_record:
+        return False
+    refresh_task_record(task_record)
+    return bool(task_record.get("run_cancel_requested", False)) and str(task_record.get("run_owner_token", "") or "") == owner_token
+
+
 def load_headless_autodrive_runtime():
     source = Path(__file__).read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(Path(__file__).resolve()))
@@ -1426,6 +1480,7 @@ def _background_autodrive_worker(task_id, run_owner_token, launch_payload):
             run_owner_token=run_owner_token,
             finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             last_run_error=f"后台自动驾驶失败：{exc}",
+            run_cancel_requested=False,
         )
         raise
     finally:
@@ -1469,6 +1524,7 @@ def start_background_autodrive_job(task_id, launch_payload, autodrive_config_sna
             started_at="",
             finished_at="",
             last_run_error="",
+            run_cancel_requested=False,
             autodrive_config_snapshot=autodrive_config_snapshot or {},
             task_snapshot=snapshot,
         )
@@ -7721,6 +7777,63 @@ def render_task_queue_panel():
                 selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
             st.markdown("</div>", unsafe_allow_html=True)
 
+            active_snapshot = active_task.get("snapshot", {}) or {}
+            active_docx_path = str(active_snapshot.get("autodrive_last_docx_path", "") or "").strip()
+            active_docx_name = str(active_snapshot.get("autodrive_last_docx_file_name", "") or "").strip() or "autodrive-output.docx"
+            active_feishu_url = str(active_snapshot.get("feishu_doc_url", "") or "").strip()
+            active_feishu_error = str(active_snapshot.get("feishu_publish_error", "") or "").strip()
+            active_runtime_error = str(active_task.get("last_run_error", "") or "").strip()
+            active_runtime_started_at = str(active_task.get("run_started_at", "") or "").strip()
+            active_runtime_finished_at = str(active_task.get("run_finished_at", "") or "").strip()
+
+            if runtime_state in AUTODRIVE_ACTIVE_RUN_STATES or runtime_state in {"completed", "failed", "cancelled"}:
+                st.markdown("<div class='queue-field-shell'>", unsafe_allow_html=True)
+                st.markdown("<p class='queue-subsection-label'>后台自动驾驶</p>", unsafe_allow_html=True)
+                if runtime_state in AUTODRIVE_ACTIVE_RUN_STATES:
+                    state_caption = f"当前阶段：{stage_labels.get(runtime_stage, runtime_stage or '运行中')}"
+                    if active_runtime_started_at:
+                        state_caption += f" | 启动：{active_runtime_started_at}"
+                    st.info(state_caption)
+                    stop_col, stop_hint_col = st.columns([1, 2.2])
+                    with stop_col:
+                        if st.button("停止后台自动驾驶", key="cancel_background_autodrive", use_container_width=True):
+                            cancelled, cancel_message = request_background_autodrive_cancel(active_task_id)
+                            if cancelled:
+                                st.session_state[TASK_QUEUE_NOTICE_KEY] = cancel_message
+                                st.rerun()
+                            st.warning(cancel_message)
+                    with stop_hint_col:
+                        st.caption("停止请求会在当前阶段完成后生效，不会粗暴打断正在进行的模型调用。")
+                elif runtime_state == "completed":
+                    st.success("当前任务的后台自动驾驶已完成。")
+                elif runtime_state == "failed":
+                    st.warning(f"后台自动驾驶失败：{active_runtime_error or '请检查任务日志。'}")
+                elif runtime_state == "cancelled":
+                    st.warning("后台自动驾驶已停止，可继续手动处理或重新发起。")
+
+                result_cols = st.columns([1, 1.2])
+                with result_cols[0]:
+                    if active_docx_path and os.path.exists(active_docx_path):
+                        with open(active_docx_path, "rb") as file_obj:
+                            st.download_button(
+                                "下载后台生成的 Word",
+                                data=file_obj.read(),
+                                file_name=active_docx_name,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"download_bg_docx_{active_task_id}",
+                                use_container_width=True,
+                            )
+                    elif runtime_state == "completed":
+                        st.caption("当前任务没有可下载的后台 Word 文件。")
+                with result_cols[1]:
+                    if active_feishu_url:
+                        st.markdown(f"[打开后台生成的飞书文档]({active_feishu_url})")
+                    elif active_feishu_error:
+                        st.caption(f"飞书发布：{active_feishu_error}")
+                if active_runtime_finished_at and runtime_state in {"completed", "failed", "cancelled"}:
+                    st.caption(f"最近收尾时间：{active_runtime_finished_at}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
             reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
             selected_status_key = None if selected_filter == "全部" else reverse_status_map.get(selected_filter)
             search_query = st.session_state.get("task_search_query", "")
@@ -9133,6 +9246,26 @@ def run_autodrive_phase1(
     run_owner_token="",
     background_mode=False,
 ):
+    def cancel_if_requested(stage_label):
+        if not background_mode or not active_task_id or not run_owner_token:
+            return False
+        if not should_cancel_background_autodrive(active_task_id, run_owner_token):
+            return False
+        st.session_state.last_ai_error = ""
+        save_draft()
+        persist_active_task_snapshot()
+        update_task_run_state(
+            active_task_id,
+            run_state="cancelled",
+            run_stage=stage_label,
+            run_owner_token=run_owner_token,
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            last_run_error="",
+            run_cancel_requested=False,
+            task_snapshot=build_draft_data(),
+        )
+        return True
+
     config = {
         "target_words": st.session_state.get("autodrive_target_words", 1500),
         "editor_role": st.session_state.get("autodrive_editor_role", ""),
@@ -9176,6 +9309,7 @@ def run_autodrive_phase1(
             started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             finished_at="",
             last_run_error="",
+            run_cancel_requested=False,
             autodrive_config_snapshot=build_autodrive_config_snapshot(normalized),
             task_snapshot=build_draft_data(),
         )
@@ -9230,6 +9364,8 @@ def run_autodrive_phase1(
             current_run_stage = "draft"
             if active_task_id:
                 update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+            if cancel_if_requested(current_run_stage):
+                return True
             mark_ai_stage_started("draft_generation")
             st.write("正在生成初稿...")
             final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
@@ -9279,10 +9415,14 @@ def run_autodrive_phase1(
             save_draft()
             if active_task_id:
                 persist_active_task_snapshot()
+            if cancel_if_requested(current_run_stage):
+                return True
 
             current_run_stage = "review"
             if active_task_id:
                 update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+            if cancel_if_requested(current_run_stage):
+                return True
             mark_ai_stage_started("review_generation")
             st.write("正在执行严格审稿...")
             final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
@@ -9311,10 +9451,14 @@ def run_autodrive_phase1(
             save_draft()
             if active_task_id:
                 persist_active_task_snapshot()
+            if cancel_if_requested(current_run_stage):
+                return True
 
             current_run_stage = "revision"
             if active_task_id:
                 update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+            if cancel_if_requested(current_run_stage):
+                return True
             mark_ai_stage_started("modification_generation")
             st.write("正在自动接受整套审稿意见并生成修改稿...")
             modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
@@ -9363,10 +9507,14 @@ def run_autodrive_phase1(
             save_draft()
             if active_task_id:
                 persist_active_task_snapshot()
+            if cancel_if_requested(current_run_stage):
+                return True
 
             current_run_stage = "de_ai"
             if active_task_id:
                 update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+            if cancel_if_requested(current_run_stage):
+                return True
             mark_ai_stage_started("de_ai_generation")
             st.write("正在进入去 AI 定稿与高亮阅读版生成...")
             de_ai_banned_terms, de_ai_default_replacements, _, _ = resolve_active_term_rules("de_ai")
@@ -9455,10 +9603,14 @@ def run_autodrive_phase1(
             save_draft()
             if active_task_id:
                 persist_active_task_snapshot()
+            if cancel_if_requested(current_run_stage):
+                return True
 
             current_run_stage = "delivery"
             if active_task_id:
                 update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+            if cancel_if_requested(current_run_stage):
+                return True
             if publish_word:
                 st.write("正在生成 Word 定稿文件...")
                 docx_data = create_delivery_docx(
@@ -9512,6 +9664,7 @@ def run_autodrive_phase1(
                     run_owner_token=run_owner_token,
                     finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     last_run_error="",
+                    run_cancel_requested=False,
                     task_snapshot=build_draft_data(),
                 )
             status.update(label="全自动驾驶执行完成，即将跳转到交付工作台。", state="complete", expanded=False)
@@ -9535,6 +9688,7 @@ def run_autodrive_phase1(
                 run_owner_token=run_owner_token,
                 finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 last_run_error=st.session_state.last_ai_error,
+                run_cancel_requested=False,
                 task_snapshot=build_draft_data(),
             )
         st.error(f"全自动驾驶执行失败：{exc}")

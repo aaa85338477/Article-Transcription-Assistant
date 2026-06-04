@@ -39,6 +39,8 @@ TARGET_FUNCTIONS = {
     "snapshots_equivalent",
     "is_task_action_blocked",
     "build_task_interrupt_notice",
+    "request_background_autodrive_cancel",
+    "should_cancel_background_autodrive",
     "delete_task",
     "bulk_delete_tasks",
     "auto_archive_completed_tasks",
@@ -53,6 +55,7 @@ TARGET_ASSIGNMENTS = {
     "PURE_TITLE_MARKER",
     "PURE_BODY_MARKER",
     "HIGHLIGHT_MARKER",
+    "AUTODRIVE_ACTIVE_RUN_STATES",
 }
 
 
@@ -394,6 +397,7 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertEqual(refreshed["run_stage"], "")
         self.assertEqual(refreshed["run_owner_token"], "")
         self.assertEqual(refreshed["last_run_error"], "")
+        self.assertEqual(refreshed["run_cancel_requested"], False)
         self.assertEqual(refreshed["autodrive_config_snapshot"], {})
 
     def test_update_task_run_state_tracks_stage_and_config_snapshot(self):
@@ -448,6 +452,7 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertEqual(task_record["run_stage"], "review")
         self.assertEqual(task_record["run_owner_token"], "token-123")
         self.assertEqual(task_record["run_started_at"], "2026-04-23 10:00:00")
+        self.assertEqual(task_record["run_cancel_requested"], False)
         self.assertEqual(task_record["autodrive_config_snapshot"]["editor_role"], "发行主编")
         self.assertEqual(task_record["snapshot"]["current_step"], 3)
         self.assertEqual(task_record["snapshot"]["draft_article"], "Updated draft")
@@ -510,6 +515,7 @@ class TaskQueueHelperTests(unittest.TestCase):
         task_two = next(item for item in persisted["tasks"] if item["id"] == "T002")
         self.assertEqual(task_one["run_state"], "running")
         self.assertEqual(task_one["run_stage"], "draft")
+        self.assertEqual(task_one["run_cancel_requested"], False)
         self.assertEqual(task_one["snapshot"]["draft_article"], "Updated A")
         self.assertEqual(task_two["snapshot"]["draft_article"], "B")
 
@@ -540,6 +546,51 @@ class TaskQueueHelperTests(unittest.TestCase):
         task_one = written_payloads[0]["tasks"][0]
         self.assertEqual(task_one["snapshot"]["final_article"], "Final body")
         self.assertEqual(task_one["current_step"], 6)
+
+    def test_request_background_autodrive_cancel_marks_running_task(self):
+        saved = []
+        self.helpers.save_task_queue_state = lambda: saved.append("saved")
+        self.helpers.st.session_state.update({
+            "task_queue": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "run_state": "running",
+                    "run_owner_token": "token-1",
+                    "snapshot": {"current_step": 2, "draft_article": "A"},
+                }
+            ],
+        })
+        self.helpers.get_task_by_id = lambda task_id: next(
+            (task for task in self.helpers.st.session_state.get("task_queue", []) if task.get("id") == task_id),
+            None,
+        )
+
+        ok, message = self.helpers.request_background_autodrive_cancel("T001")
+
+        self.assertTrue(ok)
+        self.assertIn("停止", message)
+        task_record = self.helpers.st.session_state["task_queue"][0]
+        self.assertTrue(task_record["run_cancel_requested"])
+        self.assertIn("saved", saved)
+
+    def test_should_cancel_background_autodrive_requires_matching_owner_token(self):
+        queue_payload = {
+            "tasks": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "run_state": "running",
+                    "run_owner_token": "token-bg",
+                    "run_cancel_requested": True,
+                    "snapshot": {"current_step": 2},
+                }
+            ]
+        }
+        self.helpers.read_task_queue_data = lambda: json.loads(json.dumps(queue_payload, ensure_ascii=False))
+
+        self.assertTrue(self.helpers.should_cancel_background_autodrive("T001", "token-bg"))
+        self.assertFalse(self.helpers.should_cancel_background_autodrive("T001", "other-token"))
 
     def test_queue_metrics_and_batch_export_include_completed_artifacts(self):
         tasks = [
