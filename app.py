@@ -658,6 +658,25 @@ def normalize_autodrive_config(config, prompts_data, available_models, de_ai_mod
     return normalized
 
 
+def build_autodrive_config_snapshot(config):
+    source = dict(config or {})
+    default_variant = globals().get("DE_AI_VARIANT_DEFAULT", "标准版")
+    return {
+        "target_words": source.get("target_words", 1500),
+        "editor_role": source.get("editor_role", ""),
+        "editor_model": source.get("editor_model", ""),
+        "reviewer_role": source.get("reviewer_role", ""),
+        "reviewer_model": source.get("reviewer_model", ""),
+        "revision_role": source.get("revision_role", ""),
+        "revision_model": source.get("revision_model", ""),
+        "de_ai_model": source.get("de_ai_model", ""),
+        "de_ai_variant": source.get("de_ai_variant", default_variant),
+        "publish_word": bool(source.get("publish_word", True)),
+        "publish_feishu": bool(source.get("publish_feishu", True)),
+        "push_feishu_group": bool(source.get("push_feishu_group", False)),
+    }
+
+
 def build_autodrive_default_config(prompts_data, available_models, de_ai_models=None, selected_model=""):
     selected_model = (selected_model or "").strip()
     current_editor_role = str(st.session_state.get("selected_role", "") or "").strip()
@@ -944,10 +963,67 @@ def refresh_task_record(task_record, task_snapshot=None):
     task_record["brief_topic"] = snapshot.get("brief_topic", "") or ""
     task_record["brief_sources"] = clone_json_data(snapshot.get("brief_sources", []) or [])
     task_record["brief_mode"] = snapshot.get("writing_brief_mode", "structured_text") or "structured_text"
+    task_record["run_mode"] = str(task_record.get("run_mode", "") or "manual")
+    task_record["run_state"] = str(task_record.get("run_state", "") or "idle")
+    task_record["run_stage"] = str(task_record.get("run_stage", "") or "")
+    task_record["run_owner_token"] = str(task_record.get("run_owner_token", "") or "")
+    task_record["run_started_at"] = str(task_record.get("run_started_at", "") or "")
+    task_record["run_finished_at"] = str(task_record.get("run_finished_at", "") or "")
+    task_record["last_run_error"] = str(task_record.get("last_run_error", "") or "")
+    config_snapshot = task_record.get("autodrive_config_snapshot", {})
+    task_record["autodrive_config_snapshot"] = clone_json_data(config_snapshot) if isinstance(config_snapshot, dict) else {}
     if is_placeholder_task_name(task_record.get("name", "")):
         fallback_name = build_task_fallback_name(task_record.get('id', ''))
         task_record["name"] = build_task_title(snapshot, fallback_name=fallback_name)
     return task_record
+
+
+def update_task_run_state(
+    task_id,
+    *,
+    run_mode=None,
+    run_state=None,
+    run_stage=None,
+    run_owner_token=None,
+    started_at=None,
+    finished_at=None,
+    last_run_error=None,
+    autodrive_config_snapshot=None,
+    task_snapshot=None,
+    save_queue=True,
+):
+    if bool(st.session_state.get("ui_preview_mode_enabled", False)):
+        return False
+    init_task_queue_state()
+    task_record = get_task_by_id(task_id)
+    if not task_record:
+        return False
+
+    if task_snapshot is not None:
+        refresh_task_record(task_record, task_snapshot)
+    else:
+        refresh_task_record(task_record)
+
+    if run_mode is not None:
+        task_record["run_mode"] = str(run_mode or "manual")
+    if run_state is not None:
+        task_record["run_state"] = str(run_state or "idle")
+    if run_stage is not None:
+        task_record["run_stage"] = str(run_stage or "")
+    if run_owner_token is not None:
+        task_record["run_owner_token"] = str(run_owner_token or "")
+    if started_at is not None:
+        task_record["run_started_at"] = str(started_at or "")
+    if finished_at is not None:
+        task_record["run_finished_at"] = str(finished_at or "")
+    if last_run_error is not None:
+        task_record["last_run_error"] = str(last_run_error or "")
+    if autodrive_config_snapshot is not None:
+        task_record["autodrive_config_snapshot"] = build_autodrive_config_snapshot(autodrive_config_snapshot)
+
+    if save_queue:
+        save_task_queue_state()
+    return True
 
 
 def read_task_queue_data():
@@ -8648,7 +8724,41 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
     st.session_state.last_ai_error = ""
     save_draft()
 
+    active_task_id = ""
+    run_owner_token = ""
+    current_run_stage = "preflight"
+    init_task_queue_state()
+    active_task_id = st.session_state.get("active_task_id", "")
+    if not active_task_id:
+        ensure_task_queue_bootstrap()
+        active_task_id = st.session_state.get("active_task_id", "")
+    if active_task_id:
+        persist_active_task_snapshot()
+        run_owner_token = f"autodrive-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        update_task_run_state(
+            active_task_id,
+            run_mode="autodrive",
+            run_state="running",
+            run_stage=current_run_stage,
+            run_owner_token=run_owner_token,
+            started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            finished_at="",
+            last_run_error="",
+            autodrive_config_snapshot=build_autodrive_config_snapshot(normalized),
+            task_snapshot=build_draft_data(),
+        )
+
     if not (st.session_state.get("source_content", "") or "").strip():
+        if active_task_id:
+            update_task_run_state(
+                active_task_id,
+                run_state="failed",
+                run_stage=current_run_stage,
+                run_owner_token=run_owner_token,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                last_run_error="当前任务还没有可用的素材正文，无法启动全自动驾驶。",
+                task_snapshot=build_draft_data(),
+            )
         st.error("当前任务还没有可用的素材正文，无法启动全自动驾驶。")
         return False
 
@@ -8685,6 +8795,9 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
             st.write(f"已确认修改稿人员：**{revision_role}**（{revision_model}）")
             st.write(f"已确认去 AI 模型：**{de_ai_model}** / {de_ai_variant}")
 
+            current_run_stage = "draft"
+            if active_task_id:
+                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
             mark_ai_stage_started("draft_generation")
             st.write("正在生成初稿...")
             final_editor_system_prompt = build_editor_system_prompt(editor_prompt, global_instruction)
@@ -8732,7 +8845,12 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
             append_article_version(st.session_state.draft_article, "自动驾驶初稿", role=editor_role, model=editor_model)
             checkpoint_ai_stage("draft_generation", target_step=3)
             save_draft()
+            if active_task_id:
+                persist_active_task_snapshot()
 
+            current_run_stage = "review"
+            if active_task_id:
+                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
             mark_ai_stage_started("review_generation")
             st.write("正在执行严格审稿...")
             final_reviewer_system_prompt = build_reviewer_system_prompt(reviewer_prompt, anti_hallucination_instruction)
@@ -8759,7 +8877,12 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
             ]
             checkpoint_ai_stage("review_generation", target_step=4)
             save_draft()
+            if active_task_id:
+                persist_active_task_snapshot()
 
+            current_run_stage = "revision"
+            if active_task_id:
+                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
             mark_ai_stage_started("modification_generation")
             st.write("正在自动接受整套审稿意见并生成修改稿...")
             modification_banned_terms, modification_default_replacements, _, _ = resolve_active_term_rules("modification")
@@ -8806,7 +8929,12 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
             append_article_version(st.session_state.modified_article, "自动驾驶修改稿", role=revision_role, model=revision_model)
             checkpoint_ai_stage("modification_generation", target_step=5)
             save_draft()
+            if active_task_id:
+                persist_active_task_snapshot()
 
+            current_run_stage = "de_ai"
+            if active_task_id:
+                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
             mark_ai_stage_started("de_ai_generation")
             st.write("正在进入去 AI 定稿与高亮阅读版生成...")
             de_ai_banned_terms, de_ai_default_replacements, _, _ = resolve_active_term_rules("de_ai")
@@ -8893,7 +9021,12 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
 
             checkpoint_ai_stage("de_ai_generation", target_step=6)
             save_draft()
+            if active_task_id:
+                persist_active_task_snapshot()
 
+            current_run_stage = "delivery"
+            if active_task_id:
+                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
             if publish_word:
                 st.write("正在生成 Word 定稿文件...")
                 docx_data = create_delivery_docx(
@@ -8938,6 +9071,17 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
                     st.warning(f"飞书群推送失败：{push_msg}")
 
             save_draft()
+            if active_task_id:
+                persist_active_task_snapshot()
+                update_task_run_state(
+                    active_task_id,
+                    run_state="completed",
+                    run_stage=current_run_stage,
+                    run_owner_token=run_owner_token,
+                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    last_run_error="",
+                    task_snapshot=build_draft_data(),
+                )
             status.update(label="全自动驾驶执行完成，即将跳转到交付工作台。", state="complete", expanded=False)
 
         notify_step_completed(defer_until_rerun=True)
@@ -8947,6 +9091,17 @@ def run_autodrive_phase1(api_key, current_base_url, prompts_data, available_mode
     except Exception as exc:
         st.session_state.last_ai_error = f"全自动驾驶失败：{exc}"
         save_draft()
+        if active_task_id:
+            persist_active_task_snapshot()
+            update_task_run_state(
+                active_task_id,
+                run_state="failed",
+                run_stage=current_run_stage,
+                run_owner_token=run_owner_token,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                last_run_error=st.session_state.last_ai_error,
+                task_snapshot=build_draft_data(),
+            )
         st.error(f"全自动驾驶执行失败：{exc}")
         return False
 

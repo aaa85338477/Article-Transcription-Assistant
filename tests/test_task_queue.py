@@ -27,8 +27,10 @@ TARGET_FUNCTIONS = {
     "filter_tasks_by_query",
     "build_blank_task_snapshot",
     "build_batch_export_markdown",
+    "build_autodrive_config_snapshot",
     "is_placeholder_task_name",
     "refresh_task_record",
+    "update_task_run_state",
     "draft_has_meaningful_content",
     "snapshots_equivalent",
     "is_task_action_blocked",
@@ -368,6 +370,82 @@ class TaskQueueHelperTests(unittest.TestCase):
 
         self.assertEqual(refreshed["name"], self.helpers.build_task_fallback_name("T002"))
         self.assertEqual(refreshed["status"], "pending")
+
+    def test_refresh_task_record_initializes_runtime_fields(self):
+        task_record = {
+            "id": "T003",
+            "name": "Task Three",
+            "snapshot": {
+                "current_step": 2,
+                "draft_article": "Draft",
+            },
+        }
+
+        refreshed = self.helpers.refresh_task_record(task_record)
+
+        self.assertEqual(refreshed["run_mode"], "manual")
+        self.assertEqual(refreshed["run_state"], "idle")
+        self.assertEqual(refreshed["run_stage"], "")
+        self.assertEqual(refreshed["run_owner_token"], "")
+        self.assertEqual(refreshed["last_run_error"], "")
+        self.assertEqual(refreshed["autodrive_config_snapshot"], {})
+
+    def test_update_task_run_state_tracks_stage_and_config_snapshot(self):
+        calls = []
+        self.helpers.save_task_queue_state = lambda: calls.append("saved")
+        self.helpers.st.session_state.update({
+            "task_queue": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "snapshot": {
+                        "current_step": 2,
+                        "draft_article": "Draft body",
+                    },
+                }
+            ],
+            "active_task_id": "T001",
+        })
+
+        updated = self.helpers.update_task_run_state(
+            "T001",
+            run_mode="autodrive",
+            run_state="running",
+            run_stage="review",
+            run_owner_token="token-123",
+            started_at="2026-04-23 10:00:00",
+            last_run_error="",
+            autodrive_config_snapshot=self.helpers.build_autodrive_config_snapshot({
+                "target_words": 1800,
+                "editor_role": "发行主编",
+                "editor_model": "qwen3.6-plus",
+                "reviewer_role": "严审编辑",
+                "reviewer_model": "gpt-5.5",
+                "revision_role": "发行主编",
+                "revision_model": "qwen3.6-plus",
+                "de_ai_model": "deepseek-v4-pro",
+                "de_ai_variant": "自然唠嗑版",
+                "publish_word": True,
+                "publish_feishu": True,
+                "push_feishu_group": False,
+            }),
+            task_snapshot={
+                "current_step": 3,
+                "draft_article": "Updated draft",
+            },
+        )
+
+        self.assertTrue(updated)
+        task_record = self.helpers.st.session_state["task_queue"][0]
+        self.assertEqual(task_record["run_mode"], "autodrive")
+        self.assertEqual(task_record["run_state"], "running")
+        self.assertEqual(task_record["run_stage"], "review")
+        self.assertEqual(task_record["run_owner_token"], "token-123")
+        self.assertEqual(task_record["run_started_at"], "2026-04-23 10:00:00")
+        self.assertEqual(task_record["autodrive_config_snapshot"]["editor_role"], "发行主编")
+        self.assertEqual(task_record["snapshot"]["current_step"], 3)
+        self.assertEqual(task_record["snapshot"]["draft_article"], "Updated draft")
+        self.assertIn("saved", calls)
 
     def test_queue_metrics_and_batch_export_include_completed_artifacts(self):
         tasks = [
