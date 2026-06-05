@@ -181,6 +181,9 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertEqual(blank["final_article"], "")
         self.assertEqual(blank["review_feedback"], "")
         self.assertEqual(blank["article_versions"], [])
+        self.assertEqual(blank["autodrive_last_docx_generated_at"], "")
+        self.assertEqual(blank["autodrive_last_feishu_group_pushed_at"], "")
+        self.assertEqual(blank["autodrive_last_feishu_group_error"], "")
 
     def test_draft_restore_helpers_detect_meaningful_changes(self):
         self.assertFalse(self.helpers.draft_has_meaningful_content({"current_step": 1, "article_url": "", "draft_article": ""}))

@@ -110,7 +110,8 @@ DRAFT_STATE_KEYS = [
     'autodrive_revision_role', 'autodrive_revision_model',
     'autodrive_de_ai_model', 'autodrive_de_ai_variant',
     'autodrive_publish_word', 'autodrive_publish_feishu', 'autodrive_push_feishu_group',
-    'autodrive_last_docx_file_name', 'autodrive_last_docx_generated_at', 'autodrive_last_docx_path'
+    'autodrive_last_docx_file_name', 'autodrive_last_docx_generated_at', 'autodrive_last_docx_path',
+    'autodrive_last_feishu_group_pushed_at', 'autodrive_last_feishu_group_error'
 ]
 
 TASK_TEMPLATE_CONFIG_KEYS = [
@@ -1732,6 +1733,8 @@ def build_blank_task_snapshot(base_snapshot=None):
         "autodrive_last_docx_file_name": "",
         "autodrive_last_docx_generated_at": "",
         "autodrive_last_docx_path": "",
+        "autodrive_last_feishu_group_pushed_at": "",
+        "autodrive_last_feishu_group_error": "",
     }
     for key, value in reset_defaults.items():
         snapshot[key] = clone_json_data(value)
@@ -7582,6 +7585,10 @@ def init_state():
         st.session_state.autodrive_last_docx_generated_at = ""
     if 'autodrive_last_docx_path' not in st.session_state:
         st.session_state.autodrive_last_docx_path = ""
+    if 'autodrive_last_feishu_group_pushed_at' not in st.session_state:
+        st.session_state.autodrive_last_feishu_group_pushed_at = ""
+    if 'autodrive_last_feishu_group_error' not in st.session_state:
+        st.session_state.autodrive_last_feishu_group_error = ""
     if 'selected_role_widget' not in st.session_state:
         st.session_state.selected_role_widget = st.session_state.get('selected_role', '')
     if 'selected_reviewer' not in st.session_state:
@@ -7890,12 +7897,18 @@ def render_task_queue_panel():
             active_snapshot = active_task.get("snapshot", {}) or {}
             active_docx_path = str(active_snapshot.get("autodrive_last_docx_path", "") or "").strip()
             active_docx_name = str(active_snapshot.get("autodrive_last_docx_file_name", "") or "").strip() or "autodrive-output.docx"
+            active_docx_generated_at = str(active_snapshot.get("autodrive_last_docx_generated_at", "") or "").strip()
             active_feishu_url = str(active_snapshot.get("feishu_doc_url", "") or "").strip()
+            active_feishu_title = str(active_snapshot.get("feishu_doc_title", "") or "").strip()
+            active_feishu_published_at = str(active_snapshot.get("feishu_published_at", "") or "").strip()
             active_feishu_error = str(active_snapshot.get("feishu_publish_error", "") or "").strip()
+            active_group_pushed_at = str(active_snapshot.get("autodrive_last_feishu_group_pushed_at", "") or "").strip()
+            active_group_error = str(active_snapshot.get("autodrive_last_feishu_group_error", "") or "").strip()
             active_runtime_error = str(active_task.get("last_run_error", "") or "").strip()
             active_runtime_started_at = str(active_task.get("run_started_at", "") or "").strip()
             active_runtime_finished_at = str(active_task.get("run_finished_at", "") or "").strip()
             active_runtime_log = clone_json_data(active_task.get("runtime_log", []) or [])
+            active_autodrive_config = clone_json_data(active_task.get("autodrive_config_snapshot", {}) or {})
 
             if runtime_state in AUTODRIVE_ACTIVE_RUN_STATES or runtime_state in {"completed", "failed", "cancelled"}:
                 st.markdown("<div class='queue-field-shell'>", unsafe_allow_html=True)
@@ -7977,6 +7990,61 @@ def render_task_queue_panel():
                         st.markdown(f"[打开后台生成的飞书文档]({active_feishu_url})")
                     elif active_feishu_error:
                         st.caption(f"飞书发布：{active_feishu_error}")
+                should_show_delivery_summary = any([
+                    bool(active_docx_generated_at),
+                    bool(active_feishu_url),
+                    bool(active_feishu_error),
+                    bool(active_group_pushed_at),
+                    bool(active_group_error),
+                    runtime_state in {"completed", "failed", "cancelled"},
+                ])
+                if should_show_delivery_summary:
+                    publish_word_enabled = bool(active_autodrive_config.get("publish_word", False))
+                    publish_feishu_enabled = bool(active_autodrive_config.get("publish_feishu", False))
+                    push_group_enabled = bool(active_autodrive_config.get("push_feishu_group", False))
+                    with st.container(border=True):
+                        st.markdown("**后台交付摘要**")
+                        if publish_word_enabled:
+                            if active_docx_generated_at:
+                                docx_summary = f"- **Word**：已生成 `{active_docx_name}`"
+                                if active_docx_generated_at:
+                                    docx_summary += f"（{active_docx_generated_at}）"
+                                st.markdown(docx_summary)
+                            elif runtime_state == "completed":
+                                st.markdown("- **Word**：本轮未生成可下载文件")
+                            else:
+                                st.markdown("- **Word**：等待本轮交付结果")
+                        else:
+                            st.markdown("- **Word**：本轮未启用自动生成")
+
+                        if publish_feishu_enabled:
+                            if active_feishu_url:
+                                feishu_summary = "- **飞书云文档**：已发布"
+                                if active_feishu_title:
+                                    feishu_summary += f"《{active_feishu_title}》"
+                                if active_feishu_published_at:
+                                    feishu_summary += f"（{active_feishu_published_at}）"
+                                st.markdown(feishu_summary)
+                            elif active_feishu_error:
+                                st.markdown(f"- **飞书云文档**：发布失败，{active_feishu_error}")
+                            elif runtime_state == "completed":
+                                st.markdown("- **飞书云文档**：本轮未记录发布结果")
+                            else:
+                                st.markdown("- **飞书云文档**：等待本轮交付结果")
+                        else:
+                            st.markdown("- **飞书云文档**：本轮未启用自动发布")
+
+                        if push_group_enabled:
+                            if active_group_pushed_at:
+                                st.markdown(f"- **飞书群推送**：已完成（{active_group_pushed_at}）")
+                            elif active_group_error:
+                                st.markdown(f"- **飞书群推送**：推送失败，{active_group_error}")
+                            elif runtime_state == "completed":
+                                st.markdown("- **飞书群推送**：本轮未记录推送结果")
+                            else:
+                                st.markdown("- **飞书群推送**：等待本轮交付结果")
+                        else:
+                            st.markdown("- **飞书群推送**：本轮未启用自动推送")
                 if active_runtime_finished_at and runtime_state in {"completed", "failed", "cancelled"}:
                     st.caption(f"最近收尾时间：{active_runtime_finished_at}")
                 if active_runtime_log:
@@ -9514,6 +9582,8 @@ def run_autodrive_phase1(
     st.session_state.autodrive_last_docx_generated_at = ""
     st.session_state.autodrive_last_docx_path = ""
     st.session_state.feishu_publish_error = ""
+    st.session_state.autodrive_last_feishu_group_pushed_at = ""
+    st.session_state.autodrive_last_feishu_group_error = ""
     save_draft()
 
     try:
@@ -9841,10 +9911,17 @@ def run_autodrive_phase1(
                     st.session_state.final_article,
                     st.session_state.spoken_script if st.session_state.spoken_script else None,
                 )
+                st.session_state.autodrive_last_feishu_group_pushed_at = (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S") if push_success else ""
+                )
+                st.session_state.autodrive_last_feishu_group_error = "" if push_success else push_msg
                 if push_success:
                     st.write("飞书群推送成功。")
                 else:
                     st.warning(f"飞书群推送失败：{push_msg}")
+
+            if push_feishu_group:
+                save_draft()
 
             if background_mode:
                 st.session_state.current_step = 6
