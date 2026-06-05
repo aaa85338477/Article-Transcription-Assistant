@@ -8,5 +8,6 @@ draft_state.json
 task_queue_state.json
 ai_diagnostics.log
 runtime_audio/
+runtime_exports/
 .tmp_test_runtime/
 .streamlit/secrets.toml
