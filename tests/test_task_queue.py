@@ -41,6 +41,7 @@ TARGET_FUNCTIONS = {
     "build_task_interrupt_notice",
     "request_background_autodrive_cancel",
     "should_cancel_background_autodrive",
+    "recover_ai_progress_if_needed",
     "delete_task",
     "bulk_delete_tasks",
     "auto_archive_completed_tasks",
@@ -591,6 +592,25 @@ class TaskQueueHelperTests(unittest.TestCase):
 
         self.assertTrue(self.helpers.should_cancel_background_autodrive("T001", "token-bg"))
         self.assertFalse(self.helpers.should_cancel_background_autodrive("T001", "other-token"))
+
+    def test_recover_ai_progress_if_needed_advances_step_to_last_completed_target(self):
+        cleared = []
+        self.helpers.is_ui_preview_mode = lambda: False
+        self.helpers.clear_ai_stage_checkpoint = lambda: cleared.append("cleared")
+        self.helpers.format_ai_stage_name = lambda stage_name: f"阶段:{stage_name}"
+        self.helpers.st.rerun = lambda: None
+        self.helpers.st.session_state.update({
+            "current_step": 5,
+            "last_completed_ai_stage": "de_ai_generation",
+            "last_completed_ai_target_step": 6,
+            "recovered_ai_notice": "",
+        })
+
+        self.helpers.recover_ai_progress_if_needed()
+
+        self.assertEqual(self.helpers.st.session_state["current_step"], 6)
+        self.assertIn("第 6 步", self.helpers.st.session_state["recovered_ai_notice"])
+        self.assertEqual(cleared, ["cleared"])
 
     def test_queue_metrics_and_batch_export_include_completed_artifacts(self):
         tasks = [

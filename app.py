@@ -7777,6 +7777,27 @@ def render_task_queue_panel():
                 selected_filter = st.selectbox("筛选状态", filter_options, key="task_filter_status")
             st.markdown("</div>", unsafe_allow_html=True)
 
+            runtime_state = str(active_task.get("run_state", "") or "idle")
+            runtime_stage = str(active_task.get("run_stage", "") or "")
+            runtime_labels = {
+                "idle": "Idle",
+                "queued": "Queued",
+                "running": "Running",
+                "completed": "Completed",
+                "failed": "Failed",
+                "cancelled": "Cancelled",
+            }
+            stage_labels = {
+                "queued": "Queued",
+                "preflight": "Preflight",
+                "draft": "Draft",
+                "review": "Review",
+                "revision": "Revision",
+                "de_ai": "De-AI",
+                "delivery": "Delivery",
+                "worker": "Worker",
+            }
+
             active_snapshot = active_task.get("snapshot", {}) or {}
             active_docx_path = str(active_snapshot.get("autodrive_last_docx_path", "") or "").strip()
             active_docx_name = str(active_snapshot.get("autodrive_last_docx_file_name", "") or "").strip() or "autodrive-output.docx"
@@ -9654,6 +9675,8 @@ def run_autodrive_phase1(
                 else:
                     st.warning(f"飞书群推送失败：{push_msg}")
 
+            if background_mode:
+                st.session_state.current_step = 6
             save_draft()
             if active_task_id:
                 persist_active_task_snapshot()
@@ -9669,9 +9692,7 @@ def run_autodrive_phase1(
                 )
             status.update(label="全自动驾驶执行完成，即将跳转到交付工作台。", state="complete", expanded=False)
 
-        if background_mode:
-            st.session_state.current_step = 6
-        else:
+        if not background_mode:
             notify_step_completed(defer_until_rerun=True)
             go_to_step(6)
             st.rerun()
