@@ -28,6 +28,8 @@ TARGET_FUNCTIONS = {
     "build_blank_task_snapshot",
     "build_batch_export_markdown",
     "build_autodrive_config_snapshot",
+    "normalize_task_runtime_log",
+    "append_task_runtime_log",
     "build_background_autodrive_launch_payload",
     "is_placeholder_task_name",
     "refresh_task_record",
@@ -40,6 +42,7 @@ TARGET_FUNCTIONS = {
     "is_task_action_blocked",
     "build_task_interrupt_notice",
     "request_background_autodrive_cancel",
+    "retry_background_autodrive_job",
     "should_cancel_background_autodrive",
     "recover_ai_progress_if_needed",
     "delete_task",
@@ -57,6 +60,7 @@ TARGET_ASSIGNMENTS = {
     "PURE_BODY_MARKER",
     "HIGHLIGHT_MARKER",
     "AUTODRIVE_ACTIVE_RUN_STATES",
+    "AUTODRIVE_BACKGROUND_RUNTIME_LOG_LIMIT",
 }
 
 
@@ -400,6 +404,7 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertEqual(refreshed["last_run_error"], "")
         self.assertEqual(refreshed["run_cancel_requested"], False)
         self.assertEqual(refreshed["autodrive_config_snapshot"], {})
+        self.assertEqual(refreshed["runtime_log"], [])
 
     def test_update_task_run_state_tracks_stage_and_config_snapshot(self):
         calls = []
@@ -426,6 +431,7 @@ class TaskQueueHelperTests(unittest.TestCase):
             run_owner_token="token-123",
             started_at="2026-04-23 10:00:00",
             last_run_error="",
+            runtime_log_message="Entering review stage.",
             autodrive_config_snapshot=self.helpers.build_autodrive_config_snapshot({
                 "target_words": 1800,
                 "editor_role": "发行主编",
@@ -457,7 +463,51 @@ class TaskQueueHelperTests(unittest.TestCase):
         self.assertEqual(task_record["autodrive_config_snapshot"]["editor_role"], "发行主编")
         self.assertEqual(task_record["snapshot"]["current_step"], 3)
         self.assertEqual(task_record["snapshot"]["draft_article"], "Updated draft")
+        self.assertEqual(task_record["runtime_log"][-1]["message"], "Entering review stage.")
         self.assertIn("saved", calls)
+
+    def test_update_task_run_state_appends_runtime_log_entries(self):
+        self.helpers.st.session_state.update({
+            "task_queue": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "snapshot": {"current_step": 2, "draft_article": "Draft"},
+                }
+            ],
+            "active_task_id": "T001",
+        })
+
+        updated = self.helpers.update_task_run_state(
+            "T001",
+            run_state="running",
+            run_stage="draft",
+            runtime_log_message="Entering draft stage.",
+            save_queue=False,
+        )
+
+        self.assertTrue(updated)
+        task_record = self.helpers.st.session_state["task_queue"][0]
+        self.assertEqual(len(task_record["runtime_log"]), 1)
+        self.assertEqual(task_record["runtime_log"][0]["stage"], "draft")
+        self.assertEqual(task_record["runtime_log"][0]["state"], "running")
+        self.assertEqual(task_record["runtime_log"][0]["message"], "Entering draft stage.")
+
+    def test_normalize_task_runtime_log_enforces_limit_and_drops_empty_messages(self):
+        raw_entries = [{"timestamp": "2026-04-23 10:00:00", "message": ""}]
+        for index in range(85):
+            raw_entries.append({
+                "timestamp": f"2026-04-23 10:00:{index:02d}",
+                "stage": "draft",
+                "state": "running",
+                "message": f"log-{index}",
+            })
+
+        normalized = self.helpers.normalize_task_runtime_log(raw_entries)
+
+        self.assertEqual(len(normalized), 80)
+        self.assertEqual(normalized[0]["message"], "log-5")
+        self.assertEqual(normalized[-1]["message"], "log-84")
 
     def test_build_background_autodrive_launch_payload_keeps_runtime_inputs(self):
         payload = self.helpers.build_background_autodrive_launch_payload(
@@ -592,6 +642,78 @@ class TaskQueueHelperTests(unittest.TestCase):
 
         self.assertTrue(self.helpers.should_cancel_background_autodrive("T001", "token-bg"))
         self.assertFalse(self.helpers.should_cancel_background_autodrive("T001", "other-token"))
+
+    def test_retry_background_autodrive_job_requeues_failed_task_with_saved_config(self):
+        launches = []
+        self.helpers.start_background_autodrive_job = (
+            lambda task_id, launch_payload, autodrive_config_snapshot=None, task_snapshot=None:
+            launches.append((task_id, launch_payload, autodrive_config_snapshot, task_snapshot)) or (True, "token-bg")
+        )
+        self.helpers.st.session_state.update({
+            "task_queue": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "run_state": "failed",
+                    "autodrive_config_snapshot": {
+                        "editor_role": "发行主编",
+                        "editor_model": "qwen3.6-plus",
+                    },
+                    "snapshot": {
+                        "article_url": "https://example.com/article",
+                        "source_content": "Source body",
+                    },
+                }
+            ],
+        })
+        self.helpers.get_task_by_id = lambda task_id: next(
+            (task for task in self.helpers.st.session_state.get("task_queue", []) if task.get("id") == task_id),
+            None,
+        )
+
+        ok, message = self.helpers.retry_background_autodrive_job("T001", {"api_key": "sk-test"})
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "token-bg")
+        self.assertEqual(len(launches), 1)
+        task_id, launch_payload, config_snapshot, task_snapshot = launches[0]
+        self.assertEqual(task_id, "T001")
+        self.assertEqual(launch_payload["api_key"], "sk-test")
+        self.assertEqual(config_snapshot["editor_role"], "发行主编")
+        self.assertEqual(task_snapshot["source_content"], "Source body")
+
+    def test_retry_background_autodrive_job_rejects_missing_config_or_active_runs(self):
+        self.helpers.start_background_autodrive_job = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not launch"))
+        self.helpers.st.session_state.update({
+            "task_queue": [
+                {
+                    "id": "T001",
+                    "name": "Task One",
+                    "run_state": "running",
+                    "autodrive_config_snapshot": {"editor_role": "发行主编"},
+                    "snapshot": {"source_content": "Source body"},
+                },
+                {
+                    "id": "T002",
+                    "name": "Task Two",
+                    "run_state": "failed",
+                    "autodrive_config_snapshot": {},
+                    "snapshot": {"source_content": "Source body"},
+                },
+            ],
+        })
+        self.helpers.get_task_by_id = lambda task_id: next(
+            (task for task in self.helpers.st.session_state.get("task_queue", []) if task.get("id") == task_id),
+            None,
+        )
+
+        ok_running, message_running = self.helpers.retry_background_autodrive_job("T001", {"api_key": "sk-test"})
+        ok_missing_config, message_missing_config = self.helpers.retry_background_autodrive_job("T002", {"api_key": "sk-test"})
+
+        self.assertFalse(ok_running)
+        self.assertIn("already running", message_running.lower())
+        self.assertFalse(ok_missing_config)
+        self.assertIn("config", message_missing_config.lower())
 
     def test_recover_ai_progress_if_needed_advances_step_to_last_completed_target(self):
         cleared = []

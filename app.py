@@ -982,10 +982,43 @@ def refresh_task_record(task_record, task_snapshot=None):
     task_record["run_cancel_requested"] = bool(task_record.get("run_cancel_requested", False))
     config_snapshot = task_record.get("autodrive_config_snapshot", {})
     task_record["autodrive_config_snapshot"] = clone_json_data(config_snapshot) if isinstance(config_snapshot, dict) else {}
+    runtime_log = task_record.get("runtime_log", [])
+    task_record["runtime_log"] = normalize_task_runtime_log(runtime_log)
     if is_placeholder_task_name(task_record.get("name", "")):
         fallback_name = build_task_fallback_name(task_record.get('id', ''))
         task_record["name"] = build_task_title(snapshot, fallback_name=fallback_name)
     return task_record
+
+
+def normalize_task_runtime_log(runtime_log):
+    normalized = []
+    for entry in runtime_log or []:
+        if not isinstance(entry, dict):
+            continue
+        message = str(entry.get("message", "") or "").strip()
+        if not message:
+            continue
+        normalized.append({
+            "timestamp": str(entry.get("timestamp", "") or "").strip(),
+            "stage": str(entry.get("stage", "") or "").strip(),
+            "state": str(entry.get("state", "") or "").strip(),
+            "message": message,
+        })
+    return normalized[-AUTODRIVE_BACKGROUND_RUNTIME_LOG_LIMIT:]
+
+
+def append_task_runtime_log(runtime_log, message, *, stage="", state=""):
+    clean_message = str(message or "").strip()
+    if not clean_message:
+        return normalize_task_runtime_log(runtime_log)
+    normalized = normalize_task_runtime_log(runtime_log)
+    normalized.append({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "stage": str(stage or "").strip(),
+        "state": str(state or "").strip(),
+        "message": clean_message,
+    })
+    return normalized[-AUTODRIVE_BACKGROUND_RUNTIME_LOG_LIMIT:]
 
 
 def update_task_run_state(
@@ -1000,6 +1033,7 @@ def update_task_run_state(
     last_run_error=None,
     run_cancel_requested=None,
     autodrive_config_snapshot=None,
+    runtime_log_message=None,
     task_snapshot=None,
     save_queue=True,
 ):
@@ -1033,6 +1067,13 @@ def update_task_run_state(
         task_record["run_cancel_requested"] = bool(run_cancel_requested)
     if autodrive_config_snapshot is not None:
         task_record["autodrive_config_snapshot"] = build_autodrive_config_snapshot(autodrive_config_snapshot)
+    if runtime_log_message is not None:
+        task_record["runtime_log"] = append_task_runtime_log(
+            task_record.get("runtime_log", []),
+            runtime_log_message,
+            stage=task_record.get("run_stage", ""),
+            state=task_record.get("run_state", ""),
+        )
 
     if save_queue:
         save_task_queue_state()
@@ -1057,6 +1098,7 @@ def update_task_run_state_on_disk(
     last_run_error=None,
     run_cancel_requested=None,
     autodrive_config_snapshot=None,
+    runtime_log_message=None,
     task_snapshot=None,
 ):
     clean_task_id = str(task_id or "").strip()
@@ -1092,6 +1134,13 @@ def update_task_run_state_on_disk(
         task_record["run_cancel_requested"] = bool(run_cancel_requested)
     if autodrive_config_snapshot is not None:
         task_record["autodrive_config_snapshot"] = build_autodrive_config_snapshot(autodrive_config_snapshot)
+    if runtime_log_message is not None:
+        task_record["runtime_log"] = append_task_runtime_log(
+            task_record.get("runtime_log", []),
+            runtime_log_message,
+            stage=task_record.get("run_stage", ""),
+            state=task_record.get("run_state", ""),
+        )
 
     queue_data["tasks"] = tasks
     queue_data["archived_tasks"] = [item for item in queue_data.get("archived_tasks", []) if isinstance(item, dict)]
@@ -1236,6 +1285,7 @@ def sync_task_queue_runtime_from_disk():
                 "last_run_error",
                 "run_cancel_requested",
                 "autodrive_config_snapshot",
+                "runtime_log",
             )
             for field_name in runtime_fields:
                 local_task[field_name] = clone_json_data(disk_task.get(field_name))
@@ -1381,9 +1431,46 @@ def request_background_autodrive_cancel(task_id):
     update_task_run_state(
         clean_task_id,
         run_cancel_requested=True,
+        runtime_log_message="Cancellation requested; waiting for current stage to finish.",
         task_snapshot=clone_json_data(task_record.get("snapshot", {}) or {}),
     )
     return True, "已请求停止后台自动驾驶，当前阶段完成后会尽快收尾。"
+
+
+def retry_background_autodrive_job(task_id, launch_payload):
+    clean_task_id = str(task_id or "").strip()
+    if not clean_task_id:
+        return False, "Missing task ID."
+
+    task_record = get_task_by_id(clean_task_id)
+    if not task_record:
+        return False, "Task not found."
+
+    runtime_state = str(task_record.get("run_state", "") or "idle")
+    if runtime_state in AUTODRIVE_ACTIVE_RUN_STATES:
+        return False, "This task is already running in background autodrive."
+    if runtime_state not in {"failed", "cancelled"}:
+        return False, "Only failed or cancelled tasks can be retried in background autodrive."
+
+    snapshot = clone_json_data(task_record.get("snapshot", {}) or {})
+    config_snapshot = clone_json_data(task_record.get("autodrive_config_snapshot", {}) or {})
+    if not config_snapshot:
+        return False, "No saved autodrive config was found for this task."
+
+    has_sources = any(
+        str(snapshot.get(field_name, "") or "").strip()
+        for field_name in ("article_url", "video_url", "source_content", "writing_brief_raw", "brief_topic")
+    )
+    has_images = bool(snapshot.get("source_images_all") or snapshot.get("source_images"))
+    if not has_sources and not has_images and not draft_has_meaningful_content(snapshot):
+        return False, "This task does not have enough saved source material to retry."
+
+    return start_background_autodrive_job(
+        clean_task_id,
+        launch_payload,
+        autodrive_config_snapshot=config_snapshot,
+        task_snapshot=snapshot,
+    )
 
 
 def should_cancel_background_autodrive(task_id, run_owner_token):
@@ -1481,6 +1568,7 @@ def _background_autodrive_worker(task_id, run_owner_token, launch_payload):
             finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             last_run_error=f"后台自动驾驶失败：{exc}",
             run_cancel_requested=False,
+            runtime_log_message=f"Worker failed: {exc}",
         )
         raise
     finally:
@@ -1526,6 +1614,7 @@ def start_background_autodrive_job(task_id, launch_payload, autodrive_config_sna
             last_run_error="",
             run_cancel_requested=False,
             autodrive_config_snapshot=autodrive_config_snapshot or {},
+            runtime_log_message="Queued background autodrive job.",
             task_snapshot=snapshot,
         )
         future = get_background_autodrive_executor().submit(
@@ -7806,6 +7895,7 @@ def render_task_queue_panel():
             active_runtime_error = str(active_task.get("last_run_error", "") or "").strip()
             active_runtime_started_at = str(active_task.get("run_started_at", "") or "").strip()
             active_runtime_finished_at = str(active_task.get("run_finished_at", "") or "").strip()
+            active_runtime_log = clone_json_data(active_task.get("runtime_log", []) or [])
 
             if runtime_state in AUTODRIVE_ACTIVE_RUN_STATES or runtime_state in {"completed", "failed", "cancelled"}:
                 st.markdown("<div class='queue-field-shell'>", unsafe_allow_html=True)
@@ -7829,8 +7919,44 @@ def render_task_queue_panel():
                     st.success("当前任务的后台自动驾驶已完成。")
                 elif runtime_state == "failed":
                     st.warning(f"后台自动驾驶失败：{active_runtime_error or '请检查任务日志。'}")
+                    retry_col, retry_hint_col = st.columns([1, 2.2])
+                    with retry_col:
+                        if st.button("后台失败重试", key="retry_background_autodrive_failed", use_container_width=True):
+                            launch_payload = build_background_autodrive_launch_payload(
+                                api_key,
+                                current_base_url,
+                                selected_model,
+                                available_models,
+                                enable_script=enable_script,
+                                script_duration=script_duration,
+                            )
+                            retried, retry_message = retry_background_autodrive_job(active_task_id, launch_payload)
+                            if retried:
+                                st.session_state[TASK_QUEUE_NOTICE_KEY] = "当前任务已重新加入后台自动驾驶。"
+                                st.rerun()
+                            st.warning(retry_message)
+                    with retry_hint_col:
+                        st.caption("会沿用上一轮自动驾驶的配置和素材快照，整轮重跑。")
                 elif runtime_state == "cancelled":
                     st.warning("后台自动驾驶已停止，可继续手动处理或重新发起。")
+                    retry_col, retry_hint_col = st.columns([1, 2.2])
+                    with retry_col:
+                        if st.button("重新加入后台自动驾驶", key="retry_background_autodrive_cancelled", use_container_width=True):
+                            launch_payload = build_background_autodrive_launch_payload(
+                                api_key,
+                                current_base_url,
+                                selected_model,
+                                available_models,
+                                enable_script=enable_script,
+                                script_duration=script_duration,
+                            )
+                            retried, retry_message = retry_background_autodrive_job(active_task_id, launch_payload)
+                            if retried:
+                                st.session_state[TASK_QUEUE_NOTICE_KEY] = "当前任务已重新加入后台自动驾驶。"
+                                st.rerun()
+                            st.warning(retry_message)
+                    with retry_hint_col:
+                        st.caption("会沿用上一轮自动驾驶的配置和素材快照，整轮重跑。")
 
                 result_cols = st.columns([1, 1.2])
                 with result_cols[0]:
@@ -7853,6 +7979,18 @@ def render_task_queue_panel():
                         st.caption(f"飞书发布：{active_feishu_error}")
                 if active_runtime_finished_at and runtime_state in {"completed", "failed", "cancelled"}:
                     st.caption(f"最近收尾时间：{active_runtime_finished_at}")
+                if active_runtime_log:
+                    with st.expander("后台运行日志摘要", expanded=False):
+                        for entry in reversed(active_runtime_log[-6:]):
+                            timestamp = str(entry.get("timestamp", "") or "").strip()
+                            stage = str(entry.get("stage", "") or "").strip()
+                            message = str(entry.get("message", "") or "").strip()
+                            if not message:
+                                continue
+                            prefix = f"`{timestamp}` " if timestamp else ""
+                            if stage:
+                                prefix += f"[{stage}] "
+                            st.markdown(f"- {prefix}{message}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
             reverse_status_map = {label: key for key, label in TASK_STATUS_LABELS.items()}
@@ -9283,6 +9421,7 @@ def run_autodrive_phase1(
             finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             last_run_error="",
             run_cancel_requested=False,
+            runtime_log_message=f"Autodrive cancelled after {stage_label}.",
             task_snapshot=build_draft_data(),
         )
         return True
@@ -9332,6 +9471,7 @@ def run_autodrive_phase1(
             last_run_error="",
             run_cancel_requested=False,
             autodrive_config_snapshot=build_autodrive_config_snapshot(normalized),
+            runtime_log_message="Background autodrive started.",
             task_snapshot=build_draft_data(),
         )
 
@@ -9344,6 +9484,7 @@ def run_autodrive_phase1(
                 run_owner_token=run_owner_token,
                 finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 last_run_error="当前任务还没有可用的素材正文，无法启动全自动驾驶。",
+                runtime_log_message="Autodrive failed: no usable source content was available.",
                 task_snapshot=build_draft_data(),
             )
         st.error("当前任务还没有可用的素材正文，无法启动全自动驾驶。")
@@ -9384,7 +9525,13 @@ def run_autodrive_phase1(
 
             current_run_stage = "draft"
             if active_task_id:
-                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+                update_task_run_state(
+                    active_task_id,
+                    run_state="running",
+                    run_stage=current_run_stage,
+                    run_owner_token=run_owner_token,
+                    runtime_log_message="Entering draft stage.",
+                )
             if cancel_if_requested(current_run_stage):
                 return True
             mark_ai_stage_started("draft_generation")
@@ -9441,7 +9588,13 @@ def run_autodrive_phase1(
 
             current_run_stage = "review"
             if active_task_id:
-                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+                update_task_run_state(
+                    active_task_id,
+                    run_state="running",
+                    run_stage=current_run_stage,
+                    run_owner_token=run_owner_token,
+                    runtime_log_message="Entering review stage.",
+                )
             if cancel_if_requested(current_run_stage):
                 return True
             mark_ai_stage_started("review_generation")
@@ -9477,7 +9630,13 @@ def run_autodrive_phase1(
 
             current_run_stage = "revision"
             if active_task_id:
-                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+                update_task_run_state(
+                    active_task_id,
+                    run_state="running",
+                    run_stage=current_run_stage,
+                    run_owner_token=run_owner_token,
+                    runtime_log_message="Entering revision stage.",
+                )
             if cancel_if_requested(current_run_stage):
                 return True
             mark_ai_stage_started("modification_generation")
@@ -9533,7 +9692,13 @@ def run_autodrive_phase1(
 
             current_run_stage = "de_ai"
             if active_task_id:
-                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+                update_task_run_state(
+                    active_task_id,
+                    run_state="running",
+                    run_stage=current_run_stage,
+                    run_owner_token=run_owner_token,
+                    runtime_log_message="Entering de-AI stage.",
+                )
             if cancel_if_requested(current_run_stage):
                 return True
             mark_ai_stage_started("de_ai_generation")
@@ -9629,7 +9794,13 @@ def run_autodrive_phase1(
 
             current_run_stage = "delivery"
             if active_task_id:
-                update_task_run_state(active_task_id, run_state="running", run_stage=current_run_stage, run_owner_token=run_owner_token)
+                update_task_run_state(
+                    active_task_id,
+                    run_state="running",
+                    run_stage=current_run_stage,
+                    run_owner_token=run_owner_token,
+                    runtime_log_message="Entering delivery stage.",
+                )
             if cancel_if_requested(current_run_stage):
                 return True
             if publish_word:
@@ -9688,6 +9859,7 @@ def run_autodrive_phase1(
                     finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     last_run_error="",
                     run_cancel_requested=False,
+                    runtime_log_message="Background autodrive completed.",
                     task_snapshot=build_draft_data(),
                 )
             status.update(label="全自动驾驶执行完成，即将跳转到交付工作台。", state="complete", expanded=False)
@@ -9710,6 +9882,7 @@ def run_autodrive_phase1(
                 finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 last_run_error=st.session_state.last_ai_error,
                 run_cancel_requested=False,
+                runtime_log_message=f"Autodrive failed in {current_run_stage}: {exc}",
                 task_snapshot=build_draft_data(),
             )
         st.error(f"全自动驾驶执行失败：{exc}")
